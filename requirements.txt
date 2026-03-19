@@ -1,0 +1,33 @@
+# Python 依赖
+# 安装: pip install -r requirements.txt
+# 环境要求: Python 3.10+, CUDA 12.2, NVIDIA Driver 535.230.02+
+
+# 深度学习 - 适配 CUDA 12.2
+torch==2.1.2+cu121
+numpy==1.24.3
+
+# 数据处理
+pandas==2.0.3
+scikit-learn==1.3.0
+
+# Web 服务
+flask==2.3.3
+requests==2.31.0
+werkzeug==2.3.7
+
+# 工具
+tqdm==4.66.1
+tensorboard==2.14.0
+
+# ONNX 导出
+onnx==1.15.0
+onnxruntime-gpu==1.16.3
+
+# TensorRT-LLM 1.0.0 (CUDA 12.2)
+# 安装方式: pip install tensorrt-llm==1.0.0 --extra-index-url https://pypi.nvidia.com
+# 注意: TensorRT-LLM 1.0.0 需要 CUDA 12.2 和 Python 3.10+
+tensorrt-llm==1.0.0
+
+# 额外依赖
+pyyaml==6.0.1
+psutil==5.9.5

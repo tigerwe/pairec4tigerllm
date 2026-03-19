@@ -1,0 +1,41 @@
+# 生成式召回配置
+# TensorRT-LLM 推理服务配置
+
+# 服务配置
+server_url: "http://localhost:8000"
+timeout: 500ms
+max_retries: 3
+max_batch_size: 32
+
+# 推理参数
+topk: 50
+temperature: 1.0
+beam_width: 1
+
+# 特征配置
+history_from: "user_feature"  # 或 "context"
+history_feature_name: "click_history"
+history_delimiter: ","
+history_max_length: 20
+
+# 缓存配置
+cache_enable: true
+cache_type: "local"  # 或 "redis"
+cache_time: 300  # 秒
+cache_prefix: "gen_recall_"
+
+# 模型配置
+model:
+  vocab_size: 256
+  num_quantizers: 4
+  embedding_dim: 256
+  num_layers: 6
+  num_heads: 8
+  max_seq_len: 512
+
+# 路径配置
+paths:
+  rqvae_model: "./checkpoints/rqvae/rqvae_best.pt"
+  decoder_model: "./checkpoints/decoder/decoder_best.pt"
+  semantic_id_mapping: "./exported/rqvae/rqvae_semantic_ids.json"
+  trt_engine: "./exported/decoder/decoder.engine"

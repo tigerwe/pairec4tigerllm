@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  # TensorRT-LLM 推理服务
+  inference:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: pairec4tigerllm:latest
+    container_name: pairec-inference
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./checkpoints:/app/checkpoints
+      - ./exported:/app/exported
+      - ./logs:/app/logs
+    command: >
+      bash -c "
+        echo 'Waiting for model files...' &&
+        sleep 5 &&
+        python inference/trt_llm/server.py
+          --model_path ./checkpoints/decoder/decoder_best.pt
+          --port 8000
+          --device cuda
+          --max_batch_size 32
+          --max_seq_len 512
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - pairec-network
+
+  # pairec 推荐服务
+  pairec:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: pairec4tigerllm:latest
+    container_name: pairec-service
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+    command: >
+      bash -c "
+        echo 'Waiting for inference service...' &&
+        sleep 10 &&
+        go run services/main.go
+          --config ./configs/pairec_config.json
+          --port 8080
+      "
+    depends_on:
+      inference:
+        condition: service_healthy
+    networks:
+      - pairec-network
+
+  # TensorBoard (可选)
+  tensorboard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: pairec4tigerllm:latest
+    container_name: pairec-tensorboard
+    ports:
+      - "6006:6006"
+    volumes:
+      - ./logs:/app/logs
+    command: tensorboard --logdir=/app/logs --port=6006 --host=0.0.0.0
+    networks:
+      - pairec-network
+
+networks:
+  pairec-network:
+    driver: bridge
