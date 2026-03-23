@@ -29,7 +29,8 @@ def train_rqvae(
     checkpoint_dir: str = './checkpoints',
     log_dir: str = './logs',
     save_interval: int = 10,
-    patience: int = 10
+    patience: int = 10,
+    config: dict = None
 ) -> RQVAE:
     """训练 RQ-VAE 模型.
 
@@ -56,10 +57,7 @@ def train_rqvae(
     # 设备设置
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
-    train_data = train_data.to(device)
-    if val_data is not None:
-        val_data = val_data.to(device)
-
+    # 数据保留在 CPU，每个 batch 再传到 GPU
     print(f"Training on device: {device}")
     print(f"Train data shape: {train_data.shape}")
 
@@ -96,6 +94,9 @@ def train_rqvae(
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}")
 
         for batch_idx, (batch_data,) in enumerate(progress_bar):
+            # 将 batch 数据移到 GPU
+            batch_data = batch_data.to(device)
+            
             # 前向传播
             reconstructed, quantized, ids_distributions, ids_indices = model(batch_data)
 
@@ -136,10 +137,19 @@ def train_rqvae(
         if val_data is not None:
             model.eval()
             with torch.no_grad():
-                reconstructed, quantized, ids_distributions, _ = model(val_data)
-                val_loss, val_loss_dict = model.compute_loss(
-                    val_data, reconstructed, quantized, ids_distributions
-                )
+                # 分批验证避免 OOM
+                val_batch_size = min(1024, len(val_data))
+                val_losses = []
+                for i in range(0, len(val_data), val_batch_size):
+                    val_batch = val_data[i:i+val_batch_size].to(device)
+                    reconstructed, quantized, ids_distributions, _ = model(val_batch)
+                    v_loss, v_loss_dict = model.compute_loss(
+                        val_batch, reconstructed, quantized, ids_distributions
+                    )
+                    val_losses.append(v_loss_dict['total_loss'])
+                
+                avg_val_loss = sum(val_losses) / len(val_losses)
+                val_loss_dict = {'total_loss': avg_val_loss}
 
             avg_val_loss = val_loss_dict['total_loss']
             print(f"Epoch {epoch + 1} - Val Loss: {avg_val_loss:.4f}")
@@ -158,12 +168,15 @@ def train_rqvae(
 
                 # 保存最佳模型
                 best_model_path = os.path.join(checkpoint_dir, 'rqvae_best.pt')
-                torch.save({
+                save_dict = {
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': best_val_loss,
-                }, best_model_path)
+                }
+                if config is not None:
+                    save_dict['config'] = config
+                torch.save(save_dict, best_model_path)
                 print(f"Best model saved to {best_model_path}")
             else:
                 epochs_no_improve += 1
@@ -175,12 +188,15 @@ def train_rqvae(
         # 定期保存检查点
         if (epoch + 1) % save_interval == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f'rqvae_epoch_{epoch + 1}.pt')
-            torch.save({
+            save_dict = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': avg_train_loss,
-            }, checkpoint_path)
+            }
+            if config is not None:
+                save_dict['config'] = config
+            torch.save(save_dict, checkpoint_path)
             print(f"Checkpoint saved to {checkpoint_path}")
 
     writer.close()
@@ -198,7 +214,7 @@ def main():
                         help='Directory to save checkpoints')
     parser.add_argument('--log_dir', type=str, default='./logs/rqvae',
                         help='Directory for tensorboard logs')
-    parser.add_argument('--input_dim', type=int, default=1,
+    parser.add_argument('--input_dim', type=int, default=14,
                         help='Input feature dimension')
     parser.add_argument('--embedding_dim', type=int, default=64,
                         help='Embedding dimension')
@@ -245,6 +261,15 @@ def main():
 
     print(f"Train samples: {len(train_data)}, Val samples: {num_val}")
 
+    # 创建配置字典
+    config = {
+        'input_dim': args.input_dim,
+        'embedding_dim': args.embedding_dim,
+        'hidden_dims': args.hidden_dims,
+        'num_quantizers': args.num_quantizers,
+        'codebook_size': args.codebook_size,
+    }
+
     # 创建模型
     model = RQVAE(
         input_dim=args.input_dim,
@@ -267,7 +292,8 @@ def main():
         weight_decay=args.weight_decay,
         device=args.device,
         checkpoint_dir=args.checkpoint_dir,
-        log_dir=args.log_dir
+        log_dir=args.log_dir,
+        config=config
     )
 
 

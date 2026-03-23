@@ -9,7 +9,7 @@ echo "========================================="
 
 # 默认参数
 MODEL_PATH="${MODEL_PATH:-./checkpoints/decoder/decoder_best.pt}"
-PORT="${PORT:-8000}"
+PORT="${PORT:-18000}"
 DEVICE="${DEVICE:-cuda}"
 MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-32}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-512}"

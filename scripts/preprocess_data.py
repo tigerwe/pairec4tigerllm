@@ -41,8 +41,24 @@ def load_rqvae_model(model_path: str, device: str = 'cuda'):
             print(f"   RQ-VAE 模型不存在: {model_path}")
             return None
         
+        # 加载到指定设备
+        device = torch.device(device if torch.cuda.is_available() else 'cpu')
         checkpoint = torch.load(model_path, map_location=device)
-        config = checkpoint['config']
+        
+        # 尝试从 checkpoint 获取 config，如果没有则使用默认配置
+        if 'config' in checkpoint:
+            config = checkpoint['config']
+            print(f"   从 checkpoint 加载 config")
+        else:
+            print(f"   警告: checkpoint 中没有 config，使用默认配置")
+            # 根据当前特征维度推断（14维）
+            config = {
+                'input_dim': 14,
+                'embedding_dim': 64,
+                'hidden_dims': [256, 128],
+                'num_quantizers': 4,
+                'codebook_size': 256
+            }
         
         model = RQVAE(
             input_dim=config['input_dim'],
@@ -56,9 +72,13 @@ def load_rqvae_model(model_path: str, device: str = 'cuda'):
         model.eval()
         
         print(f"   RQ-VAE 模型加载成功: {model_path}")
+        print(f"   Config: input_dim={config['input_dim']}, embedding_dim={config['embedding_dim']}")
+        print(f"   Device: {device}")
         return model
     except Exception as e:
         print(f"   加载 RQ-VAE 模型失败: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -86,10 +106,45 @@ def generate_semantic_ids(
         print("   使用 RQ-VAE 生成语义 ID...")
         import torch
         
+        # 分批处理避免 OOM
+        batch_size = 10000  # 每批处理 1 万个物品
+        num_items = len(item_ids)
+        all_semantic_ids = []
+        
+        # 检查 GPU 显存是否充足，否则使用 CPU
+        device = next(rqvae_model.parameters()).device
+        if device.type == 'cuda':
+            # 检查可用显存
+            free_memory = torch.cuda.get_device_properties(0).total_memory
+            for i in range(torch.cuda.device_count()):
+                free_memory = min(free_memory, torch.cuda.memory_reserved(i) - torch.cuda.memory_allocated(i))
+            # 如果可用显存少于 2GB，切换到 CPU
+            if free_memory < 2 * 1024**3:
+                print(f"   GPU 显存不足，切换到 CPU 模式（会慢一些）...")
+                device = torch.device('cpu')
+                rqvae_model = rqvae_model.cpu()
+        
         with torch.no_grad():
-            features = torch.from_numpy(item_features).float().to(rqvae_model.device)
-            semantic_ids = rqvae_model.get_semantic_ids(features)
-            semantic_ids = semantic_ids.cpu().numpy()
+            for start_idx in range(0, num_items, batch_size):
+                end_idx = min(start_idx + batch_size, num_items)
+                batch_features = item_features[start_idx:end_idx]
+                
+                # 将当前批次移到设备
+                batch_tensor = torch.from_numpy(batch_features).float().to(device)
+                batch_semantic_ids = rqvae_model.get_semantic_ids(batch_tensor)
+                all_semantic_ids.append(batch_semantic_ids.cpu().numpy())
+                
+                # 打印进度
+                if (start_idx // batch_size) % 10 == 0 or end_idx == num_items:
+                    print(f"     Progress: {end_idx}/{num_items} ({end_idx/num_items*100:.1f}%)")
+                
+                # 释放内存
+                del batch_tensor, batch_semantic_ids
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+        
+        # 合并所有批次的结果
+        semantic_ids = np.concatenate(all_semantic_ids, axis=0)
         
         for i, item_id in enumerate(item_ids):
             transformed_id = preprocessor.transform_item_id(item_id)
@@ -184,7 +239,7 @@ def preprocess_tenrec_data(
 
     # 5. 创建 RQ-VAE 训练数据
     print("\n5. Creating RQ-VAE training data...")
-    item_features = preprocessor.create_rqvae_training_data(user_sequences)
+    item_features = preprocessor.create_rqvae_training_data(user_sequences, df=df)
 
     # 保存 RQ-VAE 训练数据
     rqvae_data_path = os.path.join(output_dir, 'rqvae_train_data.npy')
@@ -210,10 +265,11 @@ def preprocess_tenrec_data(
         item_features if rqvae_model is not None else None
     )
     
-    # 保存语义 ID 映射
+    # 保存语义 ID 映射（转换 numpy 类型为 Python 原生类型）
     semantic_map_path = os.path.join(output_dir, 'semantic_id_map.json')
+    semantic_id_map_converted = {int(k): [int(x) for x in v] for k, v in semantic_id_map.items()}
     with open(semantic_map_path, 'w', encoding='utf-8') as f:
-        json.dump(semantic_id_map, f, ensure_ascii=False, indent=2)
+        json.dump(semantic_id_map_converted, f, ensure_ascii=False, indent=2)
     print(f"   Saved semantic ID map to: {semantic_map_path}")
     
     # 保存为 CSV 格式（便于查看）
@@ -248,11 +304,14 @@ def preprocess_tenrec_data(
                 if sem_id is None:
                     # 回退到哈希方式
                     sem_id = [
-                        item_id % 256,
-                        (item_id // 256) % 256,
-                        (item_id // 65536) % 256,
-                        (item_id // 16777216) % 256,
+                        int(item_id % 256),
+                        int((item_id // 256) % 256),
+                        int((item_id // 65536) % 256),
+                        int((item_id // 16777216) % 256),
                     ]
+                else:
+                    # 确保语义 ID 是 Python 原生 int 类型
+                    sem_id = [int(x) for x in sem_id]
                 semantic_seq.append(sem_id)
 
             semantic_sequences.append(semantic_seq)

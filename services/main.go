@@ -6,48 +6,50 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
 	"github.com/alibaba/pairec/v2"
-	"github.com/alibaba/pairec/v2/log"
+	"github.com/alibaba/pairec/v2/recconf"
+	"github.com/alibaba/pairec/v2/service/recall"
 
-	_ "pairec4tigerllm/services/recall"
-)
-
-var (
-	configPath = flag.String("config", "./configs/pairec_config.json", "Path to config file")
-	port       = flag.Int("port", 8080, "HTTP service port")
+	myrecall "pairec4tigerllm/services/recall"
 )
 
 func main() {
-	flag.Parse()
+	fmt.Println("========PAIREC STARING===============")
+	
+	// 设置配置路径（环境变量或默认）
+	configPath := os.Getenv("CONFIG_PATH")
+	if configPath == "" {
+		configPath = "../configs/pairec_config.json"
+	}
 
-	// 检查配置文件
-	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
-		log.Error(fmt.Sprintf("Config file not found: %s", *configPath))
+	fmt.Printf("Loading config from: %s\n", configPath)
+
+	// 1. 先加载配置
+	if err := recconf.LoadConfig(configPath); err != nil {
+		fmt.Printf("Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
 
-	log.Info(fmt.Sprintf("Starting pairec4tigerllm service..."))
-	log.Info(fmt.Sprintf("Config: %s, Port: %d", *configPath, *port))
+	fmt.Printf("Config loaded. Found %d recall configs\n", len(recconf.Config.RecallConfs))
 
-	// 创建 pairec 应用
-	app := pairec.NewApp()
-
-	// 加载配置
-	if err := app.LoadConfig(*configPath); err != nil {
-		log.Error(fmt.Sprintf("Failed to load config: %v", err))
-		os.Exit(1)
+	// 2. 注册自定义召回（必须在 pairec.Run 之前）
+	for _, conf := range recconf.Config.RecallConfs {
+		fmt.Printf("Checking recall: name=%s, type=%s\n", conf.Name, conf.RecallType)
+		if conf.RecallType == "GenerativeRecall" {
+			fmt.Printf("Registering GenerativeRecall: %s\n", conf.Name)
+			instance := myrecall.NewGenerativeRecall(conf)
+			recall.RegisterRecall(conf.Name, instance)
+			fmt.Printf("[DEBUG] Registered recall: name=%s, instance=%p\n", conf.Name, instance)
+		}
 	}
+	
+	// 验证注册是否成功
+	fmt.Println("[DEBUG] All recalls registered, starting pairec...")
 
-	// 设置端口
-	app.SetPort(*port)
-
-	// 启动服务
-	if err := app.Start(); err != nil {
-		log.Error(fmt.Sprintf("Failed to start service: %v", err))
-		os.Exit(1)
-	}
+	// 3. 启动 pairec
+	fmt.Println("Starting pairec service...")
+	pairec.Run()
 }

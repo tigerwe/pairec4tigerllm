@@ -8,8 +8,8 @@ echo "Training Decoder Model"
 echo "========================================="
 
 # 默认参数
-TRAIN_DATA="${TRAIN_DATA:-./data/tenrec/train_sequences.json}"
-VAL_DATA="${VAL_DATA:-./data/tenrec/val_sequences.json}"
+TRAIN_DATA="${TRAIN_DATA:-./data/tenrec/processed/train_sequences.json}"
+VAL_DATA="${VAL_DATA:-./data/tenrec/processed/test_sequences.json}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-./checkpoints/decoder}"
 LOG_DIR="${LOG_DIR:-./logs/decoder}"
 

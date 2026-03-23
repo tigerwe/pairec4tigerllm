@@ -29,7 +29,7 @@ class ResidualVectorQuantizer(nn.Module):
         num_layers: int = 4,
         codebook_size: int = 256,
         embedding_dim: int = 64,
-        commitment_cost: float = 0.25,
+        commitment_cost: float = 1.0,  # 0.25->1.0，增加承诺损失权重
         temperature: float = 0.5
     ):
         """初始化量化器.
@@ -260,7 +260,7 @@ class RQVAE(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 1,
+        input_dim: int = 14,
         embedding_dim: int = 64,
         hidden_dims: List[int] = [256, 128],
         num_quantizers: int = 4,

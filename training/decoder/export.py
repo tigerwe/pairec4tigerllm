@@ -12,7 +12,10 @@ from typing import Dict
 import torch
 import numpy as np
 
-from .model import GenerativeDecoder
+try:
+    from training.decoder.model import GenerativeDecoder
+except ImportError:
+    from .model import GenerativeDecoder
 
 
 class DecoderExportWrapper(torch.nn.Module):
@@ -122,9 +125,11 @@ def export_decoder(
     onnx_step_path = os.path.join(output_dir, f'{model_name}_step.onnx')
 
     step_wrapper = DecoderGenerationWrapper(model)
+    # 使用模型自身的 max_seq_len，避免与 causal_mask 尺寸不匹配
+    model_max_seq_len = model.max_seq_len
     dummy_step_input = torch.randint(
         0, model.vocab_size,
-        (1, max_seq_len, model.num_quantizers),
+        (1, model_max_seq_len, model.num_quantizers),
         dtype=torch.long,
         device=device
     )

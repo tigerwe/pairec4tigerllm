@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alibaba/pairec/v2/persist/cache"
 	"github.com/alibaba/pairec/v2/context"
 	"github.com/alibaba/pairec/v2/log"
 	"github.com/alibaba/pairec/v2/module"
@@ -23,6 +24,15 @@ import (
 
 	"pairec4tigerllm/services/config"
 )
+
+// 调试日志函数
+func writeDebugLog(format string, args ...interface{}) {
+	f, _ := os.OpenFile("/tmp/recall_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if f != nil {
+		fmt.Fprintf(f, format+"\n", args...)
+		f.Close()
+	}
+}
 
 // semanticIDMap 全局语义 ID 映射缓存
 var (
@@ -36,6 +46,8 @@ var (
 type GenerativeRecall struct {
 	*recall.BaseRecall
 	client             *TRTLLMClient
+	modelName          string        // 自己保存 modelName
+	itemType           string        // 自己保存 itemType
 	historyFrom        string
 	historyFeatureName string
 	historyDelimiter   string
@@ -46,32 +58,57 @@ type GenerativeRecall struct {
 	cachePrefix        string
 	cacheTime          int
 	semanticIDMapPath  string
+	cache              cache.Cache // 自己管理缓存
+}
+
+// recallConfigJSON 用于从 RecallAlgo 字段解析配置
+type recallConfigJSON struct {
+	ServerURL          string  `json:"server_url"`
+	TopK               int     `json:"topk"`
+	Temperature        float64 `json:"temperature"`
+	BeamWidth          int     `json:"beam_width"`
+	HistoryFrom        string  `json:"history_from"`
+	HistoryFeatureName string  `json:"history_feature_name"`
+	HistoryDelimiter   string  `json:"history_delimiter"`
+	HistoryMaxLength   int     `json:"history_max_length"`
 }
 
 // NewGenerativeRecall 创建生成式召回实例.
 func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
-	// 从 TigerRecallConf 解析配置
-	// 注意：TigerName 在这里被用作 ServerURL
-	serverURL := conf.TigerRecallConf.TigerName
-	if serverURL == "" {
-		serverURL = "http://localhost:8000"
+	writeDebugLog(" NewGenerativeRecall called, name=%s, RecallAlgo=%s\n", 
+		conf.Name, conf.RecallAlgo)
+	
+	// 从 RecallAlgo 字段解析 JSON 配置
+	var algoConf recallConfigJSON
+	var genConfig *config.GenerativeRecallConfig
+	
+	if conf.RecallAlgo != "" {
+		if err := json.Unmarshal([]byte(conf.RecallAlgo), &algoConf); err == nil {
+			writeDebugLog(" Parsed RecallAlgo: server_url=%s, history_feature_name=%s\n",
+				algoConf.ServerURL, algoConf.HistoryFeatureName)
+			genConfig = &config.GenerativeRecallConfig{
+				ServerURL:          algoConf.ServerURL,
+				TopK:               algoConf.TopK,
+				Temperature:        algoConf.Temperature,
+				BeamWidth:          algoConf.BeamWidth,
+				HistoryFrom:        algoConf.HistoryFrom,
+				HistoryFeatureName: algoConf.HistoryFeatureName,
+				HistoryDelimiter:   algoConf.HistoryDelimiter,
+				HistoryMaxLength:   algoConf.HistoryMaxLength,
+				CacheEnable:        conf.CacheAdapter != "",
+				CacheTime:          conf.CacheTime,
+				CachePrefix:        conf.CachePrefix,
+			}
+		}
 	}
-
-	// 创建配置
-	genConfig := &config.GenerativeRecallConfig{
-		ServerURL:          serverURL,
-		Timeout:            500 * time.Millisecond, // 默认 500ms
-		MaxRetries:         3,                      // 默认 3 次重试
-		TopK:               conf.TigerRecallConf.TopK,
-		Temperature:        conf.TigerRecallConf.Temperature,
-		BeamWidth:          conf.TigerRecallConf.BeamWidth,
-		HistoryFrom:        conf.TigerRecallConf.HistoryFrom,
-		HistoryFeatureName: conf.TigerRecallConf.HistoryFeatureName,
-		HistoryDelimiter:   conf.TigerRecallConf.HistoryDelimiter,
-		HistoryMaxLength:   conf.TigerRecallConf.HistoryMaxLength,
-		CacheEnable:        conf.CacheAdapter != "",
-		CacheTime:          conf.CacheTime,
-		CachePrefix:        conf.CachePrefix,
+	
+	// 如果解析失败，使用默认配置
+	if genConfig == nil {
+		writeDebugLog(" Using default config\n")
+		genConfig = config.DefaultGenerativeRecallConfig()
+		genConfig.CacheEnable = conf.CacheAdapter != ""
+		genConfig.CacheTime = conf.CacheTime
+		genConfig.CachePrefix = conf.CachePrefix
 	}
 
 	// 与默认配置合并
@@ -86,19 +123,29 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 	}
 
 	// 创建客户端
+	writeDebugLog(" Creating TRTLLMClient with server_url=%s\n", genConfig.ServerURL)
 	client, err := NewTRTLLMClient(genConfig)
 	if err != nil {
 		// 客户端创建失败时 panic，在服务启动时就能发现问题
 		panic(fmt.Sprintf("failed to create TRTLLMClient: %v", err))
 	}
+	writeDebugLog(" TRTLLMClient created successfully\n")
 
 	// 加载语义 ID 映射
-	semanticIDMapPath := "./data/tenrec/processed/semantic_id_map.json"
+	semanticIDMapPath := "../data/tenrec/processed/semantic_id_map.json"
 	loadSemanticIDMap(semanticIDMapPath)
+
+	// 初始化缓存
+	var c cache.Cache
+	if conf.CacheAdapter != "" {
+		c, _ = cache.NewCache(conf.CacheAdapter, conf.CacheConfig)
+	}
 
 	// 创建召回实例
 	recallInstance := &GenerativeRecall{
 		BaseRecall:         recall.NewBaseRecall(conf),
+		modelName:          conf.Name,
+		itemType:           conf.ItemType,
 		client:             client,
 		historyFrom:        genConfig.HistoryFrom,
 		historyFeatureName: genConfig.HistoryFeatureName,
@@ -110,7 +157,11 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 		cachePrefix:        genConfig.CachePrefix,
 		cacheTime:          genConfig.CacheTime,
 		semanticIDMapPath:  semanticIDMapPath,
+		cache:              c,
 	}
+	
+	writeDebugLog(" GenerativeRecall instance created: name=%s, historyFeatureName=%s, topK=%d\n",
+		recallInstance.modelName, recallInstance.historyFeatureName, recallInstance.topK)
 
 	return recallInstance
 }
@@ -151,6 +202,14 @@ func loadSemanticIDMap(path string) {
 // 这是召回服务的核心方法，由 pairec 框架调用.
 func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.RecommendContext) []*module.Item {
 	start := time.Now()
+	
+	// 调试日志 - 输出到文件
+	f, _ := os.OpenFile("/tmp/recall_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if f != nil {
+		fmt.Fprintf(f, "[DEBUG] GetCandidateItems called, user=%s, modelName=%s\n", user.Id, r.modelName)
+		f.Close()
+	}
+	writeDebugLog(" GetCandidateItems called, user=%s\n", user.Id)
 
 	// 尝试从缓存获取
 	if r.cache != nil {
@@ -162,13 +221,25 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 			return items
 		}
 	}
+	
+	writeDebugLog("[DEBUG] Cache miss or empty, getting user history")
 
 	// 获取用户历史行为
 	history, err := r.getUserHistory(user, ctx)
 	if err != nil {
+		writeDebugLog(" getUserHistory error: %v\n", err)
 		log.Error(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tname=%s\terr=get_user_history:%v",
 			ctx.RecommendId, r.modelName, err))
 		return nil
+	}
+	
+	writeDebugLog(" Got history, len=%d\n", len(history))
+	
+	// 限制历史长度，避免超过模型 max_seq_len (50)
+	// 留 1 个位置给特殊 token，所以最多 49 条
+	if len(history) > 49 {
+		history = history[len(history)-49:]
+		writeDebugLog("[DEBUG] History truncated to len=%d", len(history))
 	}
 
 	if len(history) == 0 {
@@ -193,13 +264,18 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		Temperature: r.temperature,
 		BeamWidth:   r.beamWidth,
 	}
+	
+	writeDebugLog(" Calling inference service, history=%v\n", semanticHistory)
 
 	response, err := r.client.Recommend(request)
 	if err != nil {
+		writeDebugLog(" Inference error: %v\n", err)
 		log.Error(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tname=%s\terr=generative_recommend:%v",
 			ctx.RecommendId, r.modelName, err))
 		return nil
 	}
+	
+	writeDebugLog(" Got response, recommendations=%d\n", len(response.Recommendations))
 
 	// 转换结果为 pairec Item
 	items := r.convertToItems(response)
@@ -227,18 +303,46 @@ func (r *GenerativeRecall) getUserHistory(user *module.User, ctx *context.Recomm
 	}
 }
 
+// userFeaturesCache 缓存用户特征
+var userFeaturesCache map[string]map[string]interface{}
+var userFeaturesCacheOnce sync.Once
+
+// loadUserFeatures 加载用户特征文件
+func loadUserFeatures() {
+	userFeaturesCacheOnce.Do(func() {
+		userFeaturesCache = make(map[string]map[string]interface{})
+		data, err := os.ReadFile("../data/user_features.json")
+		if err != nil {
+			log.Error(fmt.Sprintf("Failed to load user features: %v", err))
+			return
+		}
+		if err := json.Unmarshal(data, &userFeaturesCache); err != nil {
+			log.Error(fmt.Sprintf("Failed to parse user features: %v", err))
+			return
+		}
+		log.Info(fmt.Sprintf("Loaded user features: %d users", len(userFeaturesCache)))
+	})
+}
+
 // getHistoryFromUserFeature 从用户特征获取历史.
 func (r *GenerativeRecall) getHistoryFromUserFeature(user *module.User) ([]int, error) {
+	loadUserFeatures()
+	
 	if r.historyFeatureName == "" {
 		return nil, fmt.Errorf("history_feature_name is empty")
 	}
 
-	val := user.GetProperty(r.historyFeatureName)
-	if val == nil {
-		return nil, fmt.Errorf("feature %s not found", r.historyFeatureName)
+	// 从文件缓存获取
+	userData, ok := userFeaturesCache[string(user.Id)]
+	if !ok {
+		return nil, fmt.Errorf("user %s not found in features", user.Id)
 	}
-
-	historyStr := utils.ToString(val, "")
+	
+	historyStr := ""
+	if val, ok := userData[r.historyFeatureName]; ok {
+		historyStr = fmt.Sprintf("%v", val)
+	}
+	
 	if historyStr == "" {
 		return nil, nil
 	}
@@ -304,16 +408,18 @@ func (r *GenerativeRecall) convertToSemanticIDs(history []int) [][]int {
 	semanticHistory := make([][]int, 0, len(history))
 
 	for _, itemID := range history {
+		var semIDs []int
+		
 		// 优先从映射表查询
 		if semanticIDMap != nil {
-			if semIDs, ok := semanticIDMap[itemID]; ok {
-				semanticHistory = append(semanticHistory, semIDs)
+			if fullIDs, ok := semanticIDMap[itemID]; ok {
+				semanticHistory = append(semanticHistory, fullIDs)
 				continue
 			}
 		}
 
-		// 回退到哈希方式（临时方案）
-		semIDs := []int{
+		// 回退到哈希方式（生成 4 层，值限制在 0-255）
+		semIDs = []int{
 			itemID % 256,
 			(itemID / 256) % 256,
 			(itemID / 65536) % 256,

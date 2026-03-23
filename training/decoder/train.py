@@ -8,7 +8,7 @@ Decoder 训练脚本.
 import os
 import argparse
 import json
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader

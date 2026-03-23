@@ -22,9 +22,14 @@ if [ ! -f "$CONFIG_PATH" ]; then
     exit 1
 fi
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../services"
+
+# 检查配置文件路径（如果是相对路径，转换为相对于项目根目录）
+if [[ ! "$CONFIG_PATH" = /* ]]; then
+    CONFIG_PATH="../$CONFIG_PATH"
+fi
 
 # 启动服务
-go run services/main.go \
+go run main.go \
     --config "$CONFIG_PATH" \
     --port "$PORT"
