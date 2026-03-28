@@ -85,17 +85,8 @@ func (c *TRTLLMClient) Recommend(req *RecommendRequest) (*RecommendResponse, err
 	fmt.Printf("[DEBUG-CLIENT] Request JSON: %s\n", string(jsonData))
 	fmt.Printf("[DEBUG-CLIENT] Request length: %d\n", len(jsonData))
 
-	// 构建 HTTP 请求
+	// 构建 HTTP 请求 URL
 	url := c.config.ServerURL + "/recommend"
-	httpReq, err := http.NewRequestWithContext(
-		context.Background(),
-		"POST",
-		url,
-		bytes.NewBuffer(jsonData),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create request failed: %w", err)
-	}
 
 	// 发送请求（带重试）- 每次重试都需要重新创建请求，因为 Body 只能读一次
 	var httpResp *http.Response

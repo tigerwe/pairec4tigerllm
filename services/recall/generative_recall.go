@@ -23,6 +23,7 @@ import (
 	"github.com/alibaba/pairec/v2/utils"
 
 	"pairec4tigerllm/services/config"
+	"pairec4tigerllm/services/feature"
 )
 
 // 调试日志函数
@@ -59,6 +60,7 @@ type GenerativeRecall struct {
 	cacheTime          int
 	semanticIDMapPath  string
 	cache              cache.Cache // 自己管理缓存
+	featureProvider    *feature.Provider // 特征提供器（新增）
 }
 
 // recallConfigJSON 用于从 RecallAlgo 字段解析配置
@@ -141,6 +143,30 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 		c, _ = cache.NewCache(conf.CacheAdapter, conf.CacheConfig)
 	}
 
+	// 创建特征提供器（支持 Kafka 实时特征 + JSON 离线特征降级）
+	var featureProvider *feature.Provider
+	if genConfig.FeatureSource == "kafka" && genConfig.KafkaConfig != nil {
+		// 使用 Kafka 实时特征
+		consumer := feature.NewConsumer(&feature.KafkaConfig{
+			Brokers: genConfig.KafkaConfig.Brokers,
+			Topic:   genConfig.KafkaConfig.Topic,
+			GroupID: genConfig.KafkaConfig.GroupID,
+		})
+		if err := consumer.Start(); err != nil {
+			log.Error(fmt.Sprintf("[GenerativeRecall] Failed to start feature consumer: %v", err))
+			// 降级到离线模式
+			featureProvider = feature.NewProvider(nil, "../data/user_features.json")
+		} else {
+			featureProvider = feature.NewProvider(consumer, "../data/user_features.json")
+			log.Info(fmt.Sprintf("[GenerativeRecall] Kafka feature consumer started: topic=%s", 
+				genConfig.KafkaConfig.Topic))
+		}
+	} else {
+		// 纯离线模式
+		featureProvider = feature.NewProvider(nil, "../data/user_features.json")
+		writeDebugLog(" Using offline feature mode (file)\n")
+	}
+
 	// 创建召回实例
 	recallInstance := &GenerativeRecall{
 		BaseRecall:         recall.NewBaseRecall(conf),
@@ -158,6 +184,7 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 		cacheTime:          genConfig.CacheTime,
 		semanticIDMapPath:  semanticIDMapPath,
 		cache:              c,
+		featureProvider:    featureProvider,
 	}
 	
 	writeDebugLog(" GenerativeRecall instance created: name=%s, historyFeatureName=%s, topK=%d\n",
@@ -325,14 +352,20 @@ func loadUserFeatures() {
 }
 
 // getHistoryFromUserFeature 从用户特征获取历史.
+// 优先使用 Kafka 实时特征，未命中时回退到离线 JSON.
 func (r *GenerativeRecall) getHistoryFromUserFeature(user *module.User) ([]int, error) {
+	// 使用 FeatureProvider 获取（支持实时 + 离线降级）
+	if r.featureProvider != nil {
+		return r.featureProvider.GetUserHistory(string(user.Id))
+	}
+
+	// 降级：直接读取离线 JSON（兼容旧逻辑）
 	loadUserFeatures()
 	
 	if r.historyFeatureName == "" {
 		return nil, fmt.Errorf("history_feature_name is empty")
 	}
 
-	// 从文件缓存获取
 	userData, ok := userFeaturesCache[string(user.Id)]
 	if !ok {
 		return nil, fmt.Errorf("user %s not found in features", user.Id)

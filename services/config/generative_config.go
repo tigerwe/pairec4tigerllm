@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+// KafkaConfig Kafka 配置.
+type KafkaConfig struct {
+	Brokers []string `json:"brokers" yaml:"brokers"` // Kafka 地址列表
+	Topic   string   `json:"topic" yaml:"topic"`     // 订阅的 topic
+	GroupID string   `json:"group_id" yaml:"group_id"` // 消费者组 ID
+}
+
 // GenerativeRecallConfig 生成式召回配置.
 type GenerativeRecallConfig struct {
 	// 服务配置
@@ -34,6 +41,10 @@ type GenerativeRecallConfig struct {
 	CacheType    string        `json:"cache_type" yaml:"cache_type"`       // 缓存类型: "local" 或 "redis"
 	CacheTime    int           `json:"cache_time" yaml:"cache_time"`       // 缓存时间（秒）
 	CachePrefix  string        `json:"cache_prefix" yaml:"cache_prefix"`   // 缓存键前缀
+
+	// 新增：Kafka 实时特征配置
+	FeatureSource string       `json:"feature_source" yaml:"feature_source"`       // 特征源: "file" 或 "kafka"
+	KafkaConfig   *KafkaConfig `json:"kafka_config,omitempty" yaml:"kafka_config,omitempty"` // Kafka 配置
 }
 
 // DefaultGenerativeRecallConfig 返回默认配置.
@@ -54,6 +65,7 @@ func DefaultGenerativeRecallConfig() *GenerativeRecallConfig {
 		CacheType:          "local",
 		CacheTime:          300,
 		CachePrefix:        "gen_recall_",
+		FeatureSource:      "file", // 默认使用文件
 	}
 }
 
