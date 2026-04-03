@@ -51,12 +51,21 @@ func (p *Provider) GetUserHistory(userID string) ([]int, error) {
 	// 1. 优先查实时缓存
 	if p.consumer != nil {
 		if features := p.consumer.Get(userID); features != nil {
+			fmt.Printf("[FeatureProvider] [REALTIME] User=%s, HistoryLen=%d, Source=KafkaCache\n",
+				userID, len(features.ClickHistory))
 			return features.ClickHistory, nil
 		}
 	}
 
 	// 2. 降级到离线 JSON
-	return p.getFromFallback(userID)
+	fmt.Printf("[FeatureProvider] [FALLBACK] User=%s not in realtime cache, using fallback file\n", userID)
+	history, err := p.getFromFallback(userID)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("[FeatureProvider] [FALLBACK] User=%s, HistoryLen=%d, Source=%s\n",
+		userID, len(history), p.fallbackPath)
+	return history, nil
 }
 
 // GetUserFeatures 获取完整用户特征（包含实时特征）.

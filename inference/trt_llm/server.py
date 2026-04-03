@@ -38,13 +38,14 @@ class InferenceConfig:
 
 
 class TensorRTLLMInference:
-    """TensorRT-LLM 1.0.0 推理引擎封装.
+    """TensorRT 10.x 推理引擎封装.
     
-    如果 TensorRT-LLM 不可用，自动回退到 PyTorch.
+    加载通过 ONNX + TensorRT 构建的纯 TensorRT 引擎，
+    为 GenerativeDecoder 提供加速推理.
     """
     
     def __init__(self, engine_path: str, config: InferenceConfig):
-        """初始化 TensorRT-LLM 推理引擎.
+        """初始化 TensorRT 推理引擎.
         
         Args:
             engine_path: TensorRT 引擎路径
@@ -54,108 +55,97 @@ class TensorRTLLMInference:
         self.engine_path = engine_path
         self.engine = None
         self.context = None
-        self.stream = None
+        self._logger = logging.getLogger(__name__)
         
-        # 尝试加载 TensorRT-LLM
-        self._init_trt_llm()
+        self._init_engine()
     
-    def _init_trt_llm(self) -> bool:
-        """初始化 TensorRT-LLM.
+    def _init_engine(self) -> bool:
+        """初始化 TensorRT 引擎.
         
         Returns:
             是否成功初始化
         """
         try:
-            import tensorrt_llm as trtllm
-            from tensorrt_llm.runtime import ModelConfig, SamplingConfig
+            import tensorrt as trt
             
-            logger.info(f"TensorRT-LLM 版本: {trtllm.__version__}")
-            
-            # 检查引擎文件
             if not os.path.exists(self.engine_path):
-                logger.error(f"引擎文件不存在: {self.engine_path}")
+                self._logger.error(f"引擎文件不存在: {self.engine_path}")
                 return False
             
-            # TensorRT-LLM 1.0.0 推理初始化
-            # 注意：这里使用运行时 API，具体的初始化方式取决于引擎构建方式
-            self.runtime = trtllm.runtime.Runtime()
+            self._logger.info(f"加载 TensorRT 引擎: {self.engine_path}")
             
-            # 加载引擎
             with open(self.engine_path, 'rb') as f:
                 engine_data = f.read()
             
-            self.engine = self.runtime.deserialize_cuda_engine(engine_data)
+            runtime = trt.Runtime(trt.Logger(trt.Logger.INFO))
+            self.engine = runtime.deserialize_cuda_engine(engine_data)
+            
+            if self.engine is None:
+                self._logger.error("引擎反序列化失败")
+                return False
+            
             self.context = self.engine.create_execution_context()
             
-            # 创建 CUDA 流
-            import cupy as cp
-            self.stream = cp.cuda.Stream()
+            # 验证输入输出
+            num_tensors = self.engine.num_io_tensors
+            self._logger.info(f"引擎 IO Tensors: {num_tensors}")
+            for i in range(num_tensors):
+                name = self.engine.get_tensor_name(i)
+                mode = self.engine.get_tensor_mode(name)
+                dtype = self.engine.get_tensor_dtype(name)
+                shape = self.engine.get_tensor_shape(name)
+                self._logger.info(f"  {name}: mode={mode}, dtype={dtype}, shape={shape}")
             
-            logger.info("TensorRT-LLM 1.0.0 引擎加载成功")
             return True
             
-        except ImportError:
-            logger.warning("TensorRT-LLM 未安装，无法使用 TRT 推理")
-            return False
         except Exception as e:
-            logger.error(f"TensorRT-LLM 初始化失败: {e}")
+            self._logger.error(f"TensorRT 引擎初始化失败: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
-    def generate(
-        self,
-        input_ids: torch.Tensor,
-        max_new_tokens: int,
-        temperature: float,
-        top_k: int
-    ) -> torch.Tensor:
-        """生成推荐.
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """执行前向传播.
         
         Args:
-            input_ids: 输入序列
-            max_new_tokens: 最大生成 token 数
-            temperature: 采样温度
-            top_k: Top-k 采样
+            input_ids: 输入语义 ID [batch_size, seq_len, num_quantizers]
             
         Returns:
-            生成的序列
+            logits: [batch_size, seq_len, num_quantizers, vocab_size]
         """
         if self.engine is None:
-            raise RuntimeError("TensorRT-LLM 引擎未初始化")
+            raise RuntimeError("TensorRT 引擎未初始化")
         
-        # 这里需要根据具体的 TensorRT-LLM 1.0.0 API 实现
-        # 由于 API 可能变化，这里提供基本框架
+        batch_size, seq_len, num_quantizers = input_ids.shape
         
-        try:
-            # TensorRT-LLM 1.0.0 推理逻辑
-            # TODO: 根据实际 API 调整
-            logger.info("使用 TensorRT-LLM 推理")
-            
-            # 回退到 PyTorch 生成
-            return self._fallback_generate(input_ids, max_new_tokens, temperature, top_k)
-            
-        except Exception as e:
-            logger.error(f"TensorRT-LLM 推理失败: {e}")
-            return self._fallback_generate(input_ids, max_new_tokens, temperature, top_k)
-    
-    def _fallback_generate(
-        self,
-        input_ids: torch.Tensor,
-        max_new_tokens: int,
-        temperature: float,
-        top_k: int
-    ) -> torch.Tensor:
-        """回退到 PyTorch 生成."""
-        logger.warning("回退到 PyTorch 推理")
-        # 这里应该调用 PyTorch 模型，但为了解耦，返回空
-        # 实际使用时，由上层服务处理
-        return None
+        # 确保输入类型为 Int64 (与 ONNX 导出一致)
+        if input_ids.dtype != torch.long:
+            input_ids = input_ids.long()
+        
+        # 设置动态输入形状
+        self.context.set_input_shape("input_ids", (batch_size, seq_len, num_quantizers))
+        
+        # 获取输出形状并分配 GPU 内存 (转换为 tuple)
+        output_shape = self.context.get_tensor_shape("logits")
+        logits = torch.empty(tuple(output_shape), dtype=torch.float32, device=input_ids.device)
+        
+        # 绑定输入输出地址
+        self.context.set_tensor_address("input_ids", input_ids.data_ptr())
+        self.context.set_tensor_address("logits", logits.data_ptr())
+        
+        # 执行推理 (使用当前 CUDA stream)
+        stream = torch.cuda.current_stream()
+        self.context.execute_async_v3(stream.cuda_stream)
+        torch.cuda.synchronize()
+        
+        return logits
 
 
 class GenerativeInferenceService:
     """生成式推理服务.
 
-    支持 PyTorch 和 TensorRT-LLM 1.0.0 两种后端.
-    优先使用 TensorRT-LLM (如果可用且配置启用).
+    支持 PyTorch 和 TensorRT 两种后端.
+    优先使用 TensorRT 引擎 (如果可用且配置启用).
     """
 
     def __init__(self, config: InferenceConfig):
@@ -169,35 +159,57 @@ class GenerativeInferenceService:
 
         print(f"Initializing inference service on {self.device}")
         
-        # 初始化 TensorRT-LLM (如果启用)
+        # 先从 checkpoint 读取配置信息
+        checkpoint = torch.load(config.model_path, map_location='cpu')
+        model_config = checkpoint['config']
+        self.vocab_size = model_config['vocab_size']
+        self.num_quantizers = model_config['num_quantizers']
+        self.pad_token_id = model_config.get('pad_token_id', 0)
+        self.max_seq_len = model_config.get('max_seq_len', 512)
+        
+        # 初始化 TensorRT 引擎 (如果启用)
         self.trt_llm_engine = None
+        self.model = None
+        
         if config.use_trt_llm:
-            engine_path = config.model_path.replace('.pt', '.engine')
-            if os.path.exists(engine_path):
-                print(f"尝试加载 TensorRT-LLM 引擎: {engine_path}")
-                self.trt_llm_engine = TensorRTLLMInference(engine_path, config)
-                if self.trt_llm_engine.engine is None:
-                    print("TensorRT-LLM 加载失败，将使用 PyTorch")
-                    self.trt_llm_engine = None
+            # 尝试多个可能的引擎路径
+            possible_paths = [
+                config.model_path.replace('.pt', '.engine'),
+                './exported/decoder/decoder.engine',
+                os.path.join(os.path.dirname(config.model_path), 'decoder.engine'),
+            ]
+            engine_path = None
+            for p in possible_paths:
+                if os.path.exists(p):
+                    engine_path = p
+                    break
+            
+            if engine_path:
+                print(f"尝试加载 TensorRT 引擎: {engine_path}")
+                trt_engine = TensorRTLLMInference(engine_path, config)
+                if trt_engine.engine is not None:
+                    self.trt_llm_engine = trt_engine
+                    print("TensorRT 引擎加载成功，将使用 TensorRT 加速推理")
+                else:
+                    print("TensorRT 引擎加载失败，将使用 PyTorch")
             else:
-                print(f"TensorRT 引擎不存在: {engine_path}")
-                print("将使用 PyTorch 推理")
+                print("TensorRT 引擎不存在，将使用 PyTorch 推理")
+                print(f"搜索路径: {possible_paths}")
 
-        # 加载 PyTorch 模型 (作为回退或主推理)
-        self._load_model()
+        # 如果 TRT 引擎未加载成功，加载 PyTorch 模型
+        if self.trt_llm_engine is None:
+            self._load_pytorch_model(checkpoint)
 
         # 加载语义 ID 映射
         self._load_semantic_id_mapping()
 
         print("Inference service initialized successfully")
 
-    def _load_model(self) -> None:
+    def _load_pytorch_model(self, checkpoint) -> None:
         """加载 PyTorch 模型."""
         print(f"Loading PyTorch model from {self.config.model_path}")
 
-        checkpoint = torch.load(self.config.model_path, map_location=self.device)
         model_config = checkpoint['config']
-
         self.model = GenerativeDecoder(
             vocab_size=model_config['vocab_size'],
             num_quantizers=model_config['num_quantizers'],
@@ -210,11 +222,21 @@ class GenerativeInferenceService:
         self.model = self.model.to(self.device)
         self.model.eval()
 
-        self.vocab_size = model_config['vocab_size']
-        self.num_quantizers = model_config['num_quantizers']
-        self.pad_token_id = model_config.get('pad_token_id', 0)
-
         print(f"PyTorch model loaded: {self.num_quantizers} quantizers, vocab size {self.vocab_size}")
+    
+    def _get_logits(self, input_ids: torch.Tensor):
+        """获取 logits，优先使用 TensorRT 引擎.
+        
+        Args:
+            input_ids: 输入张量
+            
+        Returns:
+            (logits, loss) 元组，loss 始终为 None
+        """
+        if self.trt_llm_engine is not None:
+            logits = self.trt_llm_engine.forward(input_ids)
+            return logits, None
+        return self.model(input_ids)
 
     def _load_semantic_id_mapping(self) -> None:
         """加载语义 ID 到物品 ID 的映射."""
@@ -334,7 +356,7 @@ class GenerativeInferenceService:
 
         for _ in range(topk * 2):  # 多生成一些，去重后取 topk
             # 单步生成
-            logits, _ = self.model(current_input)
+            logits, _ = self._get_logits(current_input)
             next_logits = logits[:, -1, :, :]  # [1, num_quantizers, vocab_size]
 
             # 应用温度
@@ -402,7 +424,7 @@ class GenerativeInferenceService:
             new_candidates = []
 
             for seq, score in candidates:
-                logits, _ = self.model(seq)
+                logits, _ = self._get_logits(seq)
                 next_logits = logits[:, -1, :, :]
                 log_probs = F.log_softmax(next_logits, dim=-1)
 
@@ -464,9 +486,10 @@ class HTTPServer:
 
         @app.route('/health', methods=['GET'])
         def health():
+            backend = 'tensorrt' if self.service.trt_llm_engine is not None else 'pytorch'
             return jsonify({
                 'status': 'healthy',
-                'backend': 'pytorch',  # 或 'trt_llm'
+                'backend': backend,
                 'version': '1.0.0'
             })
 

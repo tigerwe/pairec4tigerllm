@@ -106,7 +106,7 @@ def build_gpt_decoder_engine(
         
         # 导入构建相关模块 (TensorRT-LLM 1.0.0 API)
         try:
-            from tensorrt_llm.models import GPTLMHeadModel, GPTConfig
+            from tensorrt_llm.models import GPTForCausalLM, GPTConfig
             from tensorrt_llm.builder import Builder
             from tensorrt_llm.quantization import QuantMode
         except ImportError as e:
@@ -134,18 +134,34 @@ def build_gpt_decoder_engine(
         num_layers = config.get('num_layers', num_layers)
         num_heads = config.get('num_heads', num_heads)
         hidden_size = config.get('embedding_dim', hidden_size)
+        num_quantizers = config.get('num_quantizers', num_quantizers)
         
         logger.info(f"模型配置:")
         logger.info(f"  Vocab Size: {vocab_size}")
         logger.info(f"  Num Layers: {num_layers}")
         logger.info(f"  Num Heads: {num_heads}")
         logger.info(f"  Hidden Size: {hidden_size}")
+        logger.info(f"  Num Quantizers: {num_quantizers}")
         
         # 创建输出目录
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
-        # TensorRT-LLM 1.0.0 推荐使用 trtllm-build 命令行工具
-        # 或者使用新的 Python API
+        # 对于自定义的 GenerativeDecoder (多 quantizer 输入/输出)，
+        # TensorRT-LLM 1.0.0 的预定义 GPTForCausalLM 不支持这种架构。
+        # 直接使用 ONNX + TensorRT 备用方案，这是目前最稳定的路径。
+        if num_quantizers > 1:
+            logger.info("检测到自定义 GenerativeDecoder 模型 (num_quantizers > 1)")
+            logger.info("TensorRT-LLM 1.0.0 预定义模型不支持多 quantizer 架构，")
+            logger.info("将使用 ONNX + TensorRT 构建等价的 TensorRT 引擎...")
+            return build_engine_fallback(
+                checkpoint_path=checkpoint_path,
+                output_path=output_path,
+                max_batch_size=max_batch_size,
+                max_seq_len=max_seq_len,
+                dtype=dtype
+            )
+        
+        # 对于标准单 quantizer GPT 模型，尝试 TensorRT-LLM 原生构建
         logger.info("使用 TensorRT-LLM 1.0.0 Python API 构建引擎...")
         
         # 构建配置
@@ -184,20 +200,20 @@ def build_gpt_decoder_engine(
                 max_seq_len=max_seq_len,
             )
             
-            # 创建 GPT 配置
+            # 创建 GPT 配置 (1.0.0 参数名)
             gpt_config = GPTConfig(
                 vocab_size=vocab_size,
-                num_layers=num_layers,
-                num_heads=num_heads,
+                num_hidden_layers=num_layers,
+                num_attention_heads=num_heads,
                 hidden_size=hidden_size,
                 ffn_hidden_size=ffn_hidden_size or hidden_size * 4,
                 dtype=dtype,
             )
             
             # 创建模型
-            model = GPTLMHeadModel(gpt_config)
+            model = GPTForCausalLM(gpt_config)
             
-            # 加载权重
+            # 加载权重 (仅适用于标准 GPT checkpoint)
             state_dict = checkpoint.get('model_state_dict', checkpoint)
             model.load_state_dict(state_dict, strict=False)
             
@@ -333,7 +349,9 @@ def build_engine_fallback(
         
         # 导出 ONNX
         onnx_path = output_path.replace('.engine', '.onnx')
-        dummy_input = torch.randint(0, 256, (1, 10, 4))
+        model_max_seq_len = config.get('max_seq_len', max_seq_len)
+        num_quantizers = config.get('num_quantizers', 4)
+        dummy_input = torch.randint(0, 256, (1, model_max_seq_len, num_quantizers))
         
         torch.onnx.export(
             model,
@@ -353,12 +371,12 @@ def build_engine_fallback(
         logger.info(f"ONNX 导出成功: {onnx_path}")
         
         # 构建 TensorRT 引擎
-        logger = trt.Logger(trt.Logger.INFO)
-        builder = trt.Builder(logger)
+        trt_logger = trt.Logger(trt.Logger.INFO)
+        builder = trt.Builder(trt_logger)
         network = builder.create_network(
             1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
         )
-        parser = trt.OnnxParser(network, logger)
+        parser = trt.OnnxParser(network, trt_logger)
         
         with open(onnx_path, 'rb') as f:
             if not parser.parse(f.read()):
@@ -366,24 +384,24 @@ def build_engine_fallback(
                     logger.error(f"ONNX 解析错误: {parser.get_error(error)}")
                 return False
         
-        config = builder.create_builder_config()
-        config.max_workspace_size = 4 * 1024 * 1024 * 1024
+        build_cfg = builder.create_builder_config()
+        build_cfg.max_workspace_size = 4 * 1024 * 1024 * 1024
         
         if dtype == "float16":
-            config.set_flag(trt.BuilderFlag.FP16)
+            build_cfg.set_flag(trt.BuilderFlag.FP16)
         
-        config.max_batch_size = max_batch_size
+        build_cfg.max_batch_size = max_batch_size
         
         profile = builder.create_optimization_profile()
         profile.set_shape(
             "input_ids",
-            min=(1, 1, 4),
-            opt=(max_batch_size // 2, max_seq_len // 2, 4),
-            max=(max_batch_size, max_seq_len, 4)
+            min=(1, 1, num_quantizers),
+            opt=(max(max_batch_size // 2, 1), max(model_max_seq_len // 2, 1), num_quantizers),
+            max=(max_batch_size, model_max_seq_len, num_quantizers)
         )
-        config.add_optimization_profile(profile)
+        build_cfg.add_optimization_profile(profile)
         
-        engine = builder.build_engine(network, config)
+        engine = builder.build_engine(network, build_cfg)
         
         if engine is None:
             logger.error("引擎构建失败")
@@ -404,6 +422,8 @@ def build_engine_fallback(
 
 def verify_engine(engine_path: str) -> bool:
     """验证 TensorRT 引擎.
+    
+    兼容 TensorRT 8.x 和 10.x API.
     
     Args:
         engine_path: 引擎路径
@@ -431,19 +451,34 @@ def verify_engine(engine_path: str) -> bool:
             return False
         
         logger.info(f"引擎验证通过:")
-        logger.info(f"  绑定数量: {engine.num_bindings}")
-        logger.info(f"  最大批次: {engine.max_batch_size}")
         
-        for i in range(engine.num_bindings):
-            name = engine.get_binding_name(i)
-            dtype = engine.get_binding_dtype(i)
-            shape = engine.get_binding_shape(i)
-            logger.info(f"  绑定 {i}: {name}, {dtype}, {shape}")
+        # 兼容 TensorRT 8.x 和 10.x
+        if hasattr(engine, 'num_io_tensors'):
+            # TensorRT 10.x
+            num_tensors = engine.num_io_tensors
+            logger.info(f"  IO Tensor 数量: {num_tensors}")
+            for i in range(num_tensors):
+                name = engine.get_tensor_name(i)
+                mode = engine.get_tensor_mode(name)
+                dtype = engine.get_tensor_dtype(name)
+                shape = engine.get_tensor_shape(name)
+                logger.info(f"  Tensor {i}: {name}, mode={mode}, dtype={dtype}, shape={shape}")
+        else:
+            # TensorRT 8.x
+            logger.info(f"  绑定数量: {engine.num_bindings}")
+            logger.info(f"  最大批次: {engine.max_batch_size}")
+            for i in range(engine.num_bindings):
+                name = engine.get_binding_name(i)
+                dtype = engine.get_binding_dtype(i)
+                shape = engine.get_binding_shape(i)
+                logger.info(f"  绑定 {i}: {name}, {dtype}, {shape}")
         
         return True
         
     except Exception as e:
         logger.error(f"验证失败: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
