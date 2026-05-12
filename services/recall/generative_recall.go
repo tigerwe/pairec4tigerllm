@@ -65,14 +65,16 @@ type GenerativeRecall struct {
 
 // recallConfigJSON 用于从 RecallAlgo 字段解析配置
 type recallConfigJSON struct {
-	ServerURL          string  `json:"server_url"`
-	TopK               int     `json:"topk"`
-	Temperature        float64 `json:"temperature"`
-	BeamWidth          int     `json:"beam_width"`
-	HistoryFrom        string  `json:"history_from"`
-	HistoryFeatureName string  `json:"history_feature_name"`
-	HistoryDelimiter   string  `json:"history_delimiter"`
-	HistoryMaxLength   int     `json:"history_max_length"`
+	ServerURL          string                `json:"server_url"`
+	TopK               int                   `json:"topk"`
+	Temperature        float64               `json:"temperature"`
+	BeamWidth          int                   `json:"beam_width"`
+	HistoryFrom        string                `json:"history_from"`
+	HistoryFeatureName string                `json:"history_feature_name"`
+	HistoryDelimiter   string                `json:"history_delimiter"`
+	HistoryMaxLength   int                   `json:"history_max_length"`
+	FeatureSource      string                `json:"feature_source"`
+	KafkaConfig        *config.KafkaConfig   `json:"kafka_config"`
 }
 
 // NewGenerativeRecall 创建生成式召回实例.
@@ -97,6 +99,8 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 				HistoryFeatureName: algoConf.HistoryFeatureName,
 				HistoryDelimiter:   algoConf.HistoryDelimiter,
 				HistoryMaxLength:   algoConf.HistoryMaxLength,
+				FeatureSource:      algoConf.FeatureSource,
+				KafkaConfig:        algoConf.KafkaConfig,
 				CacheEnable:        conf.CacheAdapter != "",
 				CacheTime:          conf.CacheTime,
 				CachePrefix:        conf.CachePrefix,
@@ -151,7 +155,7 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 			Brokers: genConfig.KafkaConfig.Brokers,
 			Topic:   genConfig.KafkaConfig.Topic,
 			GroupID: genConfig.KafkaConfig.GroupID,
-		})
+		}, 0)
 		if err := consumer.Start(); err != nil {
 			log.Error(fmt.Sprintf("[GenerativeRecall] Failed to start feature consumer: %v", err))
 			// 降级到离线模式
@@ -228,7 +232,17 @@ func loadSemanticIDMap(path string) {
 // GetCandidateItems 获取候选物品.
 // 这是召回服务的核心方法，由 pairec 框架调用.
 func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.RecommendContext) []*module.Item {
-	start := time.Now()
+	// ========== 非侵入式时延打点：阶段计时器 ==========
+	var (
+		stageStart      = time.Now()
+		stageCache      time.Duration
+		stageHistory    time.Duration
+		stageConvert    time.Duration
+		stageHTTP       time.Duration
+		stageItems      time.Duration
+		traceID         = string(ctx.RecommendId)
+	)
+	// ================================================
 	
 	// 调试日志 - 输出到文件
 	f, _ := os.OpenFile("/tmp/recall_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -243,15 +257,19 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		key := r.cachePrefix + string(user.Id)
 		cacheRet := r.cache.Get(key)
 		if items := r.parseCacheResult(cacheRet); len(items) > 0 {
-			log.Info(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tfrom=cache\tname=%s\tcount=%d\tcost=%d",
-				ctx.RecommendId, r.modelName, len(items), utils.CostTime(start)))
+			stageCache = time.Since(stageStart)
+			// 结构化全链路耗时日志
+			log.Info(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tfrom=cache\tname=%s\tcount=%d\tcost=%d\tcache_ms=%d",
+				ctx.RecommendId, r.modelName, len(items), utils.CostTime(stageStart), stageCache.Milliseconds()))
 			return items
 		}
 	}
+	stageCache = time.Since(stageStart)
 	
 	writeDebugLog("[DEBUG] Cache miss or empty, getting user history")
 
 	// 获取用户历史行为
+	historyStart := time.Now()
 	history, err := r.getUserHistory(user, ctx)
 	if err != nil {
 		writeDebugLog(" getUserHistory error: %v\n", err)
@@ -259,11 +277,11 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 			ctx.RecommendId, r.modelName, err))
 		return nil
 	}
+	stageHistory = time.Since(historyStart)
 	
 	writeDebugLog(" Got history, len=%d\n", len(history))
 	
 	// 限制历史长度，避免超过模型 max_seq_len (50)
-	// 留 1 个位置给特殊 token，所以最多 49 条
 	if len(history) > 49 {
 		history = history[len(history)-49:]
 		writeDebugLog("[DEBUG] History truncated to len=%d", len(history))
@@ -276,7 +294,9 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 	}
 
 	// 转换历史为语义 ID 格式
+	convertStart := time.Now()
 	semanticHistory := r.convertToSemanticIDs(history)
+	stageConvert = time.Since(convertStart)
 	if len(semanticHistory) == 0 {
 		log.Error(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tname=%s\terr=convert_history_failed",
 			ctx.RecommendId, r.modelName))
@@ -294,7 +314,12 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 	
 	writeDebugLog(" Calling inference service, history=%v\n", semanticHistory)
 
-	response, err := r.client.Recommend(request)
+	// ========== 非侵入式时延打点：HTTP 调用计时 ==========
+	httpStart := time.Now()
+	response, err := r.client.Recommend(request, traceID)  // traceID 透传给推理服务
+	stageHTTP = time.Since(httpStart)
+	// ===================================================
+	
 	if err != nil {
 		writeDebugLog(" Inference error: %v\n", err)
 		log.Error(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tname=%s\terr=generative_recommend:%v",
@@ -305,15 +330,59 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 	writeDebugLog(" Got response, recommendations=%d\n", len(response.Recommendations))
 
 	// 转换结果为 pairec Item
+	itemsStart := time.Now()
 	items := r.convertToItems(response)
+	stageItems = time.Since(itemsStart)
 
 	// 写入缓存
 	if r.cache != nil && len(items) > 0 {
 		go r.writeCache(user.Id, items)
 	}
 
-	log.Info(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tname=%s\tcount=%d\tinference_time=%.2fms\tcost=%d",
-		ctx.RecommendId, r.modelName, len(items), response.InferenceTimeMs, utils.CostTime(start)))
+	totalCost := utils.CostTime(stageStart)
+
+	// 估算排队/网络开销 = HTTP 往返 - Python 侧内部处理时间
+	var queueMs int64
+	if response.Trace != nil {
+		queueMs = stageHTTP.Milliseconds() - int64(response.Trace.TotalMs)
+		if queueMs < 0 {
+			queueMs = 0
+		}
+	}
+
+	// ========== 非侵入式时延打点：全链路结构化日志 ==========
+	// 格式: requestId=xxx | module=GenerativeRecall | name=generative_recall
+	//       | count=50 | cost=45 | cache_ms=2 | history_ms=5 | convert_ms=1
+	//       | http_ms=30 | items_ms=1 | inference_svc_ms=25
+	//       | tr_backend=pytorch | tr_prepare_ms=2 | tr_forward_ms=15 | tr_generate_ms=5 | tr_map_ms=2
+	//       | tr_kv_lookup_ms=2 | tr_kv_write_ms=1 | queue_ms=5
+	if response.Trace != nil {
+		log.Info(fmt.Sprintf(
+			"requestId=%s\tmodule=GenerativeRecall\tname=%s\tcount=%d\tcost=%d"+
+			"\tcache_ms=%d\thistory_ms=%d\tconvert_ms=%d\thttp_ms=%d\titems_ms=%d"+
+			"\ttr_backend=%s\ttr_total_ms=%.0f\ttr_prepare_ms=%.0f\ttr_forward_ms=%.0f\ttr_generate_ms=%.0f\ttr_map_ms=%.0f"+
+			"\ttr_kv_lookup_ms=%.0f\ttr_kv_write_ms=%.0f\tqueue_ms=%d",
+			ctx.RecommendId, r.modelName, len(items), totalCost,
+			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
+			stageHTTP.Milliseconds(), stageItems.Milliseconds(),
+			response.Trace.Backend, response.Trace.TotalMs,
+			response.Trace.PrepareInputMs, response.Trace.ModelForwardMs,
+			response.Trace.GenerateMs, response.Trace.MapItemMs,
+			response.Trace.KvLookupMs, response.Trace.KvWriteMs,
+			queueMs,
+		))
+	} else {
+		// 兼容旧版推理服务（未返回 Trace 信息）
+		log.Info(fmt.Sprintf(
+			"requestId=%s\tmodule=GenerativeRecall\tname=%s\tcount=%d\tcost=%d"+
+			"\tcache_ms=%d\thistory_ms=%d\tconvert_ms=%d\thttp_ms=%d\titems_ms=%d\tinference_svc_ms=%.0f",
+			ctx.RecommendId, r.modelName, len(items), totalCost,
+			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
+			stageHTTP.Milliseconds(), stageItems.Milliseconds(),
+			response.InferenceTimeMs,
+		))
+	}
+	// =======================================================
 
 	return items
 }

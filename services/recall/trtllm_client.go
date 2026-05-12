@@ -26,6 +26,18 @@ type RecommendRequest struct {
 	BeamWidth   int       `json:"beam_width"`
 }
 
+// TraceInfo 推理服务回传的性能追踪信息.
+type TraceInfo struct {
+	TotalMs        float64 `json:"total_ms"`         // 推理服务总耗时
+	PrepareInputMs float64 `json:"prepare_input_ms"` // 输入准备耗时
+	ModelForwardMs float64 `json:"model_forward_ms"` // 模型前向耗时
+	GenerateMs     float64 `json:"generate_ms"`      // 采样/搜索耗时
+	MapItemMs      float64 `json:"map_item_ms"`      // 语义ID映射耗时
+	KvLookupMs     float64 `json:"kv_lookup_ms"`     // DataSystem 查询耗时
+	KvWriteMs      float64 `json:"kv_write_ms"`      // DataSystem 写入耗时
+	Backend        string  `json:"backend"`          // 后端类型: tensorrt / pytorch / cache_hit
+}
+
 // Recommendation 推荐结果.
 type Recommendation struct {
 	ItemID     int       `json:"item_id"`
@@ -40,6 +52,7 @@ type RecommendResponse struct {
 	Recommendations  []Recommendation  `json:"recommendations"`
 	InferenceTimeMs  float64           `json:"inference_time_ms"`
 	Error            string            `json:"error,omitempty"`
+	Trace            *TraceInfo        `json:"trace,omitempty"`   // 推理服务内部追踪信息
 }
 
 // TRTLLMClient TensorRT-LLM 客户端.
@@ -63,7 +76,8 @@ func NewTRTLLMClient(cfg *config.GenerativeRecallConfig) (*TRTLLMClient, error) 
 }
 
 // Recommend 获取推荐.
-func (c *TRTLLMClient) Recommend(req *RecommendRequest) (*RecommendResponse, error) {
+// traceID 用于端到端追踪，会通过 HTTP Header 透传给推理服务.
+func (c *TRTLLMClient) Recommend(req *RecommendRequest, traceID string) (*RecommendResponse, error) {
 	// 设置默认值
 	if req.Topk == 0 {
 		req.Topk = c.config.TopK
@@ -80,10 +94,6 @@ func (c *TRTLLMClient) Recommend(req *RecommendRequest) (*RecommendResponse, err
 	if err != nil {
 		return nil, fmt.Errorf("marshal request failed: %w", err)
 	}
-	
-	// 调试：打印请求体
-	fmt.Printf("[DEBUG-CLIENT] Request JSON: %s\n", string(jsonData))
-	fmt.Printf("[DEBUG-CLIENT] Request length: %d\n", len(jsonData))
 
 	// 构建 HTTP 请求 URL
 	url := c.config.ServerURL + "/recommend"
@@ -104,6 +114,10 @@ func (c *TRTLLMClient) Recommend(req *RecommendRequest) (*RecommendResponse, err
 			return nil, fmt.Errorf("create request failed: %w", err)
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
+		// 非侵入式追踪：透传 Trace ID
+		if traceID != "" {
+			httpReq.Header.Set("X-Request-ID", traceID)
+		}
 		
 		httpResp, lastErr = c.httpClient.Do(httpReq)
 		if lastErr == nil {

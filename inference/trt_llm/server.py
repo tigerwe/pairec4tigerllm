@@ -23,6 +23,132 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from training.decoder.model import GenerativeDecoder
 
 
+class DataSystemCache:
+    """兼容 yr.datasystem DsClient(kv()/hetero()/object()) 结构的缓存层."""
+
+    KEY_PREFIX = "pairec4tigerllm"
+
+    def __init__(self):
+        self._client = None
+        self._kv = None
+        self._get_fn = None
+        self._set_fn = None
+
+        try:
+            import yr.datasystem as ds
+        except ImportError:
+            print("[DataSystem] yr.datasystem not available")
+            return
+
+        # 1. 初始化 DsClient
+        try:
+            host = os.getenv("DATASYSTEM_HOST", "127.0.0.1")
+            port = int(os.getenv("DATASYSTEM_PORT", "31501"))
+            self._client = ds.DsClient(host, port)
+            print(f"[DataSystem] DsClient({host}, {port}) initialized")
+        except Exception as e:
+            print(f"[DataSystem] DsClient init failed: {e}")
+            return
+
+        # 2. 获取 kv 子客户端
+        if hasattr(self._client, 'kv'):
+            try:
+                self._kv = self._client.kv()
+                print("[DataSystem] KV client acquired")
+            except Exception as e:
+                print(f"[DataSystem] client.kv() failed: {e}")
+                return
+        else:
+            print("[DataSystem] client has no .kv() method")
+            return
+
+        # 3. 在 kv 对象上自动探测 get/set
+        kv_methods = [m for m in dir(self._kv) if not m.startswith('_')]
+        print(f"[DataSystem] KV available methods: {kv_methods}")
+
+        for name in ['get', 'Get', 'mget', 'MGet', 'kv_get', 'KVGet']:
+            if hasattr(self._kv, name):
+                self._get_fn = getattr(self._kv, name)
+                print(f"[DataSystem] Detected READ api: {name}")
+                break
+
+        for name in ['set', 'Set', 'mset', 'MSet', 'kv_set', 'KVSet']:
+            if hasattr(self._kv, name):
+                self._set_fn = getattr(self._kv, name)
+                print(f"[DataSystem] Detected WRITE api: {name}")
+                break
+
+        if self._get_fn is None:
+            print("[DataSystem] WARNING: No get-like method found on kv client")
+        if self._set_fn is None:
+            print("[DataSystem] WARNING: No set-like method found on kv client")
+
+    def _key(self, suffix: str) -> str:
+        return f"{self.KEY_PREFIX}:{suffix}"
+
+    def _safe_get(self, key: str):
+        if self._kv is None or self._get_fn is None:
+            return None
+        try:
+            result = self._get_fn(key)
+            if result is None:
+                return None
+            if isinstance(result, (bytes, str)):
+                return result if isinstance(result, bytes) else result.encode('utf-8')
+            if hasattr(result, 'data'):
+                data = result.data
+                return data if isinstance(data, bytes) else bytes(data)
+            return bytes(result)
+        except Exception:
+            return None
+
+    def _safe_set(self, key: str, value: bytes, ttl: int = 0) -> bool:
+        if self._kv is None or self._set_fn is None:
+            return False
+        try:
+            try:
+                self._set_fn(key, value, ttl=ttl)
+            except TypeError:
+                self._set_fn(key, value)
+            return True
+        except Exception as e:
+            print(f"[DataSystem] set error: {e}")
+            return False
+
+    def get_semantic_map(self):
+        val = self._safe_get(self._key("semantic_map"))
+        if val is not None:
+            try:
+                return json.loads(val.decode('utf-8'))
+            except Exception:
+                pass
+        return None
+
+    def put_semantic_map(self, mapping) -> bool:
+        data = json.dumps(mapping).encode('utf-8')
+        return self._safe_set(self._key("semantic_map"), data)
+
+    def get_result_cache(self, user_history: list):
+        key = self._key(f"rec:{self._hash_history(user_history)}")
+        val = self._safe_get(key)
+        if val is not None:
+            try:
+                return json.loads(val.decode('utf-8'))
+            except Exception:
+                pass
+        return None
+
+    def put_result_cache(self, user_history: list, recommendations: list, ttl_sec: int = 10) -> bool:
+        key = self._key(f"rec:{self._hash_history(user_history)}")
+        data = json.dumps(recommendations).encode('utf-8')
+        return self._safe_set(key, data, ttl=ttl_sec)
+
+    @staticmethod
+    def _hash_history(user_history: list) -> str:
+        s = json.dumps(user_history, sort_keys=True)
+        return hashlib.md5(s.encode()).hexdigest()[:16]
+
+
 @dataclass
 class InferenceConfig:
     """推理配置."""
@@ -158,7 +284,7 @@ class GenerativeInferenceService:
         self.device = torch.device(config.device if torch.cuda.is_available() else 'cpu')
 
         print(f"Initializing inference service on {self.device}")
-        
+
         # 先从 checkpoint 读取配置信息
         checkpoint = torch.load(config.model_path, map_location='cpu')
         model_config = checkpoint['config']
@@ -166,7 +292,11 @@ class GenerativeInferenceService:
         self.num_quantizers = model_config['num_quantizers']
         self.pad_token_id = model_config.get('pad_token_id', 0)
         self.max_seq_len = model_config.get('max_seq_len', 512)
-        
+
+        # ===== 新增：DataSystem 缓存 =====
+        self.ds_cache = DataSystemCache()
+        # =================================
+
         # 初始化 TensorRT 引擎 (如果启用)
         self.trt_llm_engine = None
         self.model = None
@@ -200,8 +330,14 @@ class GenerativeInferenceService:
         if self.trt_llm_engine is None:
             self._load_pytorch_model(checkpoint)
 
-        # 加载语义 ID 映射
+        # 加载语义 ID 映射（内部已改造为优先 DataSystem）
         self._load_semantic_id_mapping()
+
+        # 重置追踪器（新增 kv 字段）
+        self._trace_forward_ms = 0.0
+        self._trace_map_ms = 0.0
+        self._trace_kv_lookup_ms = 0.0
+        self._trace_kv_write_ms = 0.0
 
         print("Inference service initialized successfully")
 
@@ -233,20 +369,36 @@ class GenerativeInferenceService:
         Returns:
             (logits, loss) 元组，loss 始终为 None
         """
+        t0 = time.perf_counter()
         if self.trt_llm_engine is not None:
             logits = self.trt_llm_engine.forward(input_ids)
-            return logits, None
-        return self.model(input_ids)
+        else:
+            logits, _ = self.model(input_ids)
+        # 非侵入式打点：累加模型前向耗时
+        if not hasattr(self, '_trace_forward_ms'):
+            self._trace_forward_ms = 0.0
+        self._trace_forward_ms += (time.perf_counter() - t0) * 1000
+        return logits, None
 
     def _load_semantic_id_mapping(self) -> None:
-        """加载语义 ID 到物品 ID 的映射."""
-        # 默认路径
+        """加载语义 ID 到物品 ID 的映射（优先 DataSystem，回退 JSON）."""
+        # 1. 优先从 DataSystem 读取
+        t0 = time.perf_counter()
+        ds_map = self.ds_cache.get_semantic_map() if self.ds_cache else None
+        t_kv = (time.perf_counter() - t0) * 1000
+        self._trace_kv_lookup_ms = t_kv
+
+        if ds_map is not None:
+            print(f"[DataSystem] semantic map loaded from KV (lookup={t_kv:.1f}ms)")
+            self.semantic_to_item = ds_map
+            self._build_tuple_map()
+            return
+
+        # 2. 回退到本地 JSON
         mapping_path = os.path.join(
             os.path.dirname(self.config.model_path),
             'rqvae_semantic_ids.json'
         )
-        
-        # 也尝试从 processed 目录加载
         if not os.path.exists(mapping_path):
             mapping_path = './data/tenrec/processed/semantic_id_map.json'
 
@@ -255,17 +407,26 @@ class GenerativeInferenceService:
             with open(mapping_path, 'r') as f:
                 self.semantic_to_item = json.load(f)
 
-            # 转换为元组形式（用于哈希）
-            self.semantic_to_item_tuple = {}
-            for item_id, sem_ids in self.semantic_to_item.items():
-                key = tuple(sem_ids)
-                self.semantic_to_item_tuple[key] = int(item_id)
+            # 3. 异步写入 DataSystem（供其他 Pod / 重启后复用）
+            if self.ds_cache:
+                import threading
+                def _async_upload():
+                    self.ds_cache.put_semantic_map(self.semantic_to_item)
+                threading.Thread(target=_async_upload, daemon=True).start()
 
-            print(f"Loaded {len(self.semantic_to_item)} item mappings")
+            self._build_tuple_map()
         else:
             print(f"Warning: Semantic ID mapping not found at {mapping_path}")
             self.semantic_to_item = {}
             self.semantic_to_item_tuple = {}
+
+    def _build_tuple_map(self):
+        """构建 tuple → item_id 的反向索引."""
+        self.semantic_to_item_tuple = {}
+        for item_id, sem_ids in self.semantic_to_item.items():
+            key = tuple(sem_ids)
+            self.semantic_to_item_tuple[key] = int(item_id)
+        print(f"Loaded {len(self.semantic_to_item)} item mappings")
 
     def recommend(
         self,
@@ -273,8 +434,8 @@ class GenerativeInferenceService:
         topk: int = 10,
         temperature: Optional[float] = None,
         beam_width: Optional[int] = None
-    ) -> List[Dict]:
-        """生成推荐.
+    ) -> Dict:
+        """生成推荐（增强版：支持 DataSystem 结果缓存 + 完整 trace）.
 
         Args:
             user_history: 用户历史语义 ID 序列，每个元素是 [num_quantizers] 列表
@@ -283,18 +444,48 @@ class GenerativeInferenceService:
             beam_width: Beam search 宽度
 
         Returns:
-            推荐结果列表，每个元素包含 item_id 和 score
+            包含 recommendations 和 trace 信息的字典
         """
-        start_time = time.time()
+        t0 = time.perf_counter()
 
         temperature = temperature or self.config.temperature
         beam_width = beam_width or self.config.beam_width
 
-        # 准备输入
+        # ===== 新增：结果级缓存查询 =====
+        t_kv_lookup_start = time.perf_counter()
+        cached = self.ds_cache.get_result_cache(user_history) if self.ds_cache else None
+        t_kv_lookup = (time.perf_counter() - t_kv_lookup_start) * 1000
+
+        if cached is not None:
+            total_time = (time.perf_counter() - t0) * 1000
+            trace = {
+                'total_ms': total_time,
+                'prepare_input_ms': 0.0,
+                'model_forward_ms': 0.0,
+                'generate_ms': 0.0,
+                'map_item_ms': 0.0,
+                'kv_lookup_ms': t_kv_lookup,
+                'kv_write_ms': 0.0,
+                'backend': 'cache_hit',
+            }
+            return {
+                'recommendations': cached,
+                'inference_time_ms': total_time,
+                'trace': trace,
+            }
+        # =================================
+
+        # 阶段 1: 输入准备
+        t_prepare_start = time.perf_counter()
         input_ids = self._prepare_input(user_history)
         input_ids = input_ids.to(self.device)
+        t_prepare = (time.perf_counter() - t_prepare_start) * 1000
 
-        # 生成推荐
+        # 阶段 2: 模型推理 + 采样生成
+        t_generate_start = time.perf_counter()
+        self._trace_forward_ms = 0.0
+        self._trace_map_ms = 0.0
+
         with torch.no_grad():
             if beam_width > 1:
                 recommendations = self._beam_search_generate(
@@ -305,11 +496,35 @@ class GenerativeInferenceService:
                     input_ids, topk, temperature
                 )
 
-        inference_time = (time.time() - start_time) * 1000  # ms
+        t_generate = (time.perf_counter() - t_generate_start) * 1000
+        total_time = (time.perf_counter() - t0) * 1000
+
+        # ===== 新增：写入结果缓存 =====
+        t_kv_write_start = time.perf_counter()
+        if self.ds_cache:
+            self.ds_cache.put_result_cache(user_history, recommendations, ttl_sec=10)
+        t_kv_write = (time.perf_counter() - t_kv_write_start) * 1000
+        # ===============================
+
+        trace = {
+            'total_ms': total_time,
+            'prepare_input_ms': t_prepare,
+            'model_forward_ms': self._trace_forward_ms,
+            'generate_ms': t_generate - self._trace_forward_ms,
+            'map_item_ms': self._trace_map_ms,
+            'kv_lookup_ms': t_kv_lookup,
+            'kv_write_ms': t_kv_write,
+            'backend': 'tensorrt' if self.trt_llm_engine is not None else 'pytorch',
+        }
+
+        # 重置累加器
+        self._trace_forward_ms = 0.0
+        self._trace_map_ms = 0.0
 
         return {
             'recommendations': recommendations,
-            'inference_time_ms': inference_time
+            'inference_time_ms': total_time,
+            'trace': trace,
         }
 
     def _prepare_input(self, user_history: List[List[int]]) -> torch.Tensor:
@@ -353,6 +568,8 @@ class GenerativeInferenceService:
         """
         recommendations = []
         current_input = input_ids.clone()
+        if not hasattr(self, '_trace_map_ms'):
+            self._trace_map_ms = 0.0
 
         for _ in range(topk * 2):  # 多生成一些，去重后取 topk
             # 单步生成
@@ -373,8 +590,10 @@ class GenerativeInferenceService:
             sem_ids = next_tokens[0].cpu().tolist()
             sem_tuple = tuple(sem_ids)
 
-            # 查找物品 ID
+            # 查找物品 ID（带耗时打点）
+            t_map = time.perf_counter()
             item_id = self.semantic_to_item_tuple.get(sem_tuple)
+            self._trace_map_ms += (time.perf_counter() - t_map) * 1000
 
             if item_id and item_id not in [r['item_id'] for r in recommendations]:
                 # 计算分数（使用概率的均值）
@@ -493,6 +712,23 @@ class HTTPServer:
                 'version': '1.0.0'
             })
 
+        # ========== 非侵入式时延打点：Flask 请求级钩子 ==========
+        @app.before_request
+        def before_request():
+            request._trace_start = time.perf_counter()
+            request._trace_id = request.headers.get('X-Request-ID', '')
+
+        @app.after_request
+        def after_request(response):
+            if hasattr(request, '_trace_start'):
+                cost_ms = (time.perf_counter() - request._trace_start) * 1000
+                # 在响应头中回传服务端总耗时和 trace_id
+                response.headers['X-Server-Cost-Ms'] = str(int(cost_ms))
+                if request._trace_id:
+                    response.headers['X-Request-ID'] = request._trace_id
+            return response
+        # =======================================================
+
         @app.route('/recommend', methods=['POST'])
         def recommend():
             try:
@@ -510,12 +746,30 @@ class HTTPServer:
                     beam_width=beam_width
                 )
 
-                return jsonify({
+                resp_body = {
                     'code': 200,
                     'user_id': user_id,
                     'recommendations': result['recommendations'],
-                    'inference_time_ms': result['inference_time_ms']
-                })
+                    'inference_time_ms': result['inference_time_ms'],
+                    'trace': result.get('trace'),  # 内部各阶段耗时
+                }
+
+                # 非侵入式日志：每行一个请求的性能摘要
+                trace = result.get('trace', {})
+                print(
+                    f"[TRACE] request_id={request._trace_id} "
+                    f"total_ms={trace.get('total_ms', 0):.1f} "
+                    f"backend={trace.get('backend', 'unknown')} "
+                    f"prepare_ms={trace.get('prepare_input_ms', 0):.1f} "
+                    f"forward_ms={trace.get('model_forward_ms', 0):.1f} "
+                    f"generate_ms={trace.get('generate_ms', 0):.1f} "
+                    f"map_ms={trace.get('map_item_ms', 0):.1f} "
+                    f"kv_lookup_ms={trace.get('kv_lookup_ms', 0):.1f} "
+                    f"kv_write_ms={trace.get('kv_write_ms', 0):.1f} "
+                    f"items={len(result['recommendations'])}"
+                )
+
+                return jsonify(resp_body)
 
             except Exception as e:
                 return jsonify({
