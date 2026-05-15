@@ -17,6 +17,7 @@ from tqdm import tqdm
 import numpy as np
 
 from .model import GenerativeDecoder
+from .qwen3_generative_rec import Qwen3GenerativeRec
 
 
 class SequenceDataset(Dataset):
@@ -247,8 +248,8 @@ def train_decoder(
             labels = labels.to(device)
             attention_mask = attention_mask.to(device)
 
-            # 前向传播
-            logits, loss = model(input_ids, attention_mask, labels)
+            # 前向传播 (Qwen3 返回 3 元组, GPT2 返回 2 元组, 统一取前两个)
+            logits, loss, _ = model(input_ids, attention_mask, labels)
 
             # 反向传播
             optimizer.zero_grad()
@@ -300,7 +301,7 @@ def train_decoder(
                     labels = labels.to(device)
                     attention_mask = attention_mask.to(device)
 
-                    logits, loss = model(input_ids, attention_mask, labels)
+                    logits, loss, _ = model(input_ids, attention_mask, labels)
 
                     val_losses.append(loss.item())
 
@@ -331,19 +332,37 @@ def train_decoder(
 
                 # 保存最佳模型
                 best_model_path = os.path.join(checkpoint_dir, 'decoder_best.pt')
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': best_val_loss,
-                    'config': {
+                # 根据 backbone 保存不同的 config
+                if hasattr(model, 'hidden_size'):
+                    # Qwen3 backbone
+                    ckpt_config = {
+                        'backbone': 'qwen3',
+                        'model_name_or_path': getattr(args, 'qwen3_model_path', 'Qwen/Qwen3-0.6B'),
+                        'vocab_size': model.vocab_size,
+                        'num_quantizers': model.num_quantizers,
+                        'max_seq_len': model.max_seq_len,
+                        'hidden_size': model.hidden_size,
+                        'num_layers': model.num_layers,
+                        'num_kv_heads': model.num_kv_heads,
+                        'head_dim': model.head_dim,
+                    }
+                else:
+                    # GPT2 backbone
+                    ckpt_config = {
+                        'backbone': 'gpt2',
                         'vocab_size': model.vocab_size,
                         'num_quantizers': model.num_quantizers,
                         'embedding_dim': model.embedding_dim,
                         'num_layers': len(model.transformer_blocks),
                         'num_heads': model.transformer_blocks[0].attention.num_heads,
-                        'max_seq_len': model.max_seq_len
+                        'max_seq_len': model.max_seq_len,
                     }
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': best_val_loss,
+                    'config': ckpt_config,
                 }, best_model_path)
                 print(f"Best model saved to {best_model_path}")
             else:
@@ -407,6 +426,16 @@ def main():
                         help='Device to use')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
+    parser.add_argument('--backbone', type=str, default='gpt2',
+                        choices=['gpt2', 'qwen3'],
+                        help='Model backbone')
+    parser.add_argument('--qwen3_model_path', type=str,
+                        default='Qwen/Qwen3-0.6B',
+                        help='Path or HF name for Qwen3-0.6B')
+    parser.add_argument('--lora_rank', type=int, default=8,
+                        help='LoRA rank (qwen3 only)')
+    parser.add_argument('--lora_alpha', type=int, default=16,
+                        help='LoRA alpha (qwen3 only)')
 
     args = parser.parse_args()
 
@@ -426,15 +455,26 @@ def main():
             val_sequences = json.load(f)
 
     # 创建模型
-    model = GenerativeDecoder(
-        vocab_size=args.vocab_size,
-        num_quantizers=args.num_quantizers,
-        embedding_dim=args.embedding_dim,
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        ffn_dim=args.ffn_dim,
-        max_seq_len=args.max_seq_len
-    )
+    if args.backbone == 'qwen3':
+        model = Qwen3GenerativeRec(
+            model_name_or_path=args.qwen3_model_path,
+            vocab_size=args.vocab_size,
+            num_quantizers=args.num_quantizers,
+            max_seq_len=args.max_seq_len,
+            use_lora=True,
+            lora_rank=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+        )
+    else:
+        model = GenerativeDecoder(
+            vocab_size=args.vocab_size,
+            num_quantizers=args.num_quantizers,
+            embedding_dim=args.embedding_dim,
+            num_layers=args.num_layers,
+            num_heads=args.num_heads,
+            ffn_dim=args.ffn_dim,
+            max_seq_len=args.max_seq_len
+        )
 
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
 
