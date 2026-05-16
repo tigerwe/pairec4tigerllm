@@ -1,301 +1,203 @@
-# PaiRec4TigerLLM - AI 代理开发指南
+# PaiRec4TigerLLM — AI 代理开发指南
+
+> 最后更新: 2026-05-16 | 分支: `dev` | 状态: Qwen3 改造完成，待远程训练
 
 ## 项目概述
 
-PaiRec4TigerLLM 是一个基于生成式模型的推荐系统，集成了：
-- **pairec**：阿里巴巴开源的 Go 语言推荐框架
-- **RQ-VAE**：残差量化变分自编码器，用于生成语义 ID
-- **GPT2 Decoder**：生成式推荐模型
-- **TensorRT-LLM 1.0.0**：NVIDIA GPU 推理加速库 (CUDA 12.2)
+PaiRec4TigerLLM 是一个基于生成式模型的推荐系统，当前正在从自研 GPT2 Decoder 升级到 **Qwen3-0.6B**。
+
+| 组件 | 技术栈 |
+|------|--------|
+| 召回框架 | pairec (Go, 阿里巴巴开源) |
+| 语义编码 | RQ-VAE |
+| 生成式召回 | ~~GPT2 Decoder~~ → **Qwen3-0.6B + LoRA** |
+| 推理加速 | PyTorch (Phase 1) → TensorRT-LLM (Phase 3) |
+| KV Cache | KVCacheManager (HBM LRU + DataSystem) |
+| 数据流 | Tenrec → Flink/Kafka → RQ-VAE → 语义 ID 序列 |
 
 ## 系统架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      User Request                            │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    PaiRec API (Go)                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
-│  │  召回层       │  │  精排层       │  │  重排层       │       │
-│  │ ┌──────────┐ │  │              │  │              │       │
-│  │ │生成式召回 │ │  │              │  │              │       │
-│  │ │(Generative)│ │  │              │  │              │       │
-│  │ └──────────┘ │  │              │  │              │       │
-│  │ ┌──────────┐ │  │              │  │              │       │
-│  │ │ 其他召回  │ │  │              │  │              │       │
-│  │ └──────────┘ │  │              │  │              │       │
-│  └──────────────┘  └──────────────┘  └──────────────┘       │
-└─────────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────┐
-│           TensorRT-LLM Inference Service (Python)           │
-│                    Port: 8000                               │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                     User Request                         │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌──────────────────────────────────────────────────────────┐
+│                   PaiRec API (Go)                        │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │  生成式召回 (GenerativeRecall)                    │    │
+│  │  → HTTP POST /recommend                         │    │
+│  └─────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌──────────────────────────────────────────────────────────┐
+│         Python Inference Service (Port 8000)             │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │  GenerativeInferenceService                       │   │
+│  │  ├─ backbone: qwen3 | gpt2                       │   │
+│  │  ├─ KVCacheManager (HBM LRU)                     │   │
+│  │  └─ recommend() → Qwen3.generate()                │   │
+│  └──────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────┘
+                          │
+            ┌─────────────┴─────────────┐
+            ▼                           ▼
+┌──────────────────────┐   ┌──────────────────────┐
+│   KVCacheManager     │   │   DataSystem Worker  │
+│   GPU HBM LRU        │◄─►│   持久化 KV Cache     │
+└──────────────────────┘   └──────────────────────┘
 ```
 
-## 关键代码文件
+## 关键源文件
 
-### 数据处理层 (Python)
-
-| 文件 | 说明 |
-|------|------|
-| `data/utils/data_loader.py` | Tenrec 数据加载器 |
-| `data/utils/preprocessor.py` | 数据预处理器 |
-
-### 模型训练层 (Python)
+### Python 模型层
 
 | 文件 | 说明 |
 |------|------|
-| `training/rqvae/model.py` | RQ-VAE 模型定义 |
-| `training/rqvae/train.py` | RQ-VAE 训练脚本 |
-| `training/rqvae/export.py` | RQ-VAE 导出脚本 |
-| `training/decoder/model.py` | GPT2 Decoder 模型定义 |
-| `training/decoder/train.py` | Decoder 训练脚本 |
-| `training/decoder/export.py` | Decoder 导出脚本 |
+| `training/decoder/qwen3_generative_rec.py` | **★ Qwen3-0.6B 模型类** (LoRA + KV Cache) |
+| `training/decoder/model.py` | 原 GPT2 Decoder (保留兼容) |
+| `training/decoder/train.py` | 训练脚本，`--backbone qwen3\|gpt2` |
+| `training/decoder/export.py` | 模型导出 (ONNX) |
+| `training/decoder/__init__.py` | 导出 GenerativeDecoder + Qwen3GenerativeRec |
+| `training/rqvae/model.py` | RQ-VAE 模型 |
 
-### 推理服务层 (Python)
-
-| 文件 | 说明 |
-|------|------|
-| `inference/trt_llm/server.py` | TensorRT-LLM 推理服务 |
-| `inference/client/python_client.py` | Python 客户端 |
-
-### pairec 集成层 (Go)
+### Python 推理/服务层
 
 | 文件 | 说明 |
 |------|------|
-| `services/config/generative_config.go` | 配置定义 |
-| `services/recall/trtllm_client.go` | TRT-LLM 客户端 |
+| `inference/trt_llm/server.py` | **★ 推理服务** (Qwen3 + GPT2 双 backbone) |
+| `inference/trt_llm/build_engine.py` | TensorRT 引擎构建 (GPT2 only) |
+| `inference/kv_cache/manager.py` | **★ KVCacheManager** (HBM LRU + 序列化) |
+| `inference/kv_cache/__init__.py` | 包导出 |
+
+### Go 集成层 (无需改动)
+
+| 文件 | 说明 |
+|------|------|
+| `services/recall/trtllm_client.go` | HTTP 客户端 → `/recommend` |
 | `services/recall/generative_recall.go` | 生成式召回实现 |
 | `services/main.go` | 服务入口 |
 
-## 开发规范
+### 文档
 
-### Python 代码规范
+| 文件 | 说明 |
+|------|------|
+| `docs/QWEN3_GENERATIVE_RECALL_DESIGN.md` | Qwen3 技术方案 + GitHub 调研 |
+| `docs/TRT_LLM_DATASYSTEM_KV_CACHE_INTEGRATION.md` | KV Cache 集成方案 |
+| `docs/IMPLEMENTATION_GUIDE.md` | **★ 完整实施指南** (Step-by-step) |
+| `docs/P0_DATASYSTEM_LATENCY_GUIDE.md` | DataSystem 延迟指南 |
 
-1. **文件头**：每个文件必须包含编码声明
-   ```python
-   # -*- coding: utf-8 -*-
-   """模块文档字符串."""
-   ```
+## 当前状态 (2026-05-16)
 
-2. **导入顺序**：
-   - 标准库
-   - 第三方库
-   - 项目内部模块
+### Git
 
-3. **命名规范**：
-   - 类名：PascalCase（`GenerativeDecoder`）
-   - 函数/变量：snake_case（`get_recommendations`）
-   - 常量：UPPER_SNAKE_CASE（`MAX_SEQ_LEN`）
+- **分支**: `dev` (Qwen3 改造), `main` (原有 GPT2)
+- **远程**: `gitcode` → `https://gitcode.com/weixin_43325008/pairec4tigerllm.git`
+- **远程**: `origin` → `git@github.com:tigerwe/pairec4tigerllm.git`
+- **最新提交**: `e8d16e4` feat: Qwen3-0.6B generative recall + KV Cache Manager
 
-4. **文档字符串**：
-   ```python
-   def recommend(self, user_id: str, topk: int = 10) -> List[Item]:
-       """获取推荐.
+### 已完成
 
-       Args:
-           user_id: 用户 ID
-           topk: 推荐数量
+- [x] Qwen3GenerativeRec 模型类 (修正 KV Cache + RoPE)
+- [x] KVCacheManager (HBM LRU + DataSystem 序列化)
+- [x] train.py 改造 (`--backbone qwen3`)
+- [x] server.py 改造 (Qwen3 加载 + KV Cache 推荐)
+- [x] 本地语法/导入验证通过
+- [x] 推送到 gitcode `dev` 分支
+- [x] 实施指南文档
 
-       Returns:
-           推荐物品列表
-       """
-   ```
+### 待完成 (下一阶段)
 
-### Go 代码规范
+- [ ] 4090 openEuler: 下载 Qwen3-0.6B 权重
+- [ ] 训练 (小规模 → 全量)
+- [ ] 启动推理服务 + 验证
+- [ ] 接入 DataSystem client
+- [ ] Go pairec 端到端联调
+- [ ] A/B 测试 Recall@K
+- [ ] Phase 3: TensorRT-LLM 推理
 
-1. **命名规范**：
-   - 导出标识符：PascalCase（`GenerativeRecall`）
-   - 私有标识符：camelCase（`historyFrom`）
+## 关键设计决策
 
-2. **错误处理**：
-   ```go
-   if err != nil {
-       return fmt.Errorf("operation failed: %w", err)
-   }
-   ```
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| Backbone | Qwen3-0.6B | 28层/GQA/RoPE/SwiGLU, 单卡可训可推 |
+| ID 接入方式 | `inputs_embeds` (绕过词表) | 不修改 transformers 源码 |
+| 输入层 | 4×Embedding(256,1024)→sum | 保留 RQ-VAE 4-quantizer 结构 |
+| 输出层 | 4×Linear(1024,256) | 独立预测各分量 |
+| 微调策略 | LoRA rank=8, alpha=16 | ~30MB 可训参数, 冻结 1.2GB 基座 |
+| KV Cache | Qwen3 原生 `use_cache=True` | 内置支持, 无需额外改动 |
+| 推理后端 | Phase 1 PyTorch, Phase 3 TRT | <100ms 延迟已满足推荐场景 |
+| Go 服务 | 零改动 | `/recommend` API 接口不变 |
 
-3. **日志格式**：
-   ```go
-   log.Info(fmt.Sprintf("requestId=%s\tmodule=%s\tname=%s\tcount=%d",
-       ctx.RecommendId, "GenerativeRecall", r.modelName, len(items)))
-   ```
+## 已修正的设计文档 Bug
+
+> 以下 Bug 在 `QWEN3_GENERATIVE_RECALL_DESIGN.md` 中存在, 实际代码已修正。
+
+1. **`generate()` KV Cache 使用错误** — 原设计每次 Decode 传完整序列, 正确做法: Prefill 后只传单 token (`seq_len=1`)
+2. **RoPE position_ids 缺失** — Decode 步必须显式传入 `past_len + step` 作为绝对位置
+3. **LoRA merge 后旧对象未释放** — `merge_and_unload()` 后需 `del peft_model` + `torch.cuda.empty_cache()`
 
 ## 常见任务
 
-### 添加新的召回路
-
-1. 在 `services/recall/` 下创建新的召回文件
-2. 实现召回接口：
-   ```go
-   type NewRecall struct {
-       *recall.BaseRecall
-       // 自定义字段
-   }
-
-   func (r *NewRecall) GetCandidateItems(user *module.User, ctx *context.RecommendContext) []*module.Item {
-       // 实现召回逻辑
-   }
-   ```
-3. 在配置中注册新的召回类型
-
-### 修改模型架构
-
-1. **RQ-VAE**：编辑 `training/rqvae/model.py`
-   - `ResidualVectorQuantizer`：修改量化器
-   - `Encoder`/`Decoder`：修改编解码器
-
-2. **GPT2 Decoder**：编辑 `training/decoder/model.py`
-   - `GenerativeDecoder`：修改 Transformer 层数、头数等
-
-### 添加新的 API 接口
-
-1. Python 推理服务：编辑 `inference/trt_llm/server.py`
-   ```python
-   @app.route('/new_endpoint', methods=['POST'])
-   def new_endpoint():
-       # 实现逻辑
-   ```
-
-2. Go 客户端：编辑 `services/recall/trtllm_client.go`
-   ```go
-   func (c *TRTLLMClient) NewMethod() (*Response, error) {
-       // 实现逻辑
-   }
-   ```
-
-## 调试技巧
-
-### Python 调试
-
-```python
-# 添加日志
-import logging
-logging.basicConfig(level=logging.DEBUG)
-
-# 检查模型输出
-print(f"Logits shape: {logits.shape}")
-```
-
-### Go 调试
-
-```go
-// 使用 fmt.Printf 打印调试信息
-fmt.Printf("Debug: user_id=%s, history=%v\n", user.Id, history)
-
-// 检查错误
-if err != nil {
-    log.Error(fmt.Sprintf("Error: %v", err))
-}
-```
-
-## 测试
-
-### 单元测试
+### 训练 Qwen3
 
 ```bash
-# Python
-python -m pytest tests/unit/
-
-# Go
-go test ./services/...
+python -m training.decoder.train \
+    --backbone qwen3 \
+    --qwen3_model_path ./models/Qwen3-0.6B \
+    --train_data ./data/processed/train_sequences.json \
+    --num_epochs 10 --batch_size 32 --learning_rate 5e-5 \
+    --checkpoint_dir ./checkpoints/decoder_qwen3
 ```
 
-### 集成测试
+### 启动推理服务
 
 ```bash
-# 启动服务
-./scripts/start_trt_server.sh &
-./scripts/start_pairec.sh &
-
-# 运行测试
-curl -v http://localhost:8080/api/rec/feed \
-  -d '{"uid": "123", "size": 10}'
+python -m inference.trt_llm.server \
+    --model_path ./checkpoints/decoder_qwen3/decoder_best.pt \
+    --port 8000 --backbone qwen3 \
+    --qwen3_model_path ./models/Qwen3-0.6B
 ```
 
-## 性能优化
+### 验证推荐接口
 
-### 推理优化
+```bash
+curl -X POST http://localhost:8000/recommend \
+    -H "Content-Type: application/json" \
+    -d '{"user_id":"u1","history":[[10,20,30,40]],"topk":5}'
+```
 
-1. **TensorRT-LLM 1.0.0**：
-   - 使用 FP16 量化: `--dtype float16`
-   - 启用 GPT Attention 插件: `--use_gpt_attention_plugin`
-   - 启用 GEMM 插件: `--use_gemm_plugin`
-   - 调整 max_seq_len
-   - 构建命令:
-     ```bash
-     python inference/trt_llm/build_engine.py \
-         --checkpoint_path ./checkpoints/decoder/decoder_best.pt \
-         --output_path ./exported/decoder/decoder.engine \
-         --dtype float16 \
-         --use_gpt_attention_plugin \
-         --use_gemm_plugin
-     ```
+## 环境信息
 
-2. **缓存**：
-   - 启用 Redis 缓存
-   - 设置合理的 TTL
+| 项目 | 本地 (RTX 3060 Laptop) | 远程 (4090 D) |
+|------|----------------------|--------------|
+| 显存 | 6 GB | 24 GB |
+| 训练 | 不可 (显存不足) | ✅ batch=32 |
+| 推理 | ✅ batch=1 | ✅ |
+| OS | Ubuntu | openEuler |
+| Python | 3.8 | 3.10+ |
+| 模型下载方式 | hf-mirror | hf-mirror / ModelScope |
 
-### 训练优化
+## Git 操作速查
 
-1. **混合精度**：
-   ```python
-   from torch.cuda.amp import autocast, GradScaler
-   scaler = GradScaler()
-   ```
+```bash
+# 提交到 dev
+git add <files>
+git commit -m "feat: ..."
+git push gitcode dev
 
-2. **数据加载**：
-   - 使用 `num_workers > 0`
-   - 启用 `pin_memory`
-
-## 故障排查
-
-### 常见问题
-
-1. **TensorRT-LLM 1.0.0 启动失败**
-   - 检查 CUDA 版本是否为 12.2
-   - 检查 TensorRT-LLM 版本: `pip show tensorrt-llm`
-   - 检查模型文件是否存在
-   - 查看详细日志: `docker-compose logs inference`
-
-2. **推理结果为空**
-   - 检查语义 ID 映射是否正确
-   - 检查输入历史是否为空
-
-3. **pairec 集成失败**
-   - 检查配置文件格式
-   - 检查服务地址是否可达
-   - 检查 user_features.json 是否存在
-
-## 已知限制
-
-1. **TensorRT-LLM 1.0.0 推理**: 
-   - 由于 TensorRT-LLM 1.0.0 API 可能变化，`server.py` 中的 TensorRT-LLM 推理代码提供基本框架
-   - 系统已提供完整的 PyTorch 回退机制，确保服务可用
-   - 生产环境建议根据实际 API 调整 `TensorRTLLMInference` 类的实现
-
-2. **语义 ID 映射**:
-   - 首次数据预处理使用哈希方式生成临时语义 ID
-   - 建议在 RQ-VAE 训练完成后重新预处理数据以获得最优效果
-
-3. **用户特征**:
-   - pairec 配置依赖 `data/user_features.json`
-   - 使用 `scripts/generate_user_features.py` 生成
+# 如果 HTTPS 需要 token
+git push https://USER:TOKEN@gitcode.com/weixin_43325008/pairec4tigerllm.git dev
+```
 
 ## 参考资源
 
-- [pairec 文档](https://github.com/alibaba/pairec)
-- [RQ-VAE 论文](https://arxiv.org/abs/2305.05065)
-- [TensorRT-LLM 1.0.0 Release](https://github.com/NVIDIA/TensorRT-LLM/releases/tag/v1.0.0)
-- [TensorRT-LLM 文档](https://nvidia.github.io/TensorRT-LLM/)
-- [Tenrec 数据集](https://github.com/yuangh-x/2022-M10-Tenrec)
-- [迁移指南](docs/TENSORRT_LLM_1.0_MIGRATION.md)
-
-## 联系
-
-如有问题，请查阅项目文档或提交 Issue。
+- [Qwen3-0.6B HuggingFace](https://huggingface.co/Qwen/Qwen3-0.6B)
+- [hf-mirror 镜像站](https://hf-mirror.com)
+- [gitcode 仓库](https://gitcode.com/weixin_43325008/pairec4tigerllm)
+- [PEFT (LoRA)](https://github.com/huggingface/peft)
+- [实施指南](docs/IMPLEMENTATION_GUIDE.md)
+- [Qwen3 方案设计](docs/QWEN3_GENERATIVE_RECALL_DESIGN.md)
+- [KV Cache 集成方案](docs/TRT_LLM_DATASYSTEM_KV_CACHE_INTEGRATION.md)
