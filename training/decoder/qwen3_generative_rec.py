@@ -105,6 +105,15 @@ class Qwen3GenerativeRec(nn.Module):
         self.input_norm.to(dtype=model_dtype)
         self.output_heads.to(dtype=model_dtype)
 
+        # ── 5.6 存储底层 transformer backbone 引用 ─────────
+        # LoRA 模式下 self.base_model 是 PeftModel, .model 是 Qwen3ForCausalLM;
+        # 非 LoRA 模式下 self.base_model 就是 Qwen3ForCausalLM.
+        # 两种情况下 .model.model 都能拿到 Qwen3Model (transformer backbone).
+        if self.lora_enabled:
+            self._transformer = self.base_model.model.model
+        else:
+            self._transformer = self.base_model.model
+
         # ── 6. 统计 ────────────────────────────────────────
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.parameters())
@@ -158,7 +167,7 @@ class Qwen3GenerativeRec(nn.Module):
         """
         inputs_embeds = self._build_inputs_embeds(semantic_ids)
 
-        outputs = self.base_model.model(
+        outputs = self._transformer(
             input_ids=None,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
