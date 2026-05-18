@@ -164,7 +164,8 @@ def train_decoder(
     log_dir: str = './logs',
     save_interval: int = 5,
     patience: int = 10,
-    warmup_steps: int = 1000
+    warmup_steps: int = 1000,
+    max_steps: int = None,
 ) -> GenerativeDecoder:
     """训练 Decoder 模型.
 
@@ -264,6 +265,43 @@ def train_decoder(
             # 记录
             epoch_losses.append(loss.item())
             global_step += 1
+
+            # ── 达到最大步数则保存并退出 ─────────────────
+            if max_steps is not None and global_step >= max_steps:
+                avg_loss = sum(epoch_losses) / len(epoch_losses)
+                step_path = os.path.join(checkpoint_dir, f'decoder_step_{global_step}.pt')
+                if hasattr(model, 'hidden_size'):
+                    ckpt_config = {
+                        'backbone': 'qwen3',
+                        'vocab_size': model.vocab_size,
+                        'num_quantizers': model.num_quantizers,
+                        'max_seq_len': model.max_seq_len,
+                        'hidden_size': model.hidden_size,
+                        'num_layers': model.num_layers,
+                        'num_kv_heads': model.num_kv_heads,
+                        'head_dim': model.head_dim,
+                    }
+                else:
+                    ckpt_config = {
+                        'backbone': 'gpt2',
+                        'vocab_size': model.vocab_size,
+                        'num_quantizers': model.num_quantizers,
+                        'embedding_dim': model.embedding_dim,
+                        'num_layers': len(model.transformer_blocks),
+                        'num_heads': model.transformer_blocks[0].attention.num_heads,
+                        'max_seq_len': model.max_seq_len,
+                    }
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': avg_loss,
+                    'config': ckpt_config,
+                    'global_step': global_step,
+                }, step_path)
+                print(f"\nReached max_steps={max_steps}, checkpoint saved to {step_path}")
+                writer.close()
+                return model
 
             # 更新进度条
             progress_bar.set_postfix({
@@ -436,6 +474,8 @@ def main():
                         help='LoRA rank (qwen3 only)')
     parser.add_argument('--lora_alpha', type=int, default=16,
                         help='LoRA alpha (qwen3 only)')
+    parser.add_argument('--max_steps', type=int, default=None,
+                        help='Max training steps (early stop within epoch)')
 
     args = parser.parse_args()
 
@@ -490,7 +530,8 @@ def main():
         max_seq_len=args.max_seq_len,
         device=args.device,
         checkpoint_dir=args.checkpoint_dir,
-        log_dir=args.log_dir
+        log_dir=args.log_dir,
+        max_steps=args.max_steps,
     )
 
 
