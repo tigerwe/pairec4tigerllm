@@ -99,6 +99,12 @@ class Qwen3GenerativeRec(nn.Module):
             )
             self.base_model = get_peft_model(self.base_model, lora_config)
 
+        # ── 5.5 将新增模块转换为 base model 的 dtype ───────
+        model_dtype = next(self.base_model.parameters()).dtype
+        self.semantic_embeddings.to(dtype=model_dtype)
+        self.input_norm.to(dtype=model_dtype)
+        self.output_heads.to(dtype=model_dtype)
+
         # ── 6. 统计 ────────────────────────────────────────
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.parameters())
