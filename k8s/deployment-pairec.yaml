@@ -1,0 +1,73 @@
+# ============================================
+# 推荐服务 Deployment (Go, CPU)
+# ============================================
+# 特点: 无状态，可水平扩容
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pairec
+  namespace: pairec
+  labels:
+    app: pairec
+spec:
+  replicas: 3  # Go 服务可水平扩容
+  selector:
+    matchLabels:
+      app: pairec
+  template:
+    metadata:
+      labels:
+        app: pairec
+    spec:
+      containers:
+        - name: pairec
+          image: registry.example.com/pairec-server:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: CONFIG_PATH
+              value: "/app/configs/pairec_config.json"
+            - name: PORT
+              value: "8080"
+            - name: INFERENCE_URL
+              value: "http://inference:8000"
+          resources:
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/configs
+              readOnly: true
+            - name: data-volume
+              mountPath: /app/data
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config-volume
+          configMap:
+            name: pairec-config
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: data-pvc

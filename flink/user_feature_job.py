@@ -153,8 +153,8 @@ class ClickEventProducer:
             value_serializer=lambda v: json.dumps(v).encode('utf-8')
         )
         
-        # 预生成用户池
-        user_pool = [f"user_{i:05d}" for i in range(num_users)]
+        # 预生成用户池（纯数字格式，与离线文件一致）
+        user_pool = [str(i) for i in range(num_users)]
         item_pool = list(range(10000, 20000))  # 10000个物品
         
         print(f"\nProducing events to {INPUT_TOPIC}...")

@@ -1,85 +1,115 @@
+# ============================================
+# PaiRec4TigerLLM - 本地开发环境
+# ============================================
+# 使用说明:
+#   1. 确保模型文件在 checkpoints/ 目录
+#   2. 确保数据文件在 data/ 目录
+#   3. docker compose up -d
+# ============================================
+
 version: '3.8'
 
 services:
-  # TensorRT-LLM 推理服务
+  # ---------- 推理服务 ----------
   inference:
     build:
       context: .
-      dockerfile: docker/Dockerfile
-    image: pairec4tigerllm:latest
+      dockerfile: docker/Dockerfile.inference
+    image: pairec-inference:latest
     container_name: pairec-inference
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=0
       - CUDA_VISIBLE_DEVICES=0
+      - MODEL_PATH=/app/checkpoints/decoder/decoder_best.pt
+      - PORT=8000
+      - DEVICE=cuda
+      - MAX_BATCH_SIZE=32
+      - MAX_SEQ_LEN=512
+      - USE_TRT_LLM=false
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
-      - ./checkpoints:/app/checkpoints
-      - ./exported:/app/exported
-      - ./logs:/app/logs
-    command: >
-      bash -c "
-        echo 'Waiting for model files...' &&
-        sleep 5 &&
-        python inference/trt_llm/server.py
-          --model_path ./checkpoints/decoder/decoder_best.pt
-          --port 8000
-          --device cuda
-          --max_batch_size 32
-          --max_seq_len 512
-      "
+      # 模型文件外挂（不打包进镜像，方便热更新）
+      - ./checkpoints:/app/checkpoints:ro
+      # 数据文件
+      - ./data:/app/data:ro
+      # 日志输出
+      - ./logs/inference:/app/logs
+    networks:
+      - pairec-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
       retries: 3
       start_period: 60s
-    networks:
-      - pairec-network
+    restart: unless-stopped
 
-  # pairec 推荐服务
+  # ---------- 推荐服务 (Go) ----------
   pairec:
     build:
       context: .
-      dockerfile: docker/Dockerfile
-    image: pairec4tigerllm:latest
-    container_name: pairec-service
+      dockerfile: docker/Dockerfile.pairec
+    image: pairec-server:latest
+    container_name: pairec-server
+    environment:
+      - CONFIG_PATH=/app/configs/pairec_config.json
+      - PORT=8080
+      - INFERENCE_URL=http://inference:8000
     ports:
       - "8080:8080"
     volumes:
-      - ./data:/app/data
-      - ./configs:/app/configs
-    command: >
-      bash -c "
-        echo 'Waiting for inference service...' &&
-        sleep 10 &&
-        go run services/main.go
-          --config ./configs/pairec_config.json
-          --port 8080
-      "
+      # 配置文件外挂（方便修改配置不用重建镜像）
+      - ./configs:/app/configs:ro
+      # 数据文件
+      - ./data:/app/data:ro
+      # 日志输出
+      - ./logs/pairec:/app/logs
+    networks:
+      - pairec-net
     depends_on:
       inference:
         condition: service_healthy
-    networks:
-      - pairec-network
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
 
-  # TensorBoard (可选)
-  tensorboard:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    image: pairec4tigerllm:latest
-    container_name: pairec-tensorboard
+  # ---------- 可选: Prometheus 监控 ----------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pairec-prometheus
     ports:
-      - "6006:6006"
+      - "9090:9090"
     volumes:
-      - ./logs:/app/logs
-    command: tensorboard --logdir=/app/logs --port=6006 --host=0.0.0.0
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     networks:
-      - pairec-network
+      - pairec-net
+    profiles: ["monitoring"]  # docker compose --profile monitoring up -d
+
+  # ---------- 可选: Grafana 可视化 ----------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pairec-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - pairec-net
+    profiles: ["monitoring"]
 
 networks:
-  pairec-network:
+  pairec-net:
     driver: bridge
+
+volumes:
+  grafana-data:

@@ -1,0 +1,80 @@
+# ============================================
+# 推理服务 Deployment (GPU)
+# ============================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference
+  namespace: pairec
+  labels:
+    app: inference
+spec:
+  replicas: 1  # GPU 服务通常单副本，或根据 GPU 数量调整
+  selector:
+    matchLabels:
+      app: inference
+  template:
+    metadata:
+      labels:
+        app: inference
+    spec:
+      nodeSelector:
+        accelerator: nvidia-gpu  # 调度到 GPU 节点
+      containers:
+        - name: inference
+          image: registry.example.com/pairec-inference:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: MODEL_PATH
+              value: "/app/checkpoints/decoder/decoder_best.pt"
+            - name: PORT
+              value: "8000"
+            - name: DEVICE
+              value: "cuda"
+            - name: MAX_BATCH_SIZE
+              value: "64"
+            - name: MAX_SEQ_LEN
+              value: "512"
+            - name: USE_TRT_LLM
+              value: "true"
+          resources:
+            limits:
+              nvidia.com/gpu: 1   # 申请 1 块 GPU
+              memory: "8Gi"
+              cpu: "4"
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+          volumeMounts:
+            - name: model-volume
+              mountPath: /app/checkpoints
+              readOnly: true
+            - name: data-volume
+              mountPath: /app/data
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: model-volume
+          persistentVolumeClaim:
+            claimName: model-pvc
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: data-pvc

@@ -1,0 +1,43 @@
+diff --git a/services/recall/trtllm_client.go b/services/recall/trtllm_client.go
+index 8cb8670..0666e7b 100644
+--- a/services/recall/trtllm_client.go
++++ b/services/recall/trtllm_client.go
+@@ -28,2 +28,14 @@ type RecommendRequest struct {
+ 
++// TraceInfo 推理服务回传的性能追踪信息.
++type TraceInfo struct {
++	TotalMs        float64 `json:"total_ms"`         // 推理服务总耗时
++	PrepareInputMs float64 `json:"prepare_input_ms"` // 输入准备耗时
++	ModelForwardMs float64 `json:"model_forward_ms"` // 模型前向耗时
++	GenerateMs     float64 `json:"generate_ms"`      // 采样/搜索耗时
++	MapItemMs      float64 `json:"map_item_ms"`      // 语义ID映射耗时
++	KvLookupMs     float64 `json:"kv_lookup_ms"`     // DataSystem 查询耗时
++	KvWriteMs      float64 `json:"kv_write_ms"`      // DataSystem 写入耗时
++	Backend        string  `json:"backend"`          // 后端类型: tensorrt / pytorch / cache_hit
++}
++
+ // Recommendation 推荐结果.
+@@ -42,2 +54,3 @@ type RecommendResponse struct {
+ 	Error            string            `json:"error,omitempty"`
++	Trace            *TraceInfo        `json:"trace,omitempty"`   // 推理服务内部追踪信息
+ }
+@@ -65,3 +78,4 @@ func NewTRTLLMClient(cfg *config.GenerativeRecallConfig) (*TRTLLMClient, error)
+ // Recommend 获取推荐.
+-func (c *TRTLLMClient) Recommend(req *RecommendRequest) (*RecommendResponse, error) {
++// traceID 用于端到端追踪，会通过 HTTP Header 透传给推理服务.
++func (c *TRTLLMClient) Recommend(req *RecommendRequest, traceID string) (*RecommendResponse, error) {
+ 	// 设置默认值
+@@ -82,6 +96,2 @@ func (c *TRTLLMClient) Recommend(req *RecommendRequest) (*RecommendResponse, err
+ 	}
+-	
+-	// 调试：打印请求体
+-	fmt.Printf("[DEBUG-CLIENT] Request JSON: %s\n", string(jsonData))
+-	fmt.Printf("[DEBUG-CLIENT] Request length: %d\n", len(jsonData))
+ 
+@@ -106,2 +116,6 @@ func (c *TRTLLMClient) Recommend(req *RecommendRequest) (*RecommendResponse, err
+ 		httpReq.Header.Set("Content-Type", "application/json")
++		// 非侵入式追踪：透传 Trace ID
++		if traceID != "" {
++			httpReq.Header.Set("X-Request-ID", traceID)
++		}
+ 		

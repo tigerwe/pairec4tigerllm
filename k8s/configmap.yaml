@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pairec-config
+  namespace: pairec
+data:
+  # pairec 主配置
+  pairec_config.json: |
+    {
+      "recall": {
+        "generative_recall": {
+          "type": "GenerativeRecall",
+          "model_name": "generative_recall",
+          "recall_count": 50,
+          "cache_adapter": "local",
+          "cache_time": 300,
+          "tiger_recall_conf": {
+            "tiger_name": "http://inference:8000",
+            "top_k": 50,
+            "temperature": 1.0,
+            "beam_width": 1,
+            "history_from": "user_feature",
+            "history_feature_name": "click_history",
+            "history_delimiter": ",",
+            "history_max_length": 20
+          }
+        }
+      }
+    }

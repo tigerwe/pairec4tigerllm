@@ -6,9 +6,13 @@
   },
   "SceneConfs": {
     "home_feed": {
-      "RecallNames": ["generative_recall"],
-      "SortNames": ["boost_score_sort"]
+      "default": {
+        "RecallNames": ["generative_recall"]
+      }
     }
+  },
+  "SortNames": {
+    "home_feed": ["boost_score_sort"]
   },
   "RecallConfs": [
     {

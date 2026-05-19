@@ -1,0 +1,104 @@
+# ============================================
+# PaiRec4TigerLLM - 生产环境
+# ============================================
+# 特点:
+#   - 使用预构建镜像（不从源码 build）
+#   - 限制资源使用
+#   - 日志驱动改为 json-file 并限制大小
+#   - 使用外部网络（与反向代理共用）
+# ============================================
+
+version: '3.8'
+
+services:
+  inference:
+    image: ${REGISTRY:-registry.example.com}/pairec-inference:${TAG:-latest}
+    container_name: pairec-inference-prod
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPU_DEVICES:-0}
+      - CUDA_VISIBLE_DEVICES=${GPU_DEVICES:-0}
+      - MODEL_PATH=/app/checkpoints/decoder/decoder_best.pt
+      - PORT=8000
+      - DEVICE=cuda
+      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-64}
+      - MAX_SEQ_LEN=${MAX_SEQ_LEN:-512}
+      - USE_TRT_LLM=${USE_TRT_LLM:-true}
+    ports:
+      - "127.0.0.1:8000:8000"  # 仅本地访问，通过反向代理暴露
+    volumes:
+      - inference-models:/app/checkpoints:ro
+      - inference-data:/app/data:ro
+    networks:
+      - pairec-prod
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: always
+
+  pairec:
+    image: ${REGISTRY:-registry.example.com}/pairec-server:${TAG:-latest}
+    container_name: pairec-server-prod
+    environment:
+      - CONFIG_PATH=/app/configs/pairec_config.json
+      - PORT=8080
+      - INFERENCE_URL=http://inference:8000
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - pairec-configs:/app/configs:ro
+      - pairec-data:/app/data:ro
+    networks:
+      - pairec-prod
+    depends_on:
+      - inference
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: always
+    deploy:
+      replicas: 2  # Go 服务可以水平扩容
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 128M
+
+networks:
+  pairec-prod:
+    driver: bridge
+
+volumes:
+  inference-models:
+    driver: local
+  inference-data:
+    driver: local
+  pairec-configs:
+    driver: local
+  pairec-data:
+    driver: local

@@ -1,0 +1,35 @@
+# ============================================
+# Service 定义
+# ============================================
+
+# 推理服务 ClusterIP（仅供内部调用）
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference
+  namespace: pairec
+spec:
+  selector:
+    app: inference
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  type: ClusterIP
+
+---
+
+# 推荐服务 LoadBalancer / NodePort（对外暴露）
+apiVersion: v1
+kind: Service
+metadata:
+  name: pairec
+  namespace: pairec
+spec:
+  selector:
+    app: pairec
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  type: LoadBalancer

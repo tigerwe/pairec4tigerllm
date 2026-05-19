@@ -1,0 +1,35 @@
+# ============================================
+# PersistentVolumeClaim (模型与数据存储)
+# ============================================
+# 生产环境建议:
+#   - 模型文件: 使用对象存储(S3/OSS) + initContainer 下载，或 NFS
+#   - 数据文件: 同样的方式挂载
+# ============================================
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-pvc
+  namespace: pairec
+spec:
+  accessModes:
+    - ReadOnlyMany  # 多个 Pod 可只读挂载
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: fast-ssd  # 根据集群 StorageClass 调整
+
+---
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-pvc
+  namespace: pairec
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: fast-ssd

@@ -90,7 +90,7 @@ class Qwen3GenerativeRec(nn.Module):
 
         self.base_model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
-            dtype=dtype,
+            torch_dtype=dtype,
             trust_remote_code=True,
             device_map=None,
         )
