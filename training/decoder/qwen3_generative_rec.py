@@ -121,6 +121,13 @@ class Qwen3GenerativeRec(nn.Module):
             self.base_model.gradient_checkpointing_enable()
             print("[Qwen3GenerativeRec] Gradient checkpointing enabled")
 
+        # ── 3.6 缓存 transformer + lm_head (绕过全序列 logits) ─
+        if self.lora_enabled:
+            self._transformer = self.base_model.model.model
+        else:
+            self._transformer = self.base_model.model
+        self._lm_head = self.base_model.lm_head
+
         # ── 4. 统计 ───────────────────────────────────
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.parameters())
@@ -211,33 +218,49 @@ class Qwen3GenerativeRec(nn.Module):
             max_length=self.max_seq_len,
         ).to(device)
 
-        input_ids = encoded["input_ids"]
+        input_ids = encoded["input_ids"]   # [B, prompt_len]
         attn = encoded["attention_mask"]
 
-        # ── 构造 labels: 仅目标 token 位置参与 loss ──
-        labels_tensor = input_ids.clone()
-        labels_tensor[:] = -100  # 默认全部忽略
-
+        # ── 找每样本目标 token 位置 ──────────────────
+        target_positions: List[List[int]] = []   # [batch, list of 4 positions]
         for b in range(batch_size):
             ids = input_ids[b].tolist()
-            sem_positions = [p for p, tid in enumerate(ids)
-                             if tid in self._id_to_sem]
+            sem_pos = [p for p, tid in enumerate(ids) if tid in self._id_to_sem]
             # 最后 num_quantizers 个语义 token = 目标位置
-            if len(sem_positions) >= self.num_quantizers:
-                for pos in sem_positions[-self.num_quantizers:]:
-                    labels_tensor[b, pos] = input_ids[b, pos]
+            target_positions.append(sem_pos[-self.num_quantizers:]
+                                    if len(sem_pos) >= self.num_quantizers else [])
 
-        # ── Causal LM forward ────────────────────────
-        outputs = self.base_model(
-            input_ids=input_ids,
+        # ── Transformer forward (跳过 lm_head) ───────
+        embed = self.base_model.get_input_embeddings()
+        inputs_embeds = embed(input_ids)
+        transformer_out = self._transformer(
+            inputs_embeds=inputs_embeds,
             attention_mask=attn,
-            labels=labels_tensor,
-            use_cache=use_cache,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
+            use_cache=False,
         )
+        hidden_states = transformer_out[0]  # [B, prompt_len, 1024]
 
-        return outputs.logits, outputs.loss, None
+        # ── 只算目标位置的 lm_head + loss ───────────
+        # causal LM: hidden_states[pos-1] → lm_head → 预测 token[pos]
+        target_logits_list = []
+        target_labels_list = []
+        for b in range(batch_size):
+            pos = target_positions[b]
+            if pos and pos[0] > 0:  # 目标前必须有上下文 (pos[0]>0)
+                h = hidden_states[b, [p-1 for p in pos]]   # [4, 1024]
+                logits_b = self._lm_head(h)                 # [4, vocab]
+                target_logits_list.append(logits_b)
+                target_labels_list.append(input_ids[b, pos])  # [4]
+
+        if target_logits_list:
+            all_logits = torch.cat(target_logits_list, dim=0)  # [N*4, vocab]
+            all_labels = torch.cat(target_labels_list, dim=0)  # [N*4]
+            loss = F.cross_entropy(all_logits, all_labels)
+        else:
+            all_logits = torch.zeros(0, len(self.tokenizer), device=device)
+            loss = torch.tensor(0.0, device=device, requires_grad=True)
+
+        return all_logits, loss, None
 
     # ═════════════════════════════════════════════════════════
     #  自回归生成 (推理)
