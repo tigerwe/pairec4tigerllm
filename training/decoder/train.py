@@ -291,14 +291,18 @@ def train_decoder(
                         'num_heads': model.transformer_blocks[0].attention.num_heads,
                         'max_seq_len': model.max_seq_len,
                     }
-                torch.save({
+                step_data = {
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': avg_loss,
                     'config': ckpt_config,
                     'global_step': global_step,
-                }, step_path)
+                }
+                if hasattr(model, '_id_to_sem'):
+                    step_data['_id_to_sem'] = model._id_to_sem
+                    step_data['_sem_to_id'] = model._sem_to_id
+                torch.save(step_data, step_path)
                 print(f"\nReached max_steps={max_steps}, checkpoint saved to {step_path}")
                 writer.close()
                 return model
@@ -343,25 +347,30 @@ def train_decoder(
 
                     val_losses.append(loss.item())
 
-                    # 计算指标
-                    metrics = compute_metrics(logits, labels, attention_mask, k=10)
-                    val_metrics_list.append(metrics)
+                    # 计算指标 (prompt 模式下 logits shape 不同，跳过)
+                    if not hasattr(model, 'tokenizer'):
+                        metrics = compute_metrics(logits, labels, attention_mask, k=10)
+                        val_metrics_list.append(metrics)
 
             avg_val_loss = sum(val_losses) / len(val_losses)
 
             # 平均指标
-            avg_metrics = {
-                key: sum(m[key] for m in val_metrics_list) / len(val_metrics_list)
-                for key in val_metrics_list[0].keys()
-            }
+            if val_metrics_list:
+                avg_metrics = {
+                    key: sum(m[key] for m in val_metrics_list) / len(val_metrics_list)
+                    for key in val_metrics_list[0].keys()
+                }
 
-            print(f"Epoch {epoch + 1} - Val Loss: {avg_val_loss:.4f}, "
-                  f"Accuracy: {avg_metrics['accuracy']:.4f}, "
-                  f"Hit@10: {avg_metrics['hit@10']:.4f}")
+                print(f"Epoch {epoch + 1} - Val Loss: {avg_val_loss:.4f}, "
+                      f"Accuracy: {avg_metrics['accuracy']:.4f}, "
+                      f"Hit@10: {avg_metrics['hit@10']:.4f}")
+
+                writer.add_scalar('Epoch/val_accuracy', avg_metrics['accuracy'], epoch)
+                writer.add_scalar('Epoch/val_hit@10', avg_metrics['hit@10'], epoch)
+            else:
+                print(f"Epoch {epoch + 1} - Val Loss: {avg_val_loss:.4f}")
 
             writer.add_scalar('Epoch/val_loss', avg_val_loss, epoch)
-            writer.add_scalar('Epoch/val_accuracy', avg_metrics['accuracy'], epoch)
-            writer.add_scalar('Epoch/val_hit@10', avg_metrics['hit@10'], epoch)
 
             # 早停检查
             if avg_val_loss < best_val_loss:
@@ -372,10 +381,10 @@ def train_decoder(
                 best_model_path = os.path.join(checkpoint_dir, 'decoder_best.pt')
                 # 根据 backbone 保存不同的 config
                 if hasattr(model, 'hidden_size'):
-                    # Qwen3 backbone
+                    # Qwen3 backbone (prompt-based)
                     ckpt_config = {
                         'backbone': 'qwen3',
-                        'model_name_or_path': getattr(args, 'qwen3_model_path', 'Qwen/Qwen3-0.6B'),
+                        'model_name_or_path': '',
                         'vocab_size': model.vocab_size,
                         'num_quantizers': model.num_quantizers,
                         'max_seq_len': model.max_seq_len,
@@ -395,13 +404,17 @@ def train_decoder(
                         'num_heads': model.transformer_blocks[0].attention.num_heads,
                         'max_seq_len': model.max_seq_len,
                     }
-                torch.save({
+                ckpt_data = {
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': best_val_loss,
                     'config': ckpt_config,
-                }, best_model_path)
+                }
+                if hasattr(model, '_id_to_sem'):
+                    ckpt_data['_id_to_sem'] = model._id_to_sem
+                    ckpt_data['_sem_to_id'] = model._sem_to_id
+                torch.save(ckpt_data, best_model_path)
                 print(f"Best model saved to {best_model_path}")
             else:
                 epochs_no_improve += 1
@@ -413,12 +426,16 @@ def train_decoder(
         # 定期保存
         if (epoch + 1) % save_interval == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f'decoder_epoch_{epoch + 1}.pt')
-            torch.save({
+            epoch_data = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': avg_train_loss,
-            }, checkpoint_path)
+            }
+            if hasattr(model, '_id_to_sem'):
+                epoch_data['_id_to_sem'] = model._id_to_sem
+                epoch_data['_sem_to_id'] = model._sem_to_id
+            torch.save(epoch_data, checkpoint_path)
             print(f"Checkpoint saved to {checkpoint_path}")
 
     writer.close()

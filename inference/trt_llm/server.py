@@ -257,6 +257,16 @@ class GenerativeInferenceService:
         self.model = self.model.to(self.device).bfloat16().eval()
         self.model.merge_lora()
 
+        # 恢复 token 映射 (checkpoint 中保存)
+        if '_id_to_sem' in checkpoint:
+            self.model._id_to_sem = {
+                int(k): tuple(v) for k, v in checkpoint['_id_to_sem'].items()
+            }
+        if '_sem_to_id' in checkpoint:
+            self.model._sem_to_id = {
+                tuple(k): int(v) for k, v in checkpoint['_sem_to_id'].items()
+            }
+
         self.hidden_size = model_config.get('hidden_size', 1024)
         self.num_layers = model_config.get('num_layers', 28)
         self.num_kv_heads = model_config.get('num_kv_heads', 8)
@@ -362,21 +372,30 @@ class GenerativeInferenceService:
         final_past_kv = None
 
         with torch.no_grad():
-            if past_kv is not None and hasattr(self.model, 'generate'):
-                # Qwen3: Cache Hit — 跳过 Prefill, 直接 Decode
-                generated = self._decode_with_cache(
-                    input_ids, topk * 2, temperature, past_kv
-                )
-                final_past_kv = generated[1] if isinstance(generated, tuple) else None
-                tokens = generated[0] if isinstance(generated, tuple) else generated
-            elif hasattr(self.model, 'generate'):
-                # Qwen3: Cache Miss — 完整 Prefill + Decode
+            if hasattr(self.model, 'tokenizer'):
+                # Qwen3 Prompt Mode: 原生 generate (内含 tokenizer + prompt 构造)
                 tokens = self.model.generate(
                     input_ids,
                     max_new_tokens=topk * 2,
                     temperature=temperature,
                     use_cache=True,
-                )[0]  # [n_tokens, 4]
+                )  # [batch, max_items, 4]
+                tokens = tokens[0]  # [max_items, 4]
+            elif hasattr(self.model, 'generate'):
+                # Qwen3 inputs_embeds Mode (旧)
+                if past_kv is not None:
+                    generated = self._decode_with_cache(
+                        input_ids, topk * 2, temperature, past_kv
+                    )
+                    final_past_kv = generated[1] if isinstance(generated, tuple) else None
+                    tokens = generated[0] if isinstance(generated, tuple) else generated
+                else:
+                    tokens = self.model.generate(
+                        input_ids,
+                        max_new_tokens=topk * 2,
+                        temperature=temperature,
+                        use_cache=True,
+                    )[0]  # [n_tokens, 4]
             else:
                 # GPT2: 原有逻辑
                 if beam_width and beam_width > 1:
@@ -743,6 +762,9 @@ def main():
                         help='Maximum sequence length')
     parser.add_argument('--use_trt_llm', action='store_true',
                         help='Use TensorRT-LLM if available')
+    parser.add_argument('--qwen3_model_path', type=str,
+                        default='Qwen/Qwen3-0.6B',
+                        help='Path or HF name for Qwen3-0.6B backbone')
 
     args = parser.parse_args()
 
@@ -752,7 +774,8 @@ def main():
         device=args.device,
         max_batch_size=args.max_batch_size,
         max_seq_len=args.max_seq_len,
-        use_trt_llm=args.use_trt_llm
+        use_trt_llm=args.use_trt_llm,
+        qwen3_model_path=args.qwen3_model_path,
     )
 
     # 创建推理服务
