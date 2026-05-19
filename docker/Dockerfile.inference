@@ -1,0 +1,49 @@
+# PaiRec4TigerLLM - 推理服务镜像 (Qwen3)
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 python3-pip python3-dev git curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* && apt-get clean \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
+
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip3 install --no-cache-dir \
+        torch torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/cu124 && \
+    pip3 install --no-cache-dir \
+        transformers peft accelerate bitsandbytes sentencepiece \
+        flask requests werkzeug tqdm numpy pyyaml psutil
+
+WORKDIR /app
+COPY inference/ /app/inference/
+COPY training/decoder/model.py /app/training/decoder/model.py
+COPY training/decoder/qwen3_generative_rec.py /app/training/decoder/qwen3_generative_rec.py
+COPY training/__init__.py /app/training/__init__.py
+COPY training/decoder/__init__.py /app/training/decoder/__init__.py
+COPY data/ /app/data/
+
+COPY docker/entrypoint-inference.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+ENV MODEL_PATH=/app/checkpoints/decoder/decoder_best.pt
+ENV DEVICE=cuda
+ENV PORT=8000
+ENV MAX_BATCH_SIZE=32
+ENV MAX_SEQ_LEN=2048
+ENV BACKBONE=qwen3
+ENV QWEN3_MODEL_PATH=/app/models/Qwen3-0.6B
+ENV USE_TRT_LLM=false
+ENV PYTHONPATH=/app
+
+EXPOSE 8000
+HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -fsS http://localhost:8000/health || exit 1
+
+ENTRYPOINT ["/app/entrypoint.sh"]
