@@ -166,6 +166,7 @@ def train_decoder(
     patience: int = 10,
     warmup_steps: int = 1000,
     max_steps: int = None,
+    grad_accum_steps: int = 1,
 ) -> GenerativeDecoder:
     """训练 Decoder 模型.
 
@@ -241,6 +242,7 @@ def train_decoder(
     for epoch in range(num_epochs):
         model.train()
         epoch_losses = []
+        optimizer.zero_grad()
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}")
 
@@ -249,22 +251,24 @@ def train_decoder(
             labels = labels.to(device)
             attention_mask = attention_mask.to(device)
 
-            # 前向传播 (Qwen3 返回 3 元组, GPT2 返回 2 元组, 统一取前两个)
+            # 前向传播
             logits, loss, _ = model(input_ids, attention_mask, labels)
 
-            # 反向传播
-            optimizer.zero_grad()
+            # 梯度累积: 归一化 loss
+            loss = loss / grad_accum_steps
             loss.backward()
 
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # 记录 (报告原始 scale 的 loss)
+            epoch_losses.append(loss.item() * grad_accum_steps)
 
-            optimizer.step()
-            scheduler.step()
-
-            # 记录
-            epoch_losses.append(loss.item())
-            global_step += 1
+            # 累积够 steps 或最后一批才更新
+            if (batch_idx + 1) % grad_accum_steps == 0 or \
+               (batch_idx + 1) == len(train_loader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
 
             # ── 达到最大步数则保存并退出 ─────────────────
             if max_steps is not None and global_step >= max_steps:
@@ -493,6 +497,8 @@ def main():
                         help='LoRA alpha (qwen3 only)')
     parser.add_argument('--max_steps', type=int, default=None,
                         help='Max training steps (early stop within epoch)')
+    parser.add_argument('--grad_accum_steps', type=int, default=1,
+                        help='Gradient accumulation steps')
 
     args = parser.parse_args()
 
@@ -548,6 +554,7 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
         max_steps=args.max_steps,
+        grad_accum_steps=args.grad_accum_steps,
     )
 
 

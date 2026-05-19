@@ -116,6 +116,11 @@ class Qwen3GenerativeRec(nn.Module):
             )
             self.base_model = get_peft_model(self.base_model, lora_config)
 
+        # ── 3.5 梯度检查点 (换显存) ──────────────────
+        if hasattr(self.base_model, 'gradient_checkpointing_enable'):
+            self.base_model.gradient_checkpointing_enable()
+            print("[Qwen3GenerativeRec] Gradient checkpointing enabled")
+
         # ── 4. 统计 ───────────────────────────────────
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.parameters())
