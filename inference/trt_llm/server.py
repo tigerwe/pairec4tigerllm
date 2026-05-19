@@ -372,7 +372,7 @@ class GenerativeInferenceService:
         final_past_kv = None
 
         with torch.no_grad():
-            if hasattr(self.model, 'tokenizer'):
+            if hasattr(self.model, '_id_to_sem'):
                 # Qwen3 Prompt Mode: 原生 generate (内含 tokenizer + prompt 构造)
                 tokens = self.model.generate(
                     input_ids,

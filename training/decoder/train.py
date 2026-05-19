@@ -348,7 +348,7 @@ def train_decoder(
                     val_losses.append(loss.item())
 
                     # 计算指标 (prompt 模式下 logits shape 不同，跳过)
-                    if not hasattr(model, 'tokenizer'):
+                    if not hasattr(model, '_id_to_sem'):
                         metrics = compute_metrics(logits, labels, attention_mask, k=10)
                         val_metrics_list.append(metrics)
 
@@ -517,7 +517,6 @@ def main():
             model_name_or_path=args.qwen3_model_path,
             vocab_size=args.vocab_size,
             num_quantizers=args.num_quantizers,
-            max_seq_len=args.max_seq_len,
             use_lora=True,
             lora_rank=args.lora_rank,
             lora_alpha=args.lora_alpha,

@@ -36,7 +36,7 @@ class Qwen3GenerativeRec(nn.Module):
         model_name_or_path: str = "Qwen/Qwen3-0.6B",
         vocab_size: int = 256,
         num_quantizers: int = 4,
-        max_seq_len: int = 512,
+        max_seq_len: int = 2048,
         use_lora: bool = True,
         lora_rank: int = 8,
         lora_alpha: int = 16,
@@ -90,7 +90,7 @@ class Qwen3GenerativeRec(nn.Module):
 
         self.base_model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
-            torch_dtype=dtype,
+            dtype=dtype,
             trust_remote_code=True,
             device_map=None,
         )
