@@ -233,6 +233,7 @@ class Qwen3GenerativeRec(nn.Module):
         # ── Transformer forward (跳过 lm_head) ───────
         embed = self.base_model.get_input_embeddings()
         inputs_embeds = embed(input_ids)
+        inputs_embeds.requires_grad_(True)  # 梯度检查点需要
         transformer_out = self._transformer(
             inputs_embeds=inputs_embeds,
             attention_mask=attn,
