@@ -110,6 +110,7 @@ class Qwen3GenerativeRec(nn.Module):
                     "q_proj", "k_proj", "v_proj", "o_proj",
                     "gate_proj", "up_proj", "down_proj",
                 ],
+                modules_to_save=["lm_head", "model.embed_tokens"],
                 lora_dropout=lora_dropout,
                 bias="none",
                 task_type="CAUSAL_LM",
