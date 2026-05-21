@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
@@ -156,6 +157,7 @@ def train_decoder(
     val_sequences: Optional[List[List[List[int]]]] = None,
     start_epoch: int = 0,
     num_epochs: int = 50,
+    local_rank: int = -1,
     batch_size: int = 64,
     learning_rate: float = 1e-4,
     weight_decay: float = 1e-4,
@@ -193,8 +195,21 @@ def train_decoder(
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
 
-    device = torch.device(device if torch.cuda.is_available() else 'cpu')
+    # ── DDP 初始化 ────────────────────────────────
+    is_ddp = local_rank >= 0
+    if is_ddp:
+        torch.distributed.init_process_group(backend='nccl')
+        device_id = local_rank
+        device = torch.device(f'cuda:{device_id}')
+        torch.cuda.set_device(device_id)
+        print(f"[DDP] Rank {torch.distributed.get_rank()}/{torch.distributed.get_world_size()} on cuda:{device_id}")
+    else:
+        device = torch.device(device if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
+
+    if is_ddp:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+        print(f"[DDP] Model wrapped, total {torch.distributed.get_world_size()} GPUs")
 
     print(f"Training on device: {device}")
     print(f"Train sequences: {len(train_sequences)}")
@@ -203,12 +218,14 @@ def train_decoder(
 
     # 数据集
     train_dataset = SequenceDataset(train_sequences, max_seq_len, model.pad_token_id)
+    train_sampler = DistributedSampler(train_dataset) if is_ddp else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         collate_fn=collate_fn,
-        num_workers=4
+        num_workers=2,
     )
 
     # 优化器
@@ -241,11 +258,15 @@ def train_decoder(
     print(f"Total steps: {total_steps}, Warmup steps: {warmup_steps}")
 
     for epoch in range(start_epoch, num_epochs):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         model.train()
         epoch_losses = []
         optimizer.zero_grad()
 
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}")
+        is_rank0 = (not is_ddp or torch.distributed.get_rank() == 0)
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}",
+                            disable=not is_rank0)
 
         for batch_idx, (input_ids, labels, attention_mask) in enumerate(progress_bar):
             input_ids = input_ids.to(device)
@@ -274,6 +295,8 @@ def train_decoder(
             # ── 达到最大步数则保存并退出 ─────────────────
             if max_steps is not None and global_step >= max_steps:
                 avg_loss = sum(epoch_losses) / len(epoch_losses)
+                if not is_rank0:
+                    continue  # 非 rank 0 跳过保存
                 step_path = os.path.join(checkpoint_dir, f'decoder_step_{global_step}.pt')
                 if hasattr(model, 'hidden_size'):
                     ckpt_config = {
@@ -382,45 +405,46 @@ def train_decoder(
                 best_val_loss = avg_val_loss
                 epochs_no_improve = 0
 
-                # 保存最佳模型
-                best_model_path = os.path.join(checkpoint_dir, 'decoder_best.pt')
-                # 根据 backbone 保存不同的 config
-                if hasattr(model, 'hidden_size'):
-                    # Qwen3 backbone (prompt-based)
-                    ckpt_config = {
-                        'backbone': 'qwen3',
-                        'model_name_or_path': '',
-                        'vocab_size': model.vocab_size,
-                        'num_quantizers': model.num_quantizers,
-                        'max_seq_len': model.max_seq_len,
-                        'hidden_size': model.hidden_size,
-                        'num_layers': model.num_layers,
-                        'num_kv_heads': model.num_kv_heads,
-                        'head_dim': model.head_dim,
+                # 保存最佳模型 (仅 rank 0)
+                if is_rank0:
+                    best_model_path = os.path.join(checkpoint_dir, 'decoder_best.pt')
+                    # 根据 backbone 保存不同的 config
+                    if hasattr(model, 'hidden_size'):
+                        # Qwen3 backbone (prompt-based)
+                        ckpt_config = {
+                            'backbone': 'qwen3',
+                            'model_name_or_path': '',
+                            'vocab_size': model.vocab_size,
+                            'num_quantizers': model.num_quantizers,
+                            'max_seq_len': model.max_seq_len,
+                            'hidden_size': model.hidden_size,
+                            'num_layers': model.num_layers,
+                            'num_kv_heads': model.num_kv_heads,
+                            'head_dim': model.head_dim,
+                        }
+                    else:
+                        # GPT2 backbone
+                        ckpt_config = {
+                            'backbone': 'gpt2',
+                            'vocab_size': model.vocab_size,
+                            'num_quantizers': model.num_quantizers,
+                            'embedding_dim': model.embedding_dim,
+                            'num_layers': len(model.transformer_blocks),
+                            'num_heads': model.transformer_blocks[0].attention.num_heads,
+                            'max_seq_len': model.max_seq_len,
+                        }
+                    ckpt_data = {
+                        'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'loss': best_val_loss,
+                        'config': ckpt_config,
                     }
-                else:
-                    # GPT2 backbone
-                    ckpt_config = {
-                        'backbone': 'gpt2',
-                        'vocab_size': model.vocab_size,
-                        'num_quantizers': model.num_quantizers,
-                        'embedding_dim': model.embedding_dim,
-                        'num_layers': len(model.transformer_blocks),
-                        'num_heads': model.transformer_blocks[0].attention.num_heads,
-                        'max_seq_len': model.max_seq_len,
-                    }
-                ckpt_data = {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': best_val_loss,
-                    'config': ckpt_config,
-                }
-                if hasattr(model, '_id_to_sem'):
-                    ckpt_data['_id_to_sem'] = model._id_to_sem
-                    ckpt_data['_sem_to_id'] = model._sem_to_id
-                torch.save(ckpt_data, best_model_path)
-                print(f"Best model saved to {best_model_path}")
+                    if hasattr(model, '_id_to_sem'):
+                        ckpt_data['_id_to_sem'] = model._id_to_sem
+                        ckpt_data['_sem_to_id'] = model._sem_to_id
+                    torch.save(ckpt_data, best_model_path)
+                    print(f"Best model saved to {best_model_path}")
             else:
                 epochs_no_improve += 1
 
@@ -428,8 +452,8 @@ def train_decoder(
                 print(f"Early stopping triggered after {epoch + 1} epochs")
                 break
 
-        # 定期保存
-        if (epoch + 1) % save_interval == 0:
+        # 定期保存 (仅 rank 0)
+        if is_rank0 and (epoch + 1) % save_interval == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f'decoder_epoch_{epoch + 1}.pt')
             if hasattr(model, 'hidden_size'):
                 ckpt_config = {
@@ -464,9 +488,12 @@ def train_decoder(
             torch.save(epoch_data, checkpoint_path)
             print(f"Checkpoint saved to {checkpoint_path}")
 
-    writer.close()
-    print("\nTraining completed!")
+    if is_rank0:
+        writer.close()
+        print("\nTraining completed!")
 
+    if is_ddp:
+        torch.distributed.destroy_process_group()
     return model
 
 
@@ -576,9 +603,16 @@ def main():
             return
         print(f"Resuming from epoch {start_epoch + 1}/{args.num_epochs}")
 
+    # 检测 DDP (torchrun 自动设置 LOCAL_RANK)
+    local_rank = int(os.environ.get('LOCAL_RANK', '-1'))
+    if local_rank >= 0:
+        print(f"[DDP] Detected by torchrun, local_rank={local_rank}")
+        args.batch_size //= int(os.environ.get('WORLD_SIZE', 1))
+
     # 训练
     train_decoder(
         model=model,
+        local_rank=local_rank,
         start_epoch=start_epoch,
         train_sequences=train_sequences,
         val_sequences=val_sequences,
