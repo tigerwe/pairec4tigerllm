@@ -246,8 +246,8 @@ def train_decoder(
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    # TensorBoard
-    writer = SummaryWriter(log_dir)
+    # TensorBoard (仅 rank 0)
+    writer = SummaryWriter(log_dir) if is_rank0 else None
 
     # 训练状态
     best_val_loss = float('inf')
@@ -294,45 +294,46 @@ def train_decoder(
 
             # ── 达到最大步数则保存并退出 ─────────────────
             if max_steps is not None and global_step >= max_steps:
-                avg_loss = sum(epoch_losses) / len(epoch_losses)
-                if not is_rank0:
-                    continue  # 非 rank 0 跳过保存
-                step_path = os.path.join(checkpoint_dir, f'decoder_step_{global_step}.pt')
-                if hasattr(model, 'hidden_size'):
-                    ckpt_config = {
-                        'backbone': 'qwen3',
-                        'vocab_size': model.vocab_size,
-                        'num_quantizers': model.num_quantizers,
-                        'max_seq_len': model.max_seq_len,
-                        'hidden_size': model.hidden_size,
-                        'num_layers': model.num_layers,
-                        'num_kv_heads': model.num_kv_heads,
-                        'head_dim': model.head_dim,
+                if is_rank0:
+                    avg_loss = sum(epoch_losses) / len(epoch_losses)
+                    step_path = os.path.join(checkpoint_dir, f'decoder_step_{global_step}.pt')
+                    if hasattr(model, 'hidden_size'):
+                        ckpt_config = {
+                            'backbone': 'qwen3',
+                            'vocab_size': model.vocab_size,
+                            'num_quantizers': model.num_quantizers,
+                            'max_seq_len': model.max_seq_len,
+                            'hidden_size': model.hidden_size,
+                            'num_layers': model.num_layers,
+                            'num_kv_heads': model.num_kv_heads,
+                            'head_dim': model.head_dim,
+                        }
+                    else:
+                        ckpt_config = {
+                            'backbone': 'gpt2',
+                            'vocab_size': model.vocab_size,
+                            'num_quantizers': model.num_quantizers,
+                            'embedding_dim': model.embedding_dim,
+                            'num_layers': len(model.transformer_blocks),
+                            'num_heads': model.transformer_blocks[0].attention.num_heads,
+                            'max_seq_len': model.max_seq_len,
+                        }
+                    step_data = {
+                        'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'loss': avg_loss,
+                        'config': ckpt_config,
+                        'global_step': global_step,
                     }
-                else:
-                    ckpt_config = {
-                        'backbone': 'gpt2',
-                        'vocab_size': model.vocab_size,
-                        'num_quantizers': model.num_quantizers,
-                        'embedding_dim': model.embedding_dim,
-                        'num_layers': len(model.transformer_blocks),
-                        'num_heads': model.transformer_blocks[0].attention.num_heads,
-                        'max_seq_len': model.max_seq_len,
-                    }
-                step_data = {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': avg_loss,
-                    'config': ckpt_config,
-                    'global_step': global_step,
-                }
-                if hasattr(model, '_id_to_sem'):
-                    step_data['_id_to_sem'] = model._id_to_sem
-                    step_data['_sem_to_id'] = model._sem_to_id
-                torch.save(step_data, step_path)
-                print(f"\nReached max_steps={max_steps}, checkpoint saved to {step_path}")
-                writer.close()
+                    if hasattr(model, '_id_to_sem'):
+                        step_data['_id_to_sem'] = model._id_to_sem
+                        step_data['_sem_to_id'] = model._sem_to_id
+                    torch.save(step_data, step_path)
+                    print(f"\nReached max_steps={max_steps}, checkpoint saved to {step_path}")
+                    writer.close()
+                if is_ddp:
+                    torch.distributed.barrier()
                 return model
 
             # 更新进度条
@@ -342,14 +343,15 @@ def train_decoder(
             })
 
             # 写入 TensorBoard
-            if global_step % 10 == 0:
+            if writer is not None and global_step % 10 == 0:
                 writer.add_scalar('Train/loss', loss.item(), global_step)
                 writer.add_scalar('Train/lr', scheduler.get_last_lr()[0], global_step)
 
         # 平均训练损失
         avg_train_loss = sum(epoch_losses) / len(epoch_losses)
         print(f"Epoch {epoch + 1} - Train Loss: {avg_train_loss:.4f}")
-        writer.add_scalar('Epoch/train_loss', avg_train_loss, epoch)
+        if writer is not None:
+            writer.add_scalar('Epoch/train_loss', avg_train_loss, epoch)
 
         # 验证
         if val_sequences is not None:
@@ -393,12 +395,14 @@ def train_decoder(
                       f"Accuracy: {avg_metrics['accuracy']:.4f}, "
                       f"Hit@10: {avg_metrics['hit@10']:.4f}")
 
-                writer.add_scalar('Epoch/val_accuracy', avg_metrics['accuracy'], epoch)
-                writer.add_scalar('Epoch/val_hit@10', avg_metrics['hit@10'], epoch)
+                if writer is not None:
+                    writer.add_scalar('Epoch/val_accuracy', avg_metrics['accuracy'], epoch)
+                    writer.add_scalar('Epoch/val_hit@10', avg_metrics['hit@10'], epoch)
             else:
                 print(f"Epoch {epoch + 1} - Val Loss: {avg_val_loss:.4f}")
 
-            writer.add_scalar('Epoch/val_loss', avg_val_loss, epoch)
+            if writer is not None:
+                writer.add_scalar('Epoch/val_loss', avg_val_loss, epoch)
 
             # 早停检查
             if avg_val_loss < best_val_loss:
