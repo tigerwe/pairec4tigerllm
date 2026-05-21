@@ -379,6 +379,9 @@ class GenerativeInferenceService:
                     use_cache=True,
                 )  # [batch, max_items, 4]
                 tokens = tokens[0]  # [max_items, 4]
+                print(f"[DEBUG generate] topk={topk}, max_new={topk*2}, "
+                      f"output shape={tokens.shape}, "
+                      f"nonzero={(tokens.sum(dim=1) != 0).sum().item()}/{tokens.shape[0]}")
             elif hasattr(self.model, 'generate'):
                 # Qwen3 inputs_embeds Mode (旧)
                 if past_kv is not None:
@@ -461,18 +464,27 @@ class GenerativeInferenceService:
     ) -> List[Dict]:
         """语义 ID 序列 → 物品 ID 列表 (去重)."""
         recs = []
+        hit = miss = 0
         for i in range(tokens.shape[0]):
             sem_ids = tokens[i].cpu().tolist()
             sem_tuple = tuple(sem_ids)
             item_id = self.semantic_to_item_tuple.get(sem_tuple)
-            if item_id and item_id not in [r['item_id'] for r in recs]:
-                recs.append({
-                    'item_id': item_id,
-                    'semantic_id': sem_ids,
-                    'score': 1.0,
-                })
+            if item_id:
+                hit += 1
+                if item_id not in [r['item_id'] for r in recs]:
+                    recs.append({
+                        'item_id': item_id,
+                        'semantic_id': sem_ids,
+                        'score': 1.0,
+                    })
+            else:
+                miss += 1
+                if i < 3:  # 打印前3个miss的样例
+                    print(f"[DEBUG map] miss: {sem_ids}")
             if len(recs) >= topk:
                 break
+        print(f"[DEBUG map] total={hit+miss}, hit={hit}, miss={miss}, "
+              f"unique={len(recs)}, map_size={len(self.semantic_to_item_tuple)}")
         return recs
 
     def _decode_with_cache(
@@ -712,6 +724,7 @@ class HTTPServer:
                 topk = data.get('topk', 10)
                 temperature = data.get('temperature', 1.0)
                 beam_width = data.get('beam_width', 1)
+                print(f"[DEBUG req] user={user_id} history_len={len(history)} topk={topk}")
 
                 result = self.service.recommend(
                     user_history=history,
