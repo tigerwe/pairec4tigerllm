@@ -273,6 +273,11 @@ class GenerativeInferenceService:
         print(f"Qwen3 model loaded: layers={self.num_layers}, "
               f"kv_heads={self.num_kv_heads}, hidden={self.hidden_size}")
 
+        # ── 注入物品前缀索引到模型 (约束解码用) ─
+        if hasattr(self, '_item_prefix') and self._item_prefix is not None:
+            self.model._item_prefix = self._item_prefix
+            print(f"[constrain] Item prefix trie injected into model")
+
         # 初始化 KVCacheManager
         try:
             from inference.kv_cache.manager import KVCacheManager
@@ -332,10 +337,31 @@ class GenerativeInferenceService:
                 self.semantic_to_item_tuple[key] = int(item_id)
 
             print(f"Loaded {len(self.semantic_to_item)} item mappings")
+
+            # ── 构建物品前缀索引 (用于约束解码) ─
+            s0_set = set()
+            s01_map = {}   # s0 → {s1, ...}
+            s012_map = {}  # (s0,s1) → {s2, ...}
+            s0123_map = {} # (s0,s1,s2) → {s3, ...}
+            for item_id, sem_ids in self.semantic_to_item.items():
+                s0, s1, s2, s3 = sem_ids
+                s0_set.add(s0)
+                s01_map.setdefault(s0, set()).add(s1)
+                s012_map.setdefault((s0, s1), set()).add(s2)
+                s0123_map.setdefault((s0, s1, s2), set()).add(s3)
+            self._item_prefix = {
+                's0_set': s0_set,
+                's01_map': s01_map,
+                's012_map': s012_map,
+                's0123_map': s0123_map,
+            }
+            print(f"[prefix trie] s0={len(s0_set)}, s01={len(s01_map)}, "
+                  f"s012={len(s012_map)}, s0123={len(s0123_map)}")
         else:
             print(f"Warning: Semantic ID mapping not found at {mapping_path}")
             self.semantic_to_item = {}
             self.semantic_to_item_tuple = {}
+            self._item_prefix = None
 
     def recommend(
         self,

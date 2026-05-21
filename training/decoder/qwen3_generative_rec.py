@@ -129,6 +129,9 @@ class Qwen3GenerativeRec(nn.Module):
             self._transformer = self.base_model.model
         self._lm_head = self.base_model.lm_head
 
+        # ── 约束解码: 物品前缀树 (推理时由 server 注入) ─
+        self._item_prefix = None  # {s0_set, s01_map, s012_map, s0123_map}
+
         # ── 4. 统计 ───────────────────────────────────
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.parameters())
@@ -311,16 +314,51 @@ class Qwen3GenerativeRec(nn.Module):
             max_length=self.max_seq_len,
         ).to(device)
 
-        # ── 约束解码: 只生成语义ID token, 强制 s0→s1→s2→s3 顺序 ─
+        # ── 约束解码: 只生成语义ID token, 强制 s0→s1→s2→s3, 可选物品白名单 ─
         def prefix_fn(batch_id, sent):
             last = sent[-1].item()
             info = self._id_to_sem.get(last)
+            pfx = self._item_prefix  # 物品前缀索引
+
             if info is None:
-                # prompt 结束, 必须从 <s0_X> 开始
+                # prompt 结束, 从 <s0_X> 开始 — 只允许地图里存在的 s0
+                if pfx:
+                    return [self._sem_to_id[(0, v)] for v in pfx['s0_set']]
                 return [self._sem_to_id[(0, v)] for v in range(self.vocab_size)]
-            layer, _ = info
-            next_layer = (layer + 1) % self.num_quantizers
-            return [self._sem_to_id[(next_layer, v)] for v in range(self.vocab_size)]
+
+            layer, value = info
+
+            # ── s0 → s1 ──
+            if layer == 0:
+                if pfx:
+                    allowed = pfx['s01_map'].get(value, set())
+                    return [self._sem_to_id[(1, v)] for v in allowed] if allowed else []
+                return [self._sem_to_id[(1, v)] for v in range(self.vocab_size)]
+
+            # ── s1 → s2: 需要知道 s0 ──
+            if layer == 1:
+                s0_info = self._id_to_sem.get(sent[-2].item())
+                s0_val = s0_info[1] if s0_info else None
+                if pfx and s0_val is not None:
+                    allowed = pfx['s012_map'].get((s0_val, value), set())
+                    return [self._sem_to_id[(2, v)] for v in allowed] if allowed else []
+                return [self._sem_to_id[(2, v)] for v in range(self.vocab_size)]
+
+            # ── s2 → s3: 需要知道 s0, s1 ──
+            if layer == 2:
+                s1_info = self._id_to_sem.get(sent[-2].item())
+                s0_info = self._id_to_sem.get(sent[-3].item())
+                s0_val = s0_info[1] if s0_info else None
+                s1_val = s1_info[1] if s1_info else None
+                if pfx and s0_val is not None and s1_val is not None:
+                    allowed = pfx['s0123_map'].get((s0_val, s1_val, value), set())
+                    return [self._sem_to_id[(3, v)] for v in allowed] if allowed else []
+                return [self._sem_to_id[(3, v)] for v in range(self.vocab_size)]
+
+            # ── s3 → 下一轮的 s0 ──
+            if pfx:
+                return [self._sem_to_id[(0, v)] for v in pfx['s0_set']]
+            return [self._sem_to_id[(0, v)] for v in range(self.vocab_size)]
 
         generated = self.base_model.generate(
             **encoded,
