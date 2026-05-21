@@ -218,6 +218,11 @@ class GenerativeInferenceService:
         # 加载语义 ID 映射
         self._load_semantic_id_mapping()
 
+        # ── 注入物品前缀索引到模型 (约束解码用) ─
+        if hasattr(self.model, '_item_prefix') and hasattr(self, '_item_prefix'):
+            self.model._item_prefix = self._item_prefix
+            print(f"[constrain] Item prefix trie injected into model")
+
         print("Inference service initialized successfully")
 
     def _load_pytorch_model(self, checkpoint) -> None:
@@ -272,11 +277,6 @@ class GenerativeInferenceService:
 
         print(f"Qwen3 model loaded: layers={self.num_layers}, "
               f"kv_heads={self.num_kv_heads}, hidden={self.hidden_size}")
-
-        # ── 注入物品前缀索引到模型 (约束解码用) ─
-        if hasattr(self, '_item_prefix') and self._item_prefix is not None:
-            self.model._item_prefix = self._item_prefix
-            print(f"[constrain] Item prefix trie injected into model")
 
         # 初始化 KVCacheManager
         try:
