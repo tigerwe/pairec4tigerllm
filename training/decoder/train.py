@@ -154,6 +154,7 @@ def train_decoder(
     model: GenerativeDecoder,
     train_sequences: List[List[List[int]]],
     val_sequences: Optional[List[List[List[int]]]] = None,
+    start_epoch: int = 0,
     num_epochs: int = 50,
     batch_size: int = 64,
     learning_rate: float = 1e-4,
@@ -239,7 +240,7 @@ def train_decoder(
     print(f"\nStarting training for {num_epochs} epochs...")
     print(f"Total steps: {total_steps}, Warmup steps: {warmup_steps}")
 
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         model.train()
         epoch_losses = []
         optimizer.zero_grad()
@@ -520,6 +521,8 @@ def main():
                         help='Max training steps (early stop within epoch)')
     parser.add_argument('--grad_accum_steps', type=int, default=1,
                         help='Gradient accumulation steps')
+    parser.add_argument('--load_checkpoint', type=str, default=None,
+                        help='Resume training from checkpoint path')
 
     args = parser.parse_args()
 
@@ -561,9 +564,22 @@ def main():
 
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
 
+    # ── 从 checkpoint 恢复 ──────────────────────────
+    start_epoch = 0
+    if args.load_checkpoint:
+        print(f"Loading checkpoint: {args.load_checkpoint}")
+        ckpt = torch.load(args.load_checkpoint, map_location='cpu')
+        model.load_state_dict(ckpt['model_state_dict'], strict=False)
+        start_epoch = ckpt.get('epoch', -1) + 1
+        if start_epoch >= args.num_epochs:
+            print(f"Checkpoint epoch ({start_epoch-1}) >= num_epochs ({args.num_epochs}), nothing to train")
+            return
+        print(f"Resuming from epoch {start_epoch + 1}/{args.num_epochs}")
+
     # 训练
     train_decoder(
         model=model,
+        start_epoch=start_epoch,
         train_sequences=train_sequences,
         val_sequences=val_sequences,
         num_epochs=args.num_epochs,
