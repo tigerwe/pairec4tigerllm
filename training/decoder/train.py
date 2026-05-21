@@ -612,7 +612,6 @@ def main():
     local_rank = int(os.environ.get('LOCAL_RANK', '-1'))
     if local_rank >= 0:
         print(f"[DDP] Detected by torchrun, local_rank={local_rank}")
-        args.batch_size //= int(os.environ.get('WORLD_SIZE', 1))
 
     # 训练
     train_decoder(
