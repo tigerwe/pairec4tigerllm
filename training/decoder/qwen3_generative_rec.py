@@ -318,7 +318,8 @@ class Qwen3GenerativeRec(nn.Module):
         def prefix_fn(batch_id, sent):
             last = sent[-1].item()
             info = self._id_to_sem.get(last)
-            pfx = self._item_prefix  # 物品前缀索引
+            pfx = self._item_prefix
+            _called[0] += 1  # debug
 
             if info is None:
                 # prompt 结束, 从 <s0_X> 开始 — 只允许地图里存在的 s0
@@ -360,6 +361,7 @@ class Qwen3GenerativeRec(nn.Module):
                 return [self._sem_to_id[(0, v)] for v in pfx['s0_set']]
             return [self._sem_to_id[(0, v)] for v in range(self.vocab_size)]
 
+        _called = [0]  # mutable counter for prefix_fn
         generated = self.base_model.generate(
             **encoded,
             max_new_tokens=max_new_tokens,
@@ -370,6 +372,10 @@ class Qwen3GenerativeRec(nn.Module):
             eos_token_id=self.tokenizer.eos_token_id,
             prefix_allowed_tokens_fn=prefix_fn,
         )
+
+        print(f"[DEBUG gen] prefix_fn called {_called[0]} times, "
+              f"pfx_injected={self._item_prefix is not None}, "
+              f"generated_tokens={generated.shape[1] - encoded['input_ids'].shape[1]}")
 
         # ── 解析生成结果 ─────────────────────────────
         results: List[List[List[int]]] = []
