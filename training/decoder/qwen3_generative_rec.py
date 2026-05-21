@@ -311,7 +311,17 @@ class Qwen3GenerativeRec(nn.Module):
             max_length=self.max_seq_len,
         ).to(device)
 
-        # ── 调用原生 generate ────────────────────────
+        # ── 约束解码: 只生成语义ID token, 强制 s0→s1→s2→s3 顺序 ─
+        def prefix_fn(batch_id, sent):
+            last = sent[-1].item()
+            info = self._id_to_sem.get(last)
+            if info is None:
+                # prompt 结束, 必须从 <s0_X> 开始
+                return [self._sem_to_id[(0, v)] for v in range(self.vocab_size)]
+            layer, _ = info
+            next_layer = (layer + 1) % self.num_quantizers
+            return [self._sem_to_id[(next_layer, v)] for v in range(self.vocab_size)]
+
         generated = self.base_model.generate(
             **encoded,
             max_new_tokens=max_new_tokens,
@@ -320,6 +330,7 @@ class Qwen3GenerativeRec(nn.Module):
             do_sample=True,
             pad_token_id=self.tokenizer.pad_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
+            prefix_allowed_tokens_fn=prefix_fn,
         )
 
         # ── 解析生成结果 ─────────────────────────────
