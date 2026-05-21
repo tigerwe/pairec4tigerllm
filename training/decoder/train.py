@@ -248,13 +248,14 @@ def train_decoder(
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    # TensorBoard (仅 rank 0)
-    writer = SummaryWriter(log_dir) if is_rank0 else None
-
     # 训练状态
     best_val_loss = float('inf')
     epochs_no_improve = 0
     global_step = 0
+    is_rank0 = (not is_ddp or torch.distributed.get_rank() == 0)
+
+    # TensorBoard (仅 rank 0)
+    writer = SummaryWriter(log_dir) if is_rank0 else None
 
     print(f"\nStarting training for {num_epochs} epochs...")
     print(f"Total steps: {total_steps}, Warmup steps: {warmup_steps}")
@@ -265,8 +266,6 @@ def train_decoder(
         model.train()
         epoch_losses = []
         optimizer.zero_grad()
-
-        is_rank0 = (not is_ddp or torch.distributed.get_rank() == 0)
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}",
                             disable=not is_rank0)
 
