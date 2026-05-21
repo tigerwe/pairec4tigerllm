@@ -430,11 +430,32 @@ def train_decoder(
         # 定期保存
         if (epoch + 1) % save_interval == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f'decoder_epoch_{epoch + 1}.pt')
+            if hasattr(model, 'hidden_size'):
+                ckpt_config = {
+                    'backbone': 'qwen3', 'model_name_or_path': '',
+                    'vocab_size': model.vocab_size,
+                    'num_quantizers': model.num_quantizers,
+                    'max_seq_len': model.max_seq_len,
+                    'hidden_size': model.hidden_size,
+                    'num_layers': model.num_layers,
+                    'num_kv_heads': model.num_kv_heads,
+                    'head_dim': model.head_dim,
+                }
+            else:
+                ckpt_config = {
+                    'backbone': 'gpt2', 'vocab_size': model.vocab_size,
+                    'num_quantizers': model.num_quantizers,
+                    'embedding_dim': model.embedding_dim,
+                    'num_layers': len(model.transformer_blocks),
+                    'num_heads': model.transformer_blocks[0].attention.num_heads,
+                    'max_seq_len': model.max_seq_len,
+                }
             epoch_data = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': avg_train_loss,
+                'config': ckpt_config,
             }
             if hasattr(model, '_id_to_sem'):
                 epoch_data['_id_to_sem'] = model._id_to_sem

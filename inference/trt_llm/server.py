@@ -245,9 +245,7 @@ class GenerativeInferenceService:
         model_config = checkpoint['config']
 
         self.model = Qwen3GenerativeRec(
-            model_name_or_path=model_config.get(
-                'model_name_or_path', self.config.qwen3_model_path
-            ),
+            model_name_or_path=model_config.get('model_name_or_path') or self.config.qwen3_model_path,
             vocab_size=model_config['vocab_size'],
             num_quantizers=model_config['num_quantizers'],
             max_seq_len=model_config.get('max_seq_len', 512),
