@@ -211,13 +211,15 @@ def train_decoder(
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
         print(f"[DDP] Model wrapped, total {torch.distributed.get_world_size()} GPUs")
 
+    _raw = model.module if is_ddp else model  # DDP 包装下访问原始属性
+
     print(f"Training on device: {device}")
     print(f"Train sequences: {len(train_sequences)}")
     if val_sequences:
         print(f"Val sequences: {len(val_sequences)}")
 
     # 数据集
-    train_dataset = SequenceDataset(train_sequences, max_seq_len, model.pad_token_id)
+    train_dataset = SequenceDataset(train_sequences, max_seq_len, _raw.pad_token_id)
     train_sampler = DistributedSampler(train_dataset) if is_ddp else None
     train_loader = DataLoader(
         train_dataset,
@@ -297,38 +299,38 @@ def train_decoder(
                 if is_rank0:
                     avg_loss = sum(epoch_losses) / len(epoch_losses)
                     step_path = os.path.join(checkpoint_dir, f'decoder_step_{global_step}.pt')
-                    if hasattr(model, 'hidden_size'):
+                    if hasattr(_raw, 'hidden_size'):
                         ckpt_config = {
                             'backbone': 'qwen3',
-                            'vocab_size': model.vocab_size,
-                            'num_quantizers': model.num_quantizers,
-                            'max_seq_len': model.max_seq_len,
-                            'hidden_size': model.hidden_size,
-                            'num_layers': model.num_layers,
-                            'num_kv_heads': model.num_kv_heads,
-                            'head_dim': model.head_dim,
+                            'vocab_size': _raw.vocab_size,
+                            'num_quantizers': _raw.num_quantizers,
+                            'max_seq_len': _raw.max_seq_len,
+                            'hidden_size': _raw.hidden_size,
+                            'num_layers': _raw.num_layers,
+                            'num_kv_heads': _raw.num_kv_heads,
+                            'head_dim': _raw.head_dim,
                         }
                     else:
                         ckpt_config = {
                             'backbone': 'gpt2',
-                            'vocab_size': model.vocab_size,
-                            'num_quantizers': model.num_quantizers,
-                            'embedding_dim': model.embedding_dim,
-                            'num_layers': len(model.transformer_blocks),
-                            'num_heads': model.transformer_blocks[0].attention.num_heads,
-                            'max_seq_len': model.max_seq_len,
+                            'vocab_size': _raw.vocab_size,
+                            'num_quantizers': _raw.num_quantizers,
+                            'embedding_dim': _raw.embedding_dim,
+                            'num_layers': len(_raw.transformer_blocks),
+                            'num_heads': _raw.transformer_blocks[0].attention.num_heads,
+                            'max_seq_len': _raw.max_seq_len,
                         }
                     step_data = {
                         'epoch': epoch,
-                        'model_state_dict': model.state_dict(),
+                        'model_state_dict': _raw.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                         'loss': avg_loss,
                         'config': ckpt_config,
                         'global_step': global_step,
                     }
-                    if hasattr(model, '_id_to_sem'):
-                        step_data['_id_to_sem'] = model._id_to_sem
-                        step_data['_sem_to_id'] = model._sem_to_id
+                    if hasattr(_raw, '_id_to_sem'):
+                        step_data['_id_to_sem'] = _raw._id_to_sem
+                        step_data['_sem_to_id'] = _raw._sem_to_id
                     torch.save(step_data, step_path)
                     print(f"\nReached max_steps={max_steps}, checkpoint saved to {step_path}")
                     writer.close()
@@ -359,7 +361,7 @@ def train_decoder(
             val_losses = []
             val_metrics_list = []
 
-            val_dataset = SequenceDataset(val_sequences, max_seq_len, model.pad_token_id)
+            val_dataset = SequenceDataset(val_sequences, max_seq_len, _raw.pad_token_id)
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=batch_size,
@@ -378,7 +380,7 @@ def train_decoder(
                     val_losses.append(loss.item())
 
                     # 计算指标 (prompt 模式下 logits shape 不同，跳过)
-                    if not hasattr(model, '_id_to_sem'):
+                    if not hasattr(_raw, '_id_to_sem'):
                         metrics = compute_metrics(logits, labels, attention_mask, k=10)
                         val_metrics_list.append(metrics)
 
@@ -413,40 +415,40 @@ def train_decoder(
                 if is_rank0:
                     best_model_path = os.path.join(checkpoint_dir, 'decoder_best.pt')
                     # 根据 backbone 保存不同的 config
-                    if hasattr(model, 'hidden_size'):
+                    if hasattr(_raw, 'hidden_size'):
                         # Qwen3 backbone (prompt-based)
                         ckpt_config = {
                             'backbone': 'qwen3',
                             'model_name_or_path': '',
-                            'vocab_size': model.vocab_size,
-                            'num_quantizers': model.num_quantizers,
-                            'max_seq_len': model.max_seq_len,
-                            'hidden_size': model.hidden_size,
-                            'num_layers': model.num_layers,
-                            'num_kv_heads': model.num_kv_heads,
-                            'head_dim': model.head_dim,
+                            'vocab_size': _raw.vocab_size,
+                            'num_quantizers': _raw.num_quantizers,
+                            'max_seq_len': _raw.max_seq_len,
+                            'hidden_size': _raw.hidden_size,
+                            'num_layers': _raw.num_layers,
+                            'num_kv_heads': _raw.num_kv_heads,
+                            'head_dim': _raw.head_dim,
                         }
                     else:
                         # GPT2 backbone
                         ckpt_config = {
                             'backbone': 'gpt2',
-                            'vocab_size': model.vocab_size,
-                            'num_quantizers': model.num_quantizers,
-                            'embedding_dim': model.embedding_dim,
-                            'num_layers': len(model.transformer_blocks),
-                            'num_heads': model.transformer_blocks[0].attention.num_heads,
-                            'max_seq_len': model.max_seq_len,
+                            'vocab_size': _raw.vocab_size,
+                            'num_quantizers': _raw.num_quantizers,
+                            'embedding_dim': _raw.embedding_dim,
+                            'num_layers': len(_raw.transformer_blocks),
+                            'num_heads': _raw.transformer_blocks[0].attention.num_heads,
+                            'max_seq_len': _raw.max_seq_len,
                         }
                     ckpt_data = {
                         'epoch': epoch,
-                        'model_state_dict': model.state_dict(),
+                        'model_state_dict': _raw.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                         'loss': best_val_loss,
                         'config': ckpt_config,
                     }
-                    if hasattr(model, '_id_to_sem'):
-                        ckpt_data['_id_to_sem'] = model._id_to_sem
-                        ckpt_data['_sem_to_id'] = model._sem_to_id
+                    if hasattr(_raw, '_id_to_sem'):
+                        ckpt_data['_id_to_sem'] = _raw._id_to_sem
+                        ckpt_data['_sem_to_id'] = _raw._sem_to_id
                     torch.save(ckpt_data, best_model_path)
                     print(f"Best model saved to {best_model_path}")
             else:
@@ -459,36 +461,36 @@ def train_decoder(
         # 定期保存 (仅 rank 0)
         if is_rank0 and (epoch + 1) % save_interval == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f'decoder_epoch_{epoch + 1}.pt')
-            if hasattr(model, 'hidden_size'):
+            if hasattr(_raw, 'hidden_size'):
                 ckpt_config = {
                     'backbone': 'qwen3', 'model_name_or_path': '',
-                    'vocab_size': model.vocab_size,
-                    'num_quantizers': model.num_quantizers,
-                    'max_seq_len': model.max_seq_len,
-                    'hidden_size': model.hidden_size,
-                    'num_layers': model.num_layers,
-                    'num_kv_heads': model.num_kv_heads,
-                    'head_dim': model.head_dim,
+                    'vocab_size': _raw.vocab_size,
+                    'num_quantizers': _raw.num_quantizers,
+                    'max_seq_len': _raw.max_seq_len,
+                    'hidden_size': _raw.hidden_size,
+                    'num_layers': _raw.num_layers,
+                    'num_kv_heads': _raw.num_kv_heads,
+                    'head_dim': _raw.head_dim,
                 }
             else:
                 ckpt_config = {
-                    'backbone': 'gpt2', 'vocab_size': model.vocab_size,
-                    'num_quantizers': model.num_quantizers,
-                    'embedding_dim': model.embedding_dim,
-                    'num_layers': len(model.transformer_blocks),
-                    'num_heads': model.transformer_blocks[0].attention.num_heads,
-                    'max_seq_len': model.max_seq_len,
+                    'backbone': 'gpt2', 'vocab_size': _raw.vocab_size,
+                    'num_quantizers': _raw.num_quantizers,
+                    'embedding_dim': _raw.embedding_dim,
+                    'num_layers': len(_raw.transformer_blocks),
+                    'num_heads': _raw.transformer_blocks[0].attention.num_heads,
+                    'max_seq_len': _raw.max_seq_len,
                 }
             epoch_data = {
                 'epoch': epoch,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': _raw.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': avg_train_loss,
                 'config': ckpt_config,
             }
-            if hasattr(model, '_id_to_sem'):
-                epoch_data['_id_to_sem'] = model._id_to_sem
-                epoch_data['_sem_to_id'] = model._sem_to_id
+            if hasattr(_raw, '_id_to_sem'):
+                epoch_data['_id_to_sem'] = _raw._id_to_sem
+                epoch_data['_sem_to_id'] = _raw._sem_to_id
             torch.save(epoch_data, checkpoint_path)
             print(f"Checkpoint saved to {checkpoint_path}")
 
