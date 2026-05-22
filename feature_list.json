@@ -1,0 +1,100 @@
+{
+  "features": [
+    {
+      "id": "F01",
+      "name": "Qwen3 Prompt Template 模型训练",
+      "status": "done",
+      "description": "用 Qwen3-0.6B + LoRA + Prompt Template 训练生成式召回模型",
+      "files": ["training/decoder/qwen3_generative_rec.py", "training/decoder/train.py"],
+      "validation_method": "远程GPU: loss下降且epoch checkpoint有效",
+      "validation_evidence": "epoch 10 loss 2.65, epoch 20 loss 2.49; checkpoint decoder_epoch_20.pt 可用",
+      "done_date": "2026-05-22"
+    },
+    {
+      "id": "F02",
+      "name": "多卡 DDP 训练",
+      "status": "done",
+      "description": "3×L40S torchrun DDP 并行训练",
+      "files": ["training/decoder/train.py"],
+      "validation_method": "torchrun --nproc_per_node=3 正常启动, 3进程并行无死锁",
+      "validation_evidence": "epoch 11-20 三卡训练完成, loss 2.65→2.49",
+      "done_date": "2026-05-21"
+    },
+    {
+      "id": "F03",
+      "name": "PyTorch 推理服务",
+      "status": "done",
+      "description": "Flask /recommend 推理服务, 支持约束解码",
+      "files": ["inference/trt_llm/server.py", "training/decoder/qwen3_generative_rec.py"],
+      "validation_method": "curl POST /recommend 返回 code=200, recommendations 非空",
+      "validation_evidence": "epoch_20 checkpoint 测试: hit=5, miss=0, unique=5",
+      "done_date": "2026-05-21"
+    },
+    {
+      "id": "F04",
+      "name": "物品前缀约束解码",
+      "status": "done",
+      "description": "prefix_allowed_tokens_fn 约束模型只生成 semantic_id_map 内存在的物品",
+      "files": ["training/decoder/qwen3_generative_rec.py", "inference/trt_llm/server.py"],
+      "validation_method": "推理日志: [DEBUG map] hit=5, miss=0",
+      "validation_evidence": "约束注入修复后 hit/miss=5/0",
+      "done_date": "2026-05-21"
+    },
+    {
+      "id": "F05",
+      "name": "Resume 训练支持",
+      "status": "done",
+      "description": "--load_checkpoint 从已有 checkpoint 继续训练",
+      "files": ["training/decoder/train.py"],
+      "validation_method": "--load_checkpoint 后从正确 epoch 开始训练",
+      "validation_evidence": "epoch 11-20 resume 正常, loss 持续下降",
+      "done_date": "2026-05-21"
+    },
+    {
+      "id": "F06",
+      "name": "Docker 容器化",
+      "status": "done",
+      "description": "训练和推理 Docker 镜像, 支持跨机器迁移",
+      "files": ["docker/Dockerfile.train", "docker/Dockerfile.inference", "scripts/run_train_docker.sh"],
+      "validation_method": "docker build 成功, docker run 训练/推理正常",
+      "validation_evidence": "镜像构建成功, 未在远程GPU环境测试 (conda环境直接跑)",
+      "done_date": "2026-05-21"
+    },
+    {
+      "id": "F07",
+      "name": "TensorRT-LLM 推理 (Phase 3)",
+      "status": "pending",
+      "description": "导出模型→TRT-LLM convert→trtllm-build→引擎推理 + DataSystem KV Cache",
+      "files": ["scripts/export_for_trtllm.py"],
+      "validation_method": "远程GPU: TRT引擎加载成功, 推理返回结果",
+      "next_step": "等待远程GPU环境可用"
+    },
+    {
+      "id": "F08",
+      "name": "Go pairec 联调",
+      "status": "pending",
+      "description": "Go 服务配置指向 Python 推理服务 /recommend, 端到端召回验证",
+      "files": ["services/recall/trtllm_client.go", "configs/pairec_config.json"],
+      "validation_method": "Go服务调用/recommend, 返回召回结果",
+      "next_step": "待 Phase 3 或 PyTorch推理稳定后联调"
+    },
+    {
+      "id": "F09",
+      "name": "ARM 推理部署",
+      "status": "pending",
+      "description": "x86训练checkpoint→拷贝到ARM→启动推理服务",
+      "files": ["inference/trt_llm/server.py"],
+      "validation_method": "ARM上推理服务正常启动, curl返回结果",
+      "next_step": "待远程ARM机器可用"
+    },
+    {
+      "id": "F10",
+      "name": "预Tokenize训练数据",
+      "status": "pending",
+      "description": "一次性将train_sequences.json转成token ID文件, 省每步CPU字符串构造",
+      "files": [],
+      "validation_method": "预tokenize后 it/s 提升 20-30%",
+      "next_step": "低优先级, 训练速度可接受"
+    }
+  ]
+}
