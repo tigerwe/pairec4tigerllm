@@ -96,7 +96,7 @@ class Qwen3GenerativeRec(nn.Module):
         )
 
         # 扩展词表 embedding 以容纳新增 token
-        self.base_model.resize_token_embeddings(len(self.tokenizer))
+        self.base_model.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
 
         # ── 3. LoRA 微调 ──────────────────────────────
         self.lora_enabled = use_lora
