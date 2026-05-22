@@ -12,18 +12,24 @@ print(f"Loading checkpoint: {CKPT}")
 ckpt = torch.load(CKPT, map_location="cpu")
 cfg = ckpt.get("config", {})
 
-print("Creating model...")
+# Base model path (override via env)
+BASE_MODEL = os.environ.get("QWEN3_MODEL_PATH", "./models/Qwen3-0.6B")
+
+print("Creating model (with LoRA for proper weight merge)...")
 model = Qwen3GenerativeRec(
-    model_name_or_path="./models/Qwen3-0.6B",
+    model_name_or_path=BASE_MODEL,
     vocab_size=cfg.get("vocab_size", 256),
     num_quantizers=cfg.get("num_quantizers", 4),
     max_seq_len=cfg.get("max_seq_len", 2048),
-    use_lora=False,
+    use_lora=True,
+    lora_rank=8,
+    lora_alpha=16,
 )
 model.load_state_dict(ckpt["model_state_dict"], strict=False)
 
-# Merge LoRA and export
+# Merge LoRA into base (fuses adapter weights)
 model.merge_lora()
+print("LoRA merged into base model weights")
 os.makedirs(OUTDIR, exist_ok=True)
 model.base_model.save_pretrained(OUTDIR, safe_serialization=True)
 model.tokenizer.save_pretrained(OUTDIR)
