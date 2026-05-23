@@ -29,25 +29,31 @@ class TRTQwen3Backend:
 
         self.eos_id = tokenizer.eos_token_id
         self.pad_id = tokenizer.pad_token_id
+        self._seed = 42  # multi-sample: incremented per call
 
         print(f"[TRTQwen3Backend] Engine loaded, id_to_sem={len(self._id_to_sem)} tokens")
 
-    def generate(self, input_ids: torch.Tensor, max_new_tokens: int = 32) -> torch.Tensor:
-        """TRT generate → 解析语义ID → [batch, max_items, 4] 张量.
+    def generate(self, input_ids: torch.Tensor, max_new_tokens: int = 32,
+                 num_samples: int = 4) -> torch.Tensor:
+        """TRT generate → 多轮采样 + 去重 → [batch, max_items, 4] 张量.
+
+        TRT-LLM generate() 不支持 per-step 约束解码, 用多轮采样弥补命中率.
+        4090D 上每轮 ~10ms, 4轮 ≈ 40ms.
 
         Args:
-            input_ids: [batch, history_len, 4] 用户历史语义 ID
-            max_new_tokens: 生成 token 数上限 (会被 TRT 忽略, 仅作软上限)
+            input_ids: [batch, history_len, 4]
+            max_new_tokens: 每轮生成上限 (TRT 引擎实际生成到 max_seq_len)
+            num_samples: 采样轮数
 
         Returns:
-            [batch, max_items, 4] 解析后的语义 ID (不足补 0)
+            [batch, max_items, 4] 去重后的语义 ID (不足补 0)
         """
         batch_size = input_ids.shape[0]
         device = input_ids.device
 
         all_results = []
         for b in range(batch_size):
-            # ── 构造推理 prompt ──
+            # ── 构造 prompt (tokenize 一次) ──
             history = input_ids[b].cpu().tolist()
             history = [h for h in history if not all(v == 0 for v in h)]
             history_str = ",".join(
@@ -62,23 +68,35 @@ class TRTQwen3Backend:
             encoded = self.tokenizer(prompt, return_tensors="pt", truncation=True,
                                      max_length=2048).to(device)
             prompt_len = encoded["input_ids"].shape[1]
+            input_id_list = [encoded["input_ids"][0]]
 
-            # ── TRT generate (max_new_tokens 被引擎忽略, 用后处理控制) ──
-            outputs = self.runner.generate(
-                [encoded["input_ids"][0]],
-                sampling_config=self.sampling_config,
-                max_new_tokens=max_new_tokens,
-                end_id=self.eos_id,
-                pad_id=self.pad_id,
-            )
-
-            new_tokens = outputs[0][0][prompt_len:].tolist()
-
-            # ── 解析语义 ID (后处理过滤, 替代 prefix_allowed_tokens_fn) ──
-            items = self._parse_output(new_tokens)
+            # ── 多轮采样 + 去重 ──
+            from tensorrt_llm.bindings.executor import SamplingConfig
+            seen = set()
+            items = []
+            for s in range(num_samples):
+                cfg = SamplingConfig(
+                    temperature=self.sampling_config.temperature,
+                    top_k=self.sampling_config.top_k,
+                    seed=self._seed + s,
+                )
+                outputs = self.runner.generate(
+                    input_id_list,
+                    sampling_config=cfg,
+                    max_new_tokens=max_new_tokens,
+                    end_id=self.eos_id,
+                    pad_id=self.pad_id,
+                )
+                new_tokens = outputs[0][0][prompt_len:].tolist()
+                for sem in self._parse_output(new_tokens):
+                    key = tuple(sem)
+                    if key not in seen:
+                        seen.add(key)
+                        items.append(sem)
+            self._seed += num_samples
             all_results.append(items)
 
-        # ── 填充为规整张量 ──
+        # ── 填充 ──
         max_items = max((len(r) for r in all_results), default=1)
         padded = torch.zeros(batch_size, max_items, self.num_quantizers,
                              dtype=torch.long, device=device)
@@ -86,7 +104,6 @@ class TRTQwen3Backend:
             for i, sem in enumerate(items):
                 if i < max_items:
                     padded[b, i] = torch.tensor(sem, device=device)
-
         return padded
 
     def _parse_output(self, token_ids: List[int]) -> List[List[int]]:
