@@ -38,6 +38,7 @@ class InferenceConfig:
     use_trt_llm: bool = False  # 是否使用 TensorRT-LLM
     backbone: str = 'gpt2'     # 'gpt2' or 'qwen3'
     qwen3_model_path: str = 'Qwen/Qwen3-0.6B'
+    trt_engine_dir: str = ''   # TRT-LLM engine dir (Qwen3, > PyTorch)
 
 
 class TensorRTLLMInference:
@@ -184,9 +185,16 @@ class GenerativeInferenceService:
         # 根据 backbone 选择加载方式
         backbone = model_config.get('backbone', config.backbone)
 
+        self._trt_backend = None  # TRT-LLM 引擎后端
+
         if backbone == 'qwen3':
-            print("Loading Qwen3 backbone model...")
-            self._load_qwen3_model(checkpoint)
+            # 优先 TRT-LLM 引擎
+            if os.path.isdir(config.trt_engine_dir):
+                print(f"[TRT] Loading Qwen3 engine from {config.trt_engine_dir}")
+                self._load_qwen3_trt(checkpoint)
+            else:
+                print("Loading Qwen3 backbone model (PyTorch)...")
+                self._load_qwen3_model(checkpoint)
         else:
             # GPT2 backbone: 尝试 TRT 引擎
             if config.use_trt_llm:
@@ -294,6 +302,38 @@ class GenerativeInferenceService:
         except ImportError as e:
             print(f"[KVCacheManager] Not available: {e}")
 
+    def _load_qwen3_trt(self, checkpoint) -> None:
+        """加载 Qwen3 TRT-LLM 引擎 (无需 PyTorch 模型)."""
+        from .trt_qwen3_backend import TRTQwen3Backend
+
+        model_config = checkpoint['config']
+        qwen3_path = model_config.get('model_name_or_path') or self.config.qwen3_model_path
+
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(qwen3_path, trust_remote_code=True)
+
+        self._trt_backend = TRTQwen3Backend(
+            engine_dir=self.config.trt_engine_dir,
+            tokenizer=tokenizer,
+            num_quantizers=model_config['num_quantizers'],
+            vocab_size=model_config['vocab_size'],
+            temperature=self.config.temperature,
+            top_k=self.config.top_k,
+        )
+
+        if '_id_to_sem' in checkpoint:
+            self._trt_backend._id_to_sem = {
+                int(k): tuple(v) for k, v in checkpoint['_id_to_sem'].items()
+            }
+
+        self.hidden_size = model_config.get('hidden_size', 1024)
+        self.num_layers = model_config.get('num_layers', 28)
+        self.num_kv_heads = model_config.get('num_kv_heads', 8)
+        self.head_dim = model_config.get('head_dim', 64)
+
+        print(f"[TRT] Qwen3 engine loaded: layers={self.num_layers}, "
+              f"kv_heads={self.num_kv_heads}, hidden={self.hidden_size}")
+
     def _get_logits(self, input_ids: torch.Tensor):
         """获取 logits，优先使用 TensorRT 引擎.
         
@@ -396,7 +436,15 @@ class GenerativeInferenceService:
         final_past_kv = None
 
         with torch.no_grad():
-            if hasattr(self.model, '_id_to_sem'):
+            if self._trt_backend is not None:
+                # TRT-LLM 引擎路径 (后处理解析替代 prefix_allowed_tokens_fn)
+                tokens = self._trt_backend.generate(
+                    input_ids, max_new_tokens=topk * 2
+                )  # [batch, max_items, 4]
+                tokens = tokens[0]  # [max_items, 4]
+                print(f"[TRT generate] topk={topk}, output shape={tokens.shape}, "
+                      f"nonzero={(tokens.sum(dim=1) != 0).sum().item()}/{tokens.shape[0]}")
+            elif hasattr(self.model, '_id_to_sem'):
                 # Qwen3 Prompt Mode: 原生 generate (内含 tokenizer + prompt 构造)
                 tokens = self.model.generate(
                     input_ids,
@@ -802,6 +850,8 @@ def main():
     parser.add_argument('--qwen3_model_path', type=str,
                         default='Qwen/Qwen3-0.6B',
                         help='Path or HF name for Qwen3-0.6B backbone')
+    parser.add_argument('--trt_engine_dir', type=str, default='',
+                        help='TRT-LLM engine dir (Qwen3, takes priority over PyTorch)')
 
     args = parser.parse_args()
 
@@ -813,6 +863,7 @@ def main():
         max_seq_len=args.max_seq_len,
         use_trt_llm=args.use_trt_llm,
         qwen3_model_path=args.qwen3_model_path,
+        trt_engine_dir=args.trt_engine_dir,
     )
 
     # 创建推理服务
