@@ -307,10 +307,24 @@ class GenerativeInferenceService:
         from .trt_qwen3_backend import TRTQwen3Backend
 
         model_config = checkpoint['config']
-        qwen3_path = model_config.get('model_name_or_path') or self.config.qwen3_model_path
 
+        # 优先用导出的 tokenizer (含 1024 个 <s0_X> 特殊 token)
         from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(qwen3_path, trust_remote_code=True)
+        exported_tok = os.path.join(self.config.trt_engine_dir, '..', '..', 'exported', 'qwen3_rec')
+        if os.path.isdir(exported_tok):
+            tokenizer = AutoTokenizer.from_pretrained(exported_tok)
+            print(f"[TRT] Using exported tokenizer from {exported_tok}")
+        else:
+            qwen3_path = model_config.get('model_name_or_path') or self.config.qwen3_model_path
+            tokenizer = AutoTokenizer.from_pretrained(qwen3_path, trust_remote_code=True)
+            special_tokens = []
+            for i in range(model_config['num_quantizers']):
+                for j in range(model_config['vocab_size']):
+                    special_tokens.append(f"<s{i}_{j}>")
+            tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            print(f"[TRT] Registered {len(special_tokens)} special tokens")
 
         self._trt_backend = TRTQwen3Backend(
             engine_dir=self.config.trt_engine_dir,
@@ -506,8 +520,14 @@ class GenerativeInferenceService:
 
         # 6. Trace
         total_ms = (time.perf_counter() - t0) * 1000
-        backend = 'qwen3' if hasattr(self.model, 'hidden_size') else \
-                  ('tensorrt' if self.trt_llm_engine is not None else 'pytorch')
+        if self._trt_backend is not None:
+            backend = 'trt-qwen3'
+        elif hasattr(self.model, 'hidden_size'):
+            backend = 'qwen3'
+        elif self.trt_llm_engine is not None:
+            backend = 'tensorrt'
+        else:
+            backend = 'pytorch'
 
         if kv_source == 'hbm_hit':
             self.kv_cache_hits += 1
@@ -782,7 +802,12 @@ class HTTPServer:
 
         @app.route('/health', methods=['GET'])
         def health():
-            backend = 'tensorrt' if self.service.trt_llm_engine is not None else 'pytorch'
+            if self.service._trt_backend is not None:
+                backend = 'trt-qwen3'
+            elif self.service.trt_llm_engine is not None:
+                backend = 'tensorrt'
+            else:
+                backend = 'pytorch'
             return jsonify({
                 'status': 'healthy',
                 'backend': backend,
