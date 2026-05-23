@@ -34,11 +34,11 @@ class TRTQwen3Backend:
         print(f"[TRTQwen3Backend] Engine loaded, id_to_sem={len(self._id_to_sem)} tokens")
 
     def generate(self, input_ids: torch.Tensor, max_new_tokens: int = 32,
-                 num_samples: int = 4) -> torch.Tensor:
+                 num_samples: int = 8) -> torch.Tensor:
         """TRT generate → 多轮采样 + 去重 → [batch, max_items, 4] 张量.
 
         TRT-LLM generate() 不支持 per-step 约束解码, 用多轮采样弥补命中率.
-        4090D 上每轮 ~10ms, 4轮 ≈ 40ms.
+        4090D 上每轮 ~10ms, 8轮 ≈ 80ms.
 
         Args:
             input_ids: [batch, history_len, 4]
