@@ -27,18 +27,18 @@
       "description": "Flask /recommend 推理服务, 支持约束解码",
       "files": ["inference/trt_llm/server.py", "training/decoder/qwen3_generative_rec.py"],
       "validation_method": "curl POST /recommend 返回 code=200, recommendations 非空",
-      "validation_evidence": "epoch_20 checkpoint 测试: hit=5, miss=0, unique=5",
-      "done_date": "2026-05-21"
+      "validation_evidence": "x86 L40S: hit=5, miss=0; ARM 4090D: hit=5, miss=0",
+      "done_date": "2026-05-23"
     },
     {
       "id": "F04",
       "name": "物品前缀约束解码",
       "status": "done",
-      "description": "prefix_allowed_tokens_fn 约束模型只生成 semantic_id_map 内存在的物品",
-      "files": ["training/decoder/qwen3_generative_rec.py", "inference/trt_llm/server.py"],
+      "description": "prefix_allowed_tokens_fn (PyTorch) / 多轮采样+后处理过滤 (TRT)",
+      "files": ["training/decoder/qwen3_generative_rec.py", "inference/trt_llm/server.py", "inference/trt_llm/trt_qwen3_backend.py"],
       "validation_method": "推理日志: [DEBUG map] hit=5, miss=0",
-      "validation_evidence": "约束注入修复后 hit/miss=5/0",
-      "done_date": "2026-05-21"
+      "validation_evidence": "PyTorch: prefix tree 注入, hit/miss=5/0; TRT: 8轮采样去重, hit/miss=5/0",
+      "done_date": "2026-05-23"
     },
     {
       "id": "F05",
@@ -55,19 +55,21 @@
       "name": "Docker 容器化",
       "status": "done",
       "description": "训练和推理 Docker 镜像, 支持跨机器迁移",
-      "files": ["docker/Dockerfile.train", "docker/Dockerfile.inference", "scripts/run_train_docker.sh"],
+      "files": ["docker/Dockerfile.train", "docker/Dockerfile.inference", "docker/Dockerfile"],
       "validation_method": "docker build 成功, docker run 训练/推理正常",
-      "validation_evidence": "镜像构建成功, 未在远程GPU环境测试 (conda环境直接跑)",
-      "done_date": "2026-05-21"
+      "validation_evidence": "ARM 4090D 容器 pairec-ds-build:v1.0 推理正常",
+      "done_date": "2026-05-23"
     },
     {
       "id": "F07",
       "name": "TensorRT-LLM 推理 (Phase 3)",
-      "status": "pending",
-      "description": "导出模型→TRT-LLM convert→trtllm-build→引擎推理 + DataSystem KV Cache",
-      "files": ["scripts/export_for_trtllm.py"],
-      "validation_method": "远程GPU: TRT引擎加载成功, 推理返回结果",
-      "next_step": "等待远程GPU环境可用"
+      "status": "done",
+      "description": "导出模型 (merge LoRA) → TRT-LLM convert → trtllm-build → 引擎推理 + 多轮采样去重",
+      "files": ["scripts/export_for_trtllm.py", "inference/trt_llm/trt_qwen3_backend.py", "inference/trt_llm/server.py"],
+      "validation_method": "ARM 4090D: TRT 引擎加载成功, /recommend 返回 5 个推荐",
+      "validation_evidence": "引擎: bfloat16, 1.46GB, 构建12s; 推理: hit=5, miss=0, ~360ms",
+      "done_date": "2026-05-23",
+      "notes": "TRT-LLM 1.0.0 generate() bug (max_new_tokens 忽略) → 多轮采样替代; 修复源码 2处未初始化变量; 导出脚本修复 use_lora=True"
     },
     {
       "id": "F08",
@@ -76,16 +78,18 @@
       "description": "Go 服务配置指向 Python 推理服务 /recommend, 端到端召回验证",
       "files": ["services/recall/trtllm_client.go", "configs/pairec_config.json"],
       "validation_method": "Go服务调用/recommend, 返回召回结果",
-      "next_step": "待 Phase 3 或 PyTorch推理稳定后联调"
+      "next_step": "Python 推理服务已就绪, 待 Go 侧配置"
     },
     {
       "id": "F09",
       "name": "ARM 推理部署",
-      "status": "pending",
-      "description": "x86训练checkpoint→拷贝到ARM→启动推理服务",
-      "files": ["inference/trt_llm/server.py"],
-      "validation_method": "ARM上推理服务正常启动, curl返回结果",
-      "next_step": "待远程ARM机器可用"
+      "status": "done",
+      "description": "x86 训练 checkpoint → ARM 4090D 容器 → PyTorch + TRT-LLM 双后端推理",
+      "files": ["inference/trt_llm/server.py", "inference/trt_llm/trt_qwen3_backend.py"],
+      "validation_method": "ARM 4090D: /recommend 返回 code=200, 5 个推荐",
+      "validation_evidence": "PyTorch: ~400ms, hit=5; TRT: ~360ms, hit=5",
+      "done_date": "2026-05-23",
+      "notes": "pairec-ds-build:v1.0 容器 (TRT-LLM 1.0.0 + DataSystem); 修复 ARM LAPACK 兼容; 修复 TRT-LLM 源码 bug"
     },
     {
       "id": "F10",
