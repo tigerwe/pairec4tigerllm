@@ -9,11 +9,32 @@ class TRTQwen3Backend:
     """封装 TRT-LLM ModelRunnerCpp，对外提供 generate() → 解析后语义ID."""
 
     def __init__(self, engine_dir: str, tokenizer, num_quantizers: int = 4,
-                 vocab_size: int = 256, temperature: float = 0.7, top_k: int = 50):
+                 vocab_size: int = 256, temperature: float = 0.7, top_k: int = 50,
+                 max_tokens_in_paged_kv_cache: int = None,
+                 scheduler_policy: str = "max_utilization"):
         from tensorrt_llm.runtime import ModelRunnerCpp
         from tensorrt_llm.bindings.executor import SamplingConfig
 
-        self.runner = ModelRunnerCpp.from_dir(engine_dir)
+        # ── 构造 scheduler_config (需 MONKEY-PATCH model_runner_cpp.py) ──
+        scheduler_config = None
+        try:
+            from tensorrt_llm.llmapi import SchedulerConfig, CapacitySchedulerPolicy
+            policy = (
+                CapacitySchedulerPolicy.MAX_UTILIZATION
+                if scheduler_policy == "max_utilization"
+                else CapacitySchedulerPolicy.GUARANTEED_NO_EVICT
+            )
+            scheduler_config = SchedulerConfig(capacity_scheduler_policy=policy)
+            print(f"[TRTQwen3Backend] Scheduler policy: {scheduler_policy}, "
+                  f"max_kv_tokens={max_tokens_in_paged_kv_cache}")
+        except Exception as e:
+            print(f"[TRTQwen3Backend] SchedulerConfig unavailable: {e}")
+
+        self.runner = ModelRunnerCpp.from_dir(
+            engine_dir,
+            scheduler_config=scheduler_config,
+            max_tokens_in_paged_kv_cache=max_tokens_in_paged_kv_cache,
+        )
         self.tokenizer = tokenizer
         self.num_quantizers = num_quantizers
         self.vocab_size = vocab_size
