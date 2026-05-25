@@ -187,13 +187,22 @@ class KVCacheManager:
         return f"{self.key_prefix}:{local_key}"
 
     def _ds_get(self, local_key: str):
-        """从 DataSystem 读取 KV Cache."""
-        return self.ds.kv().get(self._ds_key(local_key))
+        """从 DataSystem 读取 KV Cache (bytes)."""
+        key = self._ds_key(local_key)
+        try:
+            vals = self.ds.kv().get([key], convert_to_str=False)
+            if vals and vals[0] is not None:
+                return vals[0]  # bytes
+        except Exception:
+            pass
+        return None
 
     def _ds_put(self, local_key: str, past_kv: Tuple):
         """写入 DataSystem (带 TTL)."""
         try:
             payload = self._serialize(past_kv)
-            self.ds.kv().set(self._ds_key(local_key), payload, ttl=600)
+            self.ds.kv().set(
+                self._ds_key(local_key), payload, ttl_second=600
+            )
         except Exception as e:
             print(f"[KVCacheManager] DataSystem write failed: {e}")

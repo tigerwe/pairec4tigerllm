@@ -99,6 +99,17 @@
       "files": [],
       "validation_method": "预tokenize后 it/s 提升 20-30%",
       "next_step": "低优先级, 训练速度可接受"
+    },
+    {
+      "id": "F11",
+      "name": "DataSystem KV Cache 集成",
+      "status": "done",
+      "description": "Python 推理服务层 KVCacheManager 对接 DataSystem KV 存储, 实现 HBM LRU → DataSystem → Prefill 三层缓存架构",
+      "files": ["inference/kv_cache/manager.py", "inference/trt_llm/server.py"],
+      "validation_method": "DataSystem 连接成功 (import yr.datasystem OK), --datasystem_host/port 参数可用, /health 显示 datasystem 状态",
+      "validation_evidence": "Python: manager.py API 修正 + server.py DataSystem 客户端初始化; C++: 重编译 TRT-LLM (DataSystem SDK 0.7.7), 日志确认 [Datasystem] Init KvCache Manager DataSystem success",
+      "done_date": "2026-05-25",
+      "notes": "C++ 层需 LD_PRELOAD=libabseil_dll.so.2407.0.0 解决初始化顺序; Python 层 API 修正 get→list, set→ttl_second"
     }
   ]
 }

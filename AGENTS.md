@@ -1,6 +1,6 @@
 # PaiRec4TigerLLM — AI 代理工作指南
 
-> 最后更新: 2026-05-22 | 分支: `dev`
+> 最后更新: 2026-05-25 | 分支: `dev`
 
 ## 工作纪律
 
@@ -18,6 +18,7 @@
 | 知道还有什么待做 | `feature_list.json` |
 | 了解架构细节 (Qwen3, DataSystem, TRT-LLM) | `docs/session_context.md` |
 | 上次交接的信息 | `HANDOFF.md` |
+| 容器环境变量 (含 LD_PRELOAD) | `HANDOFF.md` 底部 |
 | 跑命令 | 看下文"速查命令" |
 
 ## 关键文件 (精简版)
@@ -26,9 +27,9 @@
 |------|--------|
 | `training/decoder/qwen3_generative_rec.py` | Qwen3 prompt 模型 (forward + generate + 约束解码) |
 | `training/decoder/train.py` | 训练主循环 (DDP + resume + checkpoint) |
-| `inference/trt_llm/server.py` | Flask 推理服务 (/recommend, /health) |
+| `inference/trt_llm/server.py` | Flask 推理服务 (/recommend, /health, DataSystem 集成) |
+| `inference/kv_cache/manager.py` | Python KVCacheManager (HBM LRU → DataSystem → Prefill 三层) |
 | `training/decoder/model.py` | 老 GPT2 Decoder (保留兼容) |
-| `inference/kv_cache/manager.py` | Python KVCacheManager (Phase 1 跳过) |
 
 ## 速查命令
 
@@ -61,6 +62,23 @@ CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 \
 
 # Resume
 --load_checkpoint ./checkpoints/decoder_qwen3/decoder_epoch_20.pt --num_epochs 30
+```
+
+### DataSystem 验证
+
+```bash
+# 检查 DataSystem 模块可用
+python -c "import yr.datasystem; print('DataSystem OK')"
+
+# 启动推理服务 (DataSystem 连接)
+python -m inference.trt_llm.server \
+    --model_path ./checkpoints/decoder_qwen3/decoder_epoch_20.pt \
+    --port 18000 --device cuda \
+    --datasystem_host 127.0.0.1 --datasystem_port 31501
+
+# 或通过环境变量
+DATASYSTEM_HOST=127.0.0.1 DATASYSTEM_PORT=31501 \
+    python -m inference.trt_llm.server ...
 ```
 
 ### 远程推理验证

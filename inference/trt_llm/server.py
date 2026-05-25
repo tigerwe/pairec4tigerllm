@@ -23,6 +23,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from training.decoder.model import GenerativeDecoder
 from training.decoder.qwen3_generative_rec import Qwen3GenerativeRec
 
+# DataSystem client (optional)
+try:
+    from yr.datasystem import DsClient
+    _HAS_DATASYSTEM = True
+except ImportError:
+    DsClient = None
+    _HAS_DATASYSTEM = False
+
 
 @dataclass
 class InferenceConfig:
@@ -39,6 +47,8 @@ class InferenceConfig:
     backbone: str = 'gpt2'     # 'gpt2' or 'qwen3'
     qwen3_model_path: str = 'Qwen/Qwen3-0.6B'
     trt_engine_dir: str = ''   # TRT-LLM engine dir (Qwen3, > PyTorch)
+    datasystem_host: str = ''  # DataSystem worker host (empty = disabled)
+    datasystem_port: int = 31501  # DataSystem worker port
 
 
 class TensorRTLLMInference:
@@ -286,6 +296,9 @@ class GenerativeInferenceService:
         print(f"Qwen3 model loaded: layers={self.num_layers}, "
               f"kv_heads={self.num_kv_heads}, hidden={self.hidden_size}")
 
+        # 初始化 DataSystem client (可选)
+        ds_client = self._init_datasystem_client(config)
+
         # 初始化 KVCacheManager
         try:
             from inference.kv_cache.manager import KVCacheManager
@@ -294,9 +307,10 @@ class GenerativeInferenceService:
                 num_kv_heads=self.num_kv_heads,
                 head_dim=self.head_dim,
                 hbm_capacity=50,
-                ds_client=None,  # TODO: 接入 DataSystem client
+                ds_client=ds_client,
             )
-            print(f"[KVCacheManager] Initialized "
+            ds_status = "DataSystem" if ds_client else "HBM-only"
+            print(f"[KVCacheManager] Initialized ({ds_status}) "
                   f"(layers={self.num_layers}, kv_heads={self.num_kv_heads}, "
                   f"head_dim={self.head_dim})")
         except ImportError as e:
@@ -347,6 +361,37 @@ class GenerativeInferenceService:
 
         print(f"[TRT] Qwen3 engine loaded: layers={self.num_layers}, "
               f"kv_heads={self.num_kv_heads}, hidden={self.hidden_size}")
+
+    def _init_datasystem_client(self, config: InferenceConfig):
+        """初始化 DataSystem 客户端 (如果可用).
+        
+        优先从环境变量 DATASYSTEM_HOST / DATASYSTEM_PORT 读取配置，
+        其次使用 config 中的值。
+        
+        Returns:
+            DsClient 实例或 None
+        """
+        import os
+        host = os.environ.get("DATASYSTEM_HOST", config.datasystem_host)
+        port = int(os.environ.get("DATASYSTEM_PORT", str(config.datasystem_port)))
+        
+        if not host:
+            print("[DataSystem] Disabled (no host configured)")
+            return None
+        
+        if not _HAS_DATASYSTEM:
+            print("[DataSystem] yr.datasystem not installed, skip")
+            return None
+        
+        try:
+            print(f"[DataSystem] Connecting to {host}:{port} ...")
+            client = DsClient(host=host, port=port)
+            client.init()
+            print(f"[DataSystem] Connected OK (host={host}, port={port})")
+            return client
+        except Exception as e:
+            print(f"[DataSystem] Connection failed: {e}")
+            return None
 
     def _get_logits(self, input_ids: torch.Tensor):
         """获取 logits，优先使用 TensorRT 引擎.
@@ -422,7 +467,8 @@ class GenerativeInferenceService:
         user_history: List[List[int]],
         topk: int = 10,
         temperature: Optional[float] = None,
-        beam_width: Optional[int] = None
+        beam_width: Optional[int] = None,
+        user_id: str = "default",
     ) -> Dict:
         """生成推荐 (支持 Qwen3 KV Cache 加速)."""
         t0 = time.perf_counter()
@@ -431,7 +477,6 @@ class GenerativeInferenceService:
         # 1. 输入准备
         input_ids = self._prepare_input(user_history)
         input_ids = input_ids.to(self.device)
-        user_id = "default"
         history_hash = self._hash_history(user_history)
 
         # 2. KV Cache 查询
@@ -808,10 +853,17 @@ class HTTPServer:
                 backend = 'tensorrt'
             else:
                 backend = 'pytorch'
+            ds_status = 'connected' if (
+                self.service.kv_manager is not None
+                and self.service.kv_manager.ds is not None
+            ) else 'disabled'
             return jsonify({
                 'status': 'healthy',
                 'backend': backend,
-                'version': '1.0.0'
+                'datasystem': ds_status,
+                'kv_cache_hits': self.service.kv_cache_hits,
+                'kv_cache_misses': self.service.kv_cache_misses,
+                'version': '1.0.0',
             })
 
         @app.route('/recommend', methods=['POST'])
@@ -829,7 +881,8 @@ class HTTPServer:
                     user_history=history,
                     topk=topk,
                     temperature=temperature,
-                    beam_width=beam_width
+                    beam_width=beam_width,
+                    user_id=user_id,
                 )
 
                 return jsonify({
@@ -877,6 +930,10 @@ def main():
                         help='Path or HF name for Qwen3-0.6B backbone')
     parser.add_argument('--trt_engine_dir', type=str, default='',
                         help='TRT-LLM engine dir (Qwen3, takes priority over PyTorch)')
+    parser.add_argument('--datasystem_host', type=str, default='',
+                        help='DataSystem worker host (env: DATASYSTEM_HOST)')
+    parser.add_argument('--datasystem_port', type=int, default=31501,
+                        help='DataSystem worker port (env: DATASYSTEM_PORT, default: 31501)')
 
     args = parser.parse_args()
 
@@ -889,6 +946,8 @@ def main():
         use_trt_llm=args.use_trt_llm,
         qwen3_model_path=args.qwen3_model_path,
         trt_engine_dir=args.trt_engine_dir,
+        datasystem_host=args.datasystem_host,
+        datasystem_port=args.datasystem_port,
     )
 
     # 创建推理服务
