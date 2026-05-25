@@ -12,48 +12,77 @@
 | 5/21 | DDP 三卡 3bug 修复; L40S×3 并行训练启动 (epoch 11); Docker 镜像适配; 约束解码实现 |
 | 5/22 | 训练完成 epoch 20 (loss 2.49); 仓库规范化 |
 | **5/23** | **ARM 4090D 推理部署 + TRT-LLM 引擎构建 + 多轮采样去重** |
-| **5/25** | **DataSystem KV Cache 集成：Python 层 + C++ 层验证通过** |
+| **5/25** | **DataSystem KV Cache 集成：Python 层 + C++ 层连接验证通过；offload/onboard 阻断已绕过** |
 
 ## 当前状态
 
 - **训练**: ✅ epoch 20, loss 2.49, checkpoint `decoder_epoch_20.pt`
-- **PyTorch 推理 (x86 L40S)**: ✅ Flask 服务, hit/miss=5/0
-- **ARM 4090D 推理**: ✅ PyTorch + TRT-LLM 双后端, hit/miss=5/0
-- **TRT-LLM 引擎**: ✅ bfloat16, 1.46 GB, 构建 12s
-- **约束解码**: ✅ PyTorch 路径 prefix_allowed_tokens_fn, TRT 路径多轮采样+后处理过滤
-- **DataSystem KV Cache**: 
+- **PyTorch 推理**: ✅ Flask 服务, hit/miss=5/0
+- **ARM 4090D 推理**: ✅ PyTorch + TRT-LLM 双后端
+- **TRT-LLM 引擎**: ✅ bfloat16, 1.46 GB
+- **约束解码**: ✅ PyTorch prefix_allowed_tokens_fn / TRT 多轮采样+后处理
+- **DataSystem KV Cache**:
   - Python 层: ✅ HBM LRU → DataSystem → Prefill 三层缓存
-  - C++ 层连接: ✅ `KvCacheManagerDataSystem` 单例 + Init 成功
-  - C++ 层 offload/onboard: ⛔ 被 DataSystem SDK consumer 线程崩溃阻断 (详见阻塞点)
+  - C++ 连接: ✅ `KvCacheManagerDataSystem` Init success (host=127.0.0.1:31501)
+  - C++ offload/onboard: ⏳ segfault 已绕过，待重建引擎后验证
+
+## DataSystem 集成核心问题与解决方案
+
+### 问题链
+
+```
+问题1: abseil 版本冲突
+  libtensorrt_llm.so 链接的 abseil vs DataSystem grpc 自带的 abseil → RegisterFlag 崩溃
+  ↓ 解决: LD_PRELOAD=libabseil_dll.so
+
+问题2: LD_PRELOAD 副作用 — consumer 线程崩溃  
+  libabseil_dll.so 加载 → 连带加载 libdatasystem.so → 静态构造创建 PipelineRH2DQueueConsumer 线程
+  → 线程访问未映射的共享内存 → ShmCircularQueue::UpdateQueueMeta(NULL) → SIGSEGV
+  ↓ 解决: stub ConsumerLoop 函数 (见下)
+
+问题3: TRT-LLM 重编译后旧引擎不兼容
+  Executor 构造器 substr 越界 → 需重建引擎 (trtllm-build)
+```
+
+### 最终 LD_PRELOAD 方案
+
+```bash
+# 三个 .so 按序加载：
+export LD_PRELOAD="\
+./scripts/block_ds_consumer.so:\       # ① stub ConsumerLoop，线程立即返回
+/usr/.../libabseil_dll.so.2407.0.0"   # ② 解决 abseil RegisterFlag 冲突
+```
+
+**stub 实现** (`scripts/stub_consumer.c`): 用 mangled 符号名定义空的 `PipelineRH2DQueueConsumer::ConsumerLoop()`，编译为 `.so`。consumer 线程启动后立即返回，不访问共享内存。其他 DataSystem 线程（ZMQ 连接管理、ZmqEpoll 等）不受影响。
+
+### 为什么 pthread_create 拦截失败
+
+`libdatasystem.so` 用 C++ `std::thread` 创建线程，Linux 上 `std::thread` 走 `clone` 系统调用，不走 `pthread_create`。GDB backtrace 确认：
+```
+#8  std::execute_native_thread_routine  ← std::thread 启动点
+#1  OsXprtPipln::PipelineRH2DQueueConsumer::ConsumerLoop()
+#0  ShmCircularQueue::UpdateQueueMeta() → NULL 指针
+```
+
+### 待解决问题：引擎不兼容
+
+重编译后的 TRT-LLM 二进制 (`ModelRunnerCpp`) 无法加载旧版引擎 (`trt_engines/qwen3_rec/rank0.engine`)，错误：
+```
+IndexError: basic_string::substr: __pos (which is 4) > this->size() (which is 0)
+```
+需要用当前 TRT-LLM 二进制重新 `trtllm-build` 构建引擎。
 
 ## 关键决策
 
-- TRT-LLM 1.0.0 `ModelRunnerCpp.generate()` bug (max_new_tokens 被忽略) → 用多轮采样 (8轮) + 后处理 `_parse_output` 替代 `prefix_allowed_tokens_fn`
-- 修复 PEFT export 脚本 bug: `use_lora=False` → `True`, 确保 LoRA 权重 merge 进导出模型
-- 修复 `resize_token_embeddings` ARM LAPACK 兼容: 加 `mean_resizing=False`
-- 修复 TRT-LLM 源码两处变量未初始化 bug (sampling_config_list, use_sampling_config_for_each_request)
-- C++ 层 DataSystem 集成需 `LD_PRELOAD=libabseil_dll.so.2407.0.0` 解决 abseil flag registry 初始化顺序问题（grpc/protobuf 静态初始化在 abseil 就绪前触发）
-
-## 阻塞点
-
-### DataSystem C++ offload/onboard 运行时验证受阻
-
-**症状**: `libdatasystem.so` 在 Python 进程中加载后，静态构造函数创建 shared memory consumer 线程 → 访问未映射的共享内存 → `ShmCircularQueue::UpdateQueueMeta` NULL 指针 → SIGSEGV。
-
-**根因**: DataSystem SDK 0.7.7 的 `libdatasystem.so` 内置了 Worker 侧的 consumer 线程逻辑，在任何加载它的进程中都会自动启动。TRT-LLM 推理进程不是 DataSystem Worker，没有初始化共享内存，导致线程崩溃。
-
-**已尝试的绕过方案**:
-| 方案 | 结果 |
-|------|------|
-| `LD_PRELOAD=libabseil_dll.so` | ✅ abseil 冲突解决，但 consumer 线程崩 |
-| `patchelf --set-rpath` | ❌ 不解决 abseil 顺序，RegisterFlag 仍崩 |
-| `unset LD_PRELOAD` + 无 DataSystem .so | ❌ 虽有旧 .so 可跑，但无 DataSystem 功能 |
-| patchelf `--add-rpath` (追加原 RPATH) | ❌ 丢失 `libdecoder_attention` 路径 |
-
-**真正解法**: 需要 DataSystem SDK 提供 **client-only 的 `libdatasystem_client.so`**（不含 consumer 线程），或 SDK 层面支持 `DISABLE_CONSUMER_THREAD` 环境变量。
+- Prompt Template 而非 inputs_embeds (参照京东方案)
+- LoRA + modules_to_save (lm_head + embed_tokens 必须可训)
+- DDP 多卡: torchrun + DistributedSampler
+- Python KVCacheManager 三层: HBM LRU → DataSystem (TTL 600s) → Prefill
+- C++ DataSystem 连接: `KvCacheManagerDataSystem` 单例，KVCacheManager 构造时自动连接
+- abseil 冲突: `LD_PRELOAD` + `stub_consumer.so` 双加载
 
 ## 下一步
 
-1. Go pairec 联调 (F08)
-2. TRT 引擎延迟优化 (detailed profiling, KV Cache 池化)
-3. 预 Tokenize 训练数据 (F10, 低优先级)
+1. 重建 TRT-LLM 引擎 (trtllm-build) — 解决新旧二进制不兼容
+2. Go pairec 联调 (F08)
+3. TRT 引擎延迟优化 (profiling, KV Cache 池化)
