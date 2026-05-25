@@ -296,25 +296,8 @@ class GenerativeInferenceService:
         print(f"Qwen3 model loaded: layers={self.num_layers}, "
               f"kv_heads={self.num_kv_heads}, hidden={self.hidden_size}")
 
-        # 初始化 DataSystem client (可选)
-        ds_client = self._init_datasystem_client(config)
-
-        # 初始化 KVCacheManager
-        try:
-            from inference.kv_cache.manager import KVCacheManager
-            self.kv_manager = KVCacheManager(
-                num_layers=self.num_layers,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                hbm_capacity=50,
-                ds_client=ds_client,
-            )
-            ds_status = "DataSystem" if ds_client else "HBM-only"
-            print(f"[KVCacheManager] Initialized ({ds_status}) "
-                  f"(layers={self.num_layers}, kv_heads={self.num_kv_heads}, "
-                  f"head_dim={self.head_dim})")
-        except ImportError as e:
-            print(f"[KVCacheManager] Not available: {e}")
+        # 初始化 DataSystem client + KVCacheManager (PyTorch 路径共用)
+        self._init_kv_cache_manager(self.config)
 
     def _load_qwen3_trt(self, checkpoint) -> None:
         """加载 Qwen3 TRT-LLM 引擎 (无需 PyTorch 模型)."""
@@ -362,6 +345,9 @@ class GenerativeInferenceService:
         print(f"[TRT] Qwen3 engine loaded: layers={self.num_layers}, "
               f"kv_heads={self.num_kv_heads}, hidden={self.hidden_size}")
 
+        # 初始化 DataSystem client + KVCacheManager (TRT 路径)
+        self._init_kv_cache_manager(self.config)
+
     def _init_datasystem_client(self, config: InferenceConfig):
         """初始化 DataSystem 客户端 (如果可用).
         
@@ -392,6 +378,25 @@ class GenerativeInferenceService:
         except Exception as e:
             print(f"[DataSystem] Connection failed: {e}")
             return None
+
+    def _init_kv_cache_manager(self, config: InferenceConfig) -> None:
+        """初始化 KVCacheManager (含 DataSystem client)."""
+        ds_client = self._init_datasystem_client(config)
+        try:
+            from inference.kv_cache.manager import KVCacheManager
+            self.kv_manager = KVCacheManager(
+                num_layers=self.num_layers,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
+                hbm_capacity=50,
+                ds_client=ds_client,
+            )
+            ds_status = "DataSystem" if ds_client else "HBM-only"
+            print(f"[KVCacheManager] Initialized ({ds_status}) "
+                  f"(layers={self.num_layers}, kv_heads={self.num_kv_heads}, "
+                  f"head_dim={self.head_dim})")
+        except ImportError as e:
+            print(f"[KVCacheManager] Not available: {e}")
 
     def _get_logits(self, input_ids: torch.Tensor):
         """获取 logits，优先使用 TensorRT 引擎.
