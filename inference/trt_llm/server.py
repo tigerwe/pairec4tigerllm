@@ -330,6 +330,7 @@ class GenerativeInferenceService:
             vocab_size=model_config['vocab_size'],
             temperature=self.config.temperature,
             top_k=self.config.top_k,
+            max_tokens_in_paged_kv_cache=256,  # 故意设小，强制触发 eviction
         )
 
         if '_id_to_sem' in checkpoint:
