@@ -18,17 +18,21 @@ class TRTQwen3Backend:
         # ── 构造 scheduler_config (需 MONKEY-PATCH model_runner_cpp.py) ──
         scheduler_config = None
         try:
-            from tensorrt_llm.llmapi import SchedulerConfig, CapacitySchedulerPolicy
+            from tensorrt_llm.bindings.executor import (
+                CapacitySchedulerPolicy,
+                SchedulerConfig,
+            )
             policy = (
                 CapacitySchedulerPolicy.MAX_UTILIZATION
                 if scheduler_policy == "max_utilization"
                 else CapacitySchedulerPolicy.GUARANTEED_NO_EVICT
             )
-            scheduler_config = SchedulerConfig(capacity_scheduler_policy=policy)
+            scheduler_config = SchedulerConfig(policy)
             print(f"[TRTQwen3Backend] Scheduler policy: {scheduler_policy}, "
                   f"max_kv_tokens={max_tokens_in_paged_kv_cache}")
         except Exception as e:
             print(f"[TRTQwen3Backend] SchedulerConfig unavailable: {e}")
+            import traceback; traceback.print_exc()
 
         self.runner = ModelRunnerCpp.from_dir(
             engine_dir,
