@@ -1,10 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-05-25 | 下一个: Go pairec 联调
+> 最后更新: 2026-05-26 | 下一个: ARM 容器内重建引擎 + offload/onboard 验证
 
 ## 时间线
 
 | 日期 | 进度 |
+|------|------|
+| 5/26 | 分析引擎不兼容根因; 创建一键验证脚本 rebuild_and_verify_offload.sh; 推送到 gitcode |
 |------|------|
 | 5/18 | 启动: 讨论使用 Qwen3-0.6B 替换 GPT2 Decoder |
 | 5/19 | v1: 设计 Prompt Template 架构; 重写模型类; 修 dtype→torch_dtype 兼容 |
@@ -83,6 +85,7 @@ IndexError: basic_string::substr: __pos (which is 4) > this->size() (which is 0)
 
 ## 下一步
 
-1. 重建 TRT-LLM 引擎 (trtllm-build) — 解决新旧二进制不兼容
-2. Go pairec 联调 (F08)
-3. TRT 引擎延迟优化 (profiling, KV Cache 池化)
+1. ~~重建 TRT-LLM 引擎 (trtllm-build) — 解决新旧二进制不兼容~~ ← 脚本已准备
+2. **ARM 4090D 容器内执行 `./scripts/rebuild_and_verify_offload.sh`** — 一键重建+验证 (当前阻塞)
+3. Go pairec 联调 (F08)
+4. TRT 引擎延迟优化 (profiling, KV Cache 池化)
