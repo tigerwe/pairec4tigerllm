@@ -23,14 +23,14 @@ echo "$HEALTH" | grep -q '"datasystem":"connected"' && echo "✅ DataSystem conn
 echo "$HEALTH" | grep -q '"status":"healthy"' && echo "✅ 服务健康" || echo "❌ 服务异常"
 
 # ── 2. 构造长历史 ─────────────────────
-HIST_12='[[10,20,0,0],[30,40,0,0],[50,60,0,0],[70,80,0,0],[90,100,0,0],[110,120,0,0],[130,140,0,0],[150,160,0,0],[170,180,0,0],[190,200,0,0],[210,220,0,0],[230,240,0,0]]'
+HIST='[[10,20,0,0],[30,40,0,0],[50,60,0,0],[70,80,0,0],[90,100,0,0],[110,120,0,0],[130,140,0,0],[150,160,0,0],[170,180,0,0],[190,200,0,0]]'  # 10 history
 
-# ── 3. 一个长请求填 KV Cache ──────────
+# ── 3. 一个长请求填充 KV Cache ──────────
 echo ""
-echo "── 2. 长历史请求（12 条，填 KV Cache）──"
+echo "── 2. 长历史请求（10 条，填充 KV Cache）──"
 RESP=$(curl -s -m 30 -X POST "http://localhost:$PORT/recommend" \
     -H "Content-Type: application/json" \
-    -d "{\"user_id\":\"big_test\",\"history\":$HIST_12,\"topk\":5}")
+    -d "{\"user_id\":\"big_test\",\"history\":$HIST,\"topk\":5}")
 CODE=$(echo "$RESP" | python -c "import sys,json; print(json.load(sys.stdin)['code'])" 2>/dev/null || echo "ERR")
 KV=$(echo "$RESP" | python -c "import sys,json; print(json.load(sys.stdin)['trace']['kv_source'])" 2>/dev/null || echo "ERR")
 MS=$(echo "$RESP" | python -c "import sys,json; print(f\"{json.load(sys.stdin)['trace']['total_ms']:.0f}\")" 2>/dev/null || echo "ERR")
@@ -43,7 +43,7 @@ echo "── 3. 重复请求（验证 python 层 kv_source: miss→hit）──"
 for round in 1 2; do
     RESP=$(curl -s -m 30 -X POST "http://localhost:$PORT/recommend" \
         -H "Content-Type: application/json" \
-        -d "{\"user_id\":\"big_test\",\"history\":$HIST_12,\"topk\":5}")
+        -d "{\"user_id\":\"big_test\",\"history\":$HIST,\"topk\":5}")
     CODE=$(echo "$RESP" | python -c "import sys,json; print(json.load(sys.stdin)['code'])" 2>/dev/null || echo "ERR")
     KV=$(echo "$RESP" | python -c "import sys,json; print(json.load(sys.stdin)['trace']['kv_source'])" 2>/dev/null || echo "ERR")
     MS=$(echo "$RESP" | python -c "import sys,json; print(f\"{json.load(sys.stdin)['trace']['total_ms']:.0f}\")" 2>/dev/null || echo "ERR")
