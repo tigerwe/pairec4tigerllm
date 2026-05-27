@@ -5,9 +5,9 @@
 ## 最近一次交接 (2026-05-27)
 
 ### 当前任务
-ARM 4090D 容器上验证 DataSystem KV Cache offload/onboard。
-进度: Executor 构造 ✅、DataSystem 连接 ✅、/health ✅。
-阻塞: 推理时 CUBLAS_STATUS_EXECUTION_FAILED（GCC 14 编译的 plugin 不兼容）。
+ARM 4090D 推理已打通，下一步验证 DataSystem KV Cache offload/onboard。
+进度: Executor ✅、DataSystem ✅、/health ✅、推理 ✅ (code=200, hit=5/5)。
+阻塞: 无。
 
 ### 本 session 解决的问题
 
@@ -17,6 +17,9 @@ ARM 4090D 容器上验证 DataSystem KV Cache offload/onboard。
 4. **model_runner_cpp.py: sampling_config_list 未定义** → else 分支补定义
 5. **model_runner_cpp.py: from_dir 缺 scheduler_config 参数** → 函数签名+传参
 6. **GCC 14 编译环境统一** → source gcc-toolset-14/enable, cmake + make 100% 通过
+7. **CUBLAS_STATUS_EXECUTION_FAILED 根因定位** → 非 cuBLAS 问题，是 `FusedMultiHeadAttentionXMMAKernelV2` bfloat16 路径在 SM 89 上非法内存访问；CUDA_LAUNCH_BLOCKING=1 后错误精确定位到 fused_multihead_attention_v2.cpp:379
+8. **绕过方案** → trtllm-build 用 `context_fmha disable` + `use_paged_context_fmha disable`，引擎 v4 推理成功 (~595ms, hit=5/5)
+9. **cudaCoreGemm.cu 修复** → `cudaCoreGemmTemplateCaller` kernel launch 后加 `cudaGetLastError()` 错误检查，失败回退 cuBLAS（已修改源码，未推送）
 
 ### 关键新增文件
 

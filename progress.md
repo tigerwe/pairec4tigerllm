@@ -1,12 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-05-27 | 当前阻塞: cuBLAS GEMM plugin GCC 14 编译不兼容
+> 最后更新: 2026-05-27 | 当前阻塞: 无（推理已打通）
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
-| **5/27** | **定位 DataSystem Init substr(4) 根因: CudaRH2DDriver::SwitchToAndGetGpuId ARM 空GPU标识; stub_gpu.so+block_ds_consumer.so+abseil 三链 LD_PRELOAD → Executor OK + DataSystem connected; 推理遇 CUBLAS_STATUS_EXECUTION_FAILED (GCC 14 plugin 问题)** |
+| **5/27** | **推理打通: 根因定位为 FMHA bfloat16 kernel SM 89 非法内存访问(非 cuBLAS 问题); context_fmha disable 绕过; cudaCoreGemm.cu 补 error check; verify_kv.sh 验证脚本; 推理 code=200 hit=5/5** |
 | 5/26 | 分析引擎不兼容根因; 创建一键验证脚本 rebuild_and_verify_offload.sh; 推送到 gitcode |
 | 5/25 | DataSystem KV Cache 集成：Python 层 + C++ 层连接验证通过；offload/onboard 阻断已绕过 |
 | 5/23 | ARM 4090D 推理部署 + TRT-LLM 引擎构建 + 多轮采样去重 |
@@ -25,7 +25,9 @@
 - **Executor 构造**: ✅ 通过 (stub_gpu.so + block_ds_consumer.so + abseil 三链)
 - **DataSystem 连接**: ✅ KvCacheManagerDataSystem Init success (host=127.0.0.1:31501)
 - **/health 接口**: ✅ 200, datasystem=connected
-- **推理**: ❌ CUBLAS_STATUS_EXECUTION_FAILED (GCC 14 编译的 libnvinfer_plugin_tensorrt_llm.so)
+- **推理**: ✅ code=200, hit=5/5, ~595ms (context_fmha disable 绕过 FMHA bfloat16 SM 89 bug)
+- **引擎**: v4 (bfloat16 GEMM + FP16 attention via context_fmha=disable)
+- **根因**: `FusedMultiHeadAttentionXMMAKernelV2` bfloat16 路径在 SM 89 上 `cuLaunchKernel` 非法内存访问（非 cuBLAS、非 GCC 14）
 
 ---
 
@@ -88,7 +90,17 @@ GDB 定位（5/27 15:04）：
 
 ## 下一步
 
-1. **GCC 12 重编 libnvinfer_plugin_tensorrt_llm.so** — 解决 CUBLAS 不兼容 (当前阻塞)
-2. ARM 4090D 推理通过 → 批量请求触发 eviction → 验证 DataSystem offload/onboard 日志
+1. ~~ARM 4090D 推理通过~~ ✅ (context_fmha disable 绕过 FMHA bfloat16 问题)
+2. 批量请求触发 eviction → 验证 DataSystem offload/onboard 日志 (verify_kv.sh)
 3. Go pairec 联调 (F08)
 4. TRT 引擎延迟优化 (profiling, KV Cache 池化)
+5. [待修] FMHA bfloat16 kernel SM 89 修复 (fused_multihead_attention_v2.cpp:379)
+
+---
+
+## TensorRT-LLM 源码改动记录
+
+| 文件 | 改动 | 状态 |
+|------|------|------|
+| `cpp/tensorrt_llm/kernels/weightOnlyBatchedGemv/cudaCoreGemm.cu` | `cudaCoreGemmTemplateCaller` kernel launch 后加 `cudaGetLastError()` 错误检查 | ✅ 已修改，未推送 |
+| `cpp/tensorrt_llm/plugins/gemmPlugin/gemmPlugin.cpp` | 跳过 cudaCoreGemm 路径（`if (false && ...)`，仅排查用） | 排查用，无需推送 |
