@@ -19,6 +19,14 @@ lsof -i ":$PORT" 2>/dev/null && { echo "端口 $PORT 仍被占用"; exit 1; } ||
 # ── 1. 启动服务 ────────────────────────
 echo ""
 echo "── 1. 启动推理服务 ──"
+
+# 设置 GCC 14 toolchain + LD_PRELOAD (DataSystem SDK ARM bug workaround)
+source /opt/openEuler/gcc-toolset-14/enable 2>/dev/null || true
+export LD_PRELOAD="\
+/workspace/pairec4tigerllm/scripts/block_ds_consumer.so:\
+/workspace/pairec4tigerllm/scripts/stub_gpu.so:\
+/usr/local/lib/python3.11/site-packages/yr/datasystem/lib/libabseil_dll.so.2407.0.0"
+
 python -m inference.trt_llm.server \
     --model_path ./checkpoints/decoder_qwen3/decoder_epoch_20.pt \
     --qwen3_model_path ./models/Qwen3-0.6B \
