@@ -85,7 +85,8 @@ IndexError: basic_string::substr: __pos (which is 4) > this->size() (which is 0)
 
 ## 下一步
 
-1. ~~重建 TRT-LLM 引擎 (trtllm-build) — 解决新旧二进制不兼容~~ ← 脚本已准备
-2. **ARM 4090D 容器内执行 `./scripts/rebuild_and_verify_offload.sh`** — 一键重建+验证 (当前阻塞)
-3. Go pairec 联调 (F08)
-4. TRT 引擎延迟优化 (profiling, KV Cache 池化)
+1. ~~重建 TRT-LLM 引擎~~ ← 已完成
+2. ~~DataSystem Init substr(4) 崩溃~~ ← 根因定位: CudaRH2DDriver::SwitchToAndGetGpuId ARM GPU 空标识, stub_gpu.so 绕过
+3. **ARM 4090D 容器内验证 offload/onboard** — 编译 stub_gpu.so + LD_PRELOAD 三链 → Executor OK → 批量请求触发 eviction
+4. Go pairec 联调 (F08)
+5. TRT 引擎延迟优化 (profiling, KV Cache 池化)
