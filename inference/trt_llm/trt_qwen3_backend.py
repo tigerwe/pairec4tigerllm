@@ -36,7 +36,6 @@ class TRTQwen3Backend:
 
         self.runner = ModelRunnerCpp.from_dir(
             engine_dir,
-            scheduler_config=scheduler_config,
             max_tokens_in_paged_kv_cache=max_tokens_in_paged_kv_cache,
         )
         self.tokenizer = tokenizer
