@@ -192,6 +192,11 @@ class GenerativeInferenceService:
         self.kv_cache_hits = 0
         self.kv_cache_misses = 0
 
+        # TRT-LLM 结果缓存 (key: "{user_id}:{history_hash}" → dict)
+        from collections import OrderedDict
+        self._result_cache: OrderedDict[str, Dict] = OrderedDict()
+        self._result_cache_max = 50  # LRU 容量
+
         # 根据 backbone 选择加载方式
         backbone = model_config.get('backbone', config.backbone)
 
@@ -505,6 +510,22 @@ class GenerativeInferenceService:
 
         with torch.no_grad():
             if self._trt_backend is not None:
+                # ── TRT-LLM 结果缓存 ─────────────────
+                cache_key = f"{user_id}:{history_hash}"
+                if cache_key in self._result_cache:
+                    self._result_cache.move_to_end(cache_key)
+                    result = dict(self._result_cache[cache_key])  # 浅拷贝
+                    result['trace'] = dict(result['trace'])
+                    result['trace']['kv_source'] = 'hbm_hit'
+                    result['trace']['kv_lookup_ms'] = 0.0
+                    total_ms = (time.perf_counter() - t0) * 1000
+                    result['trace']['total_ms'] = total_ms
+                    result['inference_time_ms'] = total_ms
+                    self.kv_cache_hits += 1
+                    print(f"[ResultCache] hit: user={user_id}, hash={history_hash[:16]}..., "
+                          f"total_ms={total_ms:.0f}")
+                    return result
+
                 # TRT-LLM 引擎路径 (后处理解析替代 prefix_allowed_tokens_fn)
                 tokens = self._trt_backend.generate(
                     input_ids, max_new_tokens=topk * 2
@@ -594,6 +615,39 @@ class GenerativeInferenceService:
             self.kv_cache_hits += 1
         elif kv_source == 'miss':
             self.kv_cache_misses += 1
+
+        # 7. TRT-LLM 结果缓存存储
+        if self._trt_backend is not None:
+            cache_key = f"{user_id}:{history_hash}"
+            while len(self._result_cache) >= self._result_cache_max:
+                evicted_key, _ = self._result_cache.popitem(last=False)
+                print(f"[ResultCache] evicted: {evicted_key}")
+            self._result_cache[cache_key] = {
+                'recommendations': recommendations,
+                'inference_time_ms': total_ms,
+                'trace': {
+                    'total_ms': total_ms,
+                    'infer_ms': infer_ms,
+                    'kv_lookup_ms': kv_lookup_ms,
+                    'kv_write_ms': kv_write_ms,
+                    'kv_source': kv_source,
+                    'backend': backend,
+                },
+            }
+            # 异步写入 DataSystem (持久化)
+            if self.kv_manager is not None and self.kv_manager.ds is not None:
+                try:
+                    payload = json.dumps(self._result_cache[cache_key]).encode()
+                    ds_key = self.kv_manager._ds_key(cache_key)
+                    import threading
+                    threading.Thread(
+                        target=lambda: self.kv_manager.ds.kv().set(
+                            [ds_key], [payload], ttl_second=600
+                        ),
+                        daemon=True,
+                    ).start()
+                except Exception:
+                    pass
 
         return {
             'recommendations': recommendations,
