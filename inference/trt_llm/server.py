@@ -975,6 +975,37 @@ class HTTPServer:
                 'version': '1.0.0',
             })
 
+        @app.route('/kv-stats', methods=['GET'])
+        def kv_stats():
+            """KV Cache 统计信息."""
+            stats = {
+                'backend': 'none',
+                'hbm_entries': 0,
+                'hbm_capacity': 0,
+                'estimated_size_mb': 0.0,
+                'data_system': 'none',
+            }
+            # KVCacheManager (PyTorch 路径)
+            if self.service.kv_manager is not None:
+                mgr = self.service.kv_manager
+                stats['backend'] = 'kv_manager'
+                stats['hbm_capacity'] = mgr.hbm_capacity
+                stats['hbm_entries'] = len(mgr.hbm_cache)
+                stats['data_system'] = 'connected' if mgr.ds else 'disabled'
+                total = 0.0
+                for key, entry in mgr.hbm_cache.items():
+                    past_kv = entry.get('past_kv')
+                    if past_kv is not None and len(past_kv) > 0:
+                        seq_len = past_kv[0][0].size(-2)
+                        total += mgr.estimate_size_mb(seq_len)
+                stats['estimated_size_mb'] = round(total, 2)
+            if self.service._result_cache is not None:
+                stats['result_cache_entries'] = len(self.service._result_cache)
+                stats['result_cache_capacity'] = self.service._result_cache_max
+            stats['kv_cache_hits'] = self.service.kv_cache_hits
+            stats['kv_cache_misses'] = self.service.kv_cache_misses
+            return jsonify(stats)
+
         @app.route('/recommend', methods=['POST'])
         def recommend():
             try:
