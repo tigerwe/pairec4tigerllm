@@ -677,7 +677,7 @@ class GenerativeInferenceService:
                     import threading
                     threading.Thread(
                         target=lambda: self.kv_manager.ds.kv().set(
-                            [ds_key], [payload], ttl_second=600
+                            ds_key, payload, ttl_second=600
                         ),
                         daemon=True,
                     ).start()
