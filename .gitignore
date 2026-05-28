@@ -82,3 +82,8 @@ go.sum
 # Environment
 .env
 .env.local
+
+# Go build artifacts
+vendor/
+pairec-server-arm64
+services/pairec-server
