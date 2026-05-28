@@ -196,6 +196,7 @@ class GenerativeInferenceService:
         from collections import OrderedDict
         self._result_cache: OrderedDict[str, Dict] = OrderedDict()
         self._result_cache_max = 50  # LRU 容量
+        self._result_ds_prefix = "pairec4tigerllm:result"  # DataSystem key 前缀 (与 KV 分离)
 
         # 根据 backbone 选择加载方式
         backbone = model_config.get('backbone', config.backbone)
@@ -532,7 +533,7 @@ class GenerativeInferenceService:
                 if self.kv_manager is not None and self.kv_manager.ds is not None:
                     try:
                         t_ds = time.perf_counter()
-                        ds_key = self.kv_manager._ds_key(cache_key)
+                        ds_key = f"{self._result_ds_prefix}:{cache_key}"
                         raw = self.kv_manager.ds.kv().get([ds_key], convert_to_str=False)
                         if raw and raw[0] is not None:
                             onboard_result = json.loads(
@@ -676,7 +677,7 @@ class GenerativeInferenceService:
             if self.kv_manager is not None and self.kv_manager.ds is not None:
                 try:
                     payload = json.dumps(self._result_cache[cache_key]).encode()
-                    ds_key = self.kv_manager._ds_key(cache_key)
+                    ds_key = f"{self._result_ds_prefix}:{cache_key}"
                     import threading
                     threading.Thread(
                         target=lambda: self.kv_manager.ds.kv().set(
