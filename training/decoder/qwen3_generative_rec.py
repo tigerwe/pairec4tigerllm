@@ -12,7 +12,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Union
 
 
 class Qwen3GenerativeRec(nn.Module):
@@ -279,7 +279,9 @@ class Qwen3GenerativeRec(nn.Module):
         temperature: float = 1.0,
         top_k: Optional[int] = None,
         use_cache: bool = True,
-    ) -> torch.Tensor:
+        past_key_values: Optional[Tuple] = None,
+        return_past_kv: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Tuple]]:
         """自回归生成推荐.
 
         Args:
@@ -287,9 +289,12 @@ class Qwen3GenerativeRec(nn.Module):
             max_new_tokens: 生成 token 数上限
             temperature: 采样温度
             top_k:       top-k 采样
+            past_key_values: 预计算的 prompt KV Cache (跳过 Prefill)
+            return_past_kv: 如果 True, 返回 (tokens, prompt_past_kv) 元组
 
         Returns:
-            [batch, max_items, 4] — 生成的语义 ID (不足则补 0)
+            如果 return_past_kv=False: [batch, max_items, 4] — 生成的语义 ID
+            如果 return_past_kv=True:  (tokens, prompt_past_kv) 元组
         """
         self.eval()
         batch_size = input_ids.shape[0]
@@ -362,24 +367,48 @@ class Qwen3GenerativeRec(nn.Module):
             return [self._sem_to_id[(0, v)] for v in range(self.vocab_size)]
 
         _called = [0]  # mutable counter for prefix_fn
-        generated = self.base_model.generate(
+
+        gen_kwargs = {
             **encoded,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_k=top_k if top_k else 50,
-            do_sample=True,
-            pad_token_id=self.tokenizer.pad_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
-            prefix_allowed_tokens_fn=prefix_fn,
-        )
+            'max_new_tokens': max_new_tokens,
+            'temperature': temperature,
+            'top_k': top_k if top_k else 50,
+            'do_sample': True,
+            'pad_token_id': self.tokenizer.pad_token_id,
+            'eos_token_id': self.tokenizer.eos_token_id,
+            'prefix_allowed_tokens_fn': prefix_fn,
+        }
+
+        if past_key_values is not None:
+            gen_kwargs['past_key_values'] = past_key_values
+
+        if return_past_kv:
+            gen_kwargs['return_dict_in_generate'] = True
+
+        output = self.base_model.generate(**gen_kwargs)
+
+        # ── 提取 past_key_values (仅 prompt 部分) ───────
+        prompt_len = encoded["input_ids"].shape[1]
+        prompt_past_kv = None
+
+        if return_past_kv:
+            generated = output.sequences
+            full_past_kv = output.past_key_values
+            if full_past_kv is not None:
+                # 切片: 只保留 prompt 部分的 KV, 去掉生成部分
+                prompt_past_kv = tuple(
+                    (k[:, :, :prompt_len, :], v[:, :, :prompt_len, :])
+                    for k, v in full_past_kv
+                )
+        else:
+            generated = output
 
         print(f"[DEBUG gen] prefix_fn called {_called[0]} times, "
               f"pfx_injected={self._item_prefix is not None}, "
-              f"generated_tokens={generated.shape[1] - encoded['input_ids'].shape[1]}")
+              f"generated_tokens={generated.shape[1] - prompt_len}")
 
         # ── 解析生成结果 ─────────────────────────────
         results: List[List[List[int]]] = []
-        prompt_len = encoded["input_ids"].shape[1]
 
         for b in range(batch_size):
             new_tokens = generated[b, prompt_len:].tolist()
@@ -397,6 +426,8 @@ class Qwen3GenerativeRec(nn.Module):
                 if i < max_items:
                     padded[b, i] = torch.tensor(sem, device=device)
 
+        if return_past_kv:
+            return padded, prompt_past_kv
         return padded
 
     def _parse_output(self, token_ids: List[int]) -> List[List[int]]:

@@ -494,6 +494,9 @@ class GenerativeInferenceService:
             past_kv, kv_source, kv_lookup_ms = self.kv_manager.query(
                 user_id, history_hash
             )
+            if past_kv is not None:
+                print(f"[KV Cache] hit: user={user_id}, hash={history_hash[:16]}..., "
+                      f"lookup_ms={kv_lookup_ms:.1f}")
 
         # 3. 生成
         t_infer_start = time.perf_counter()
@@ -511,16 +514,23 @@ class GenerativeInferenceService:
                       f"nonzero={(tokens.sum(dim=1) != 0).sum().item()}/{tokens.shape[0]}")
             elif hasattr(self.model, '_id_to_sem'):
                 # Qwen3 Prompt Mode: 原生 generate (内含 tokenizer + prompt 构造)
-                tokens = self.model.generate(
+                result = self.model.generate(
                     input_ids,
                     max_new_tokens=topk * 2,
                     temperature=temperature,
                     use_cache=True,
-                )  # [batch, max_items, 4]
+                    past_key_values=past_kv,
+                    return_past_kv=True,
+                )
+                if isinstance(result, tuple):
+                    tokens, final_past_kv = result
+                else:
+                    tokens = result
                 tokens = tokens[0]  # [max_items, 4]
                 print(f"[DEBUG generate] topk={topk}, max_new={topk*2}, "
                       f"output shape={tokens.shape}, "
-                      f"nonzero={(tokens.sum(dim=1) != 0).sum().item()}/{tokens.shape[0]}")
+                      f"nonzero={(tokens.sum(dim=1) != 0).sum().item()}/{tokens.shape[0]}, "
+                      f"kv_cached={final_past_kv is not None}")
             elif hasattr(self.model, 'generate'):
                 # Qwen3 inputs_embeds Mode (旧)
                 if past_kv is not None:
