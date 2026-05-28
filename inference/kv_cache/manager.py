@@ -162,7 +162,7 @@ class KVCacheManager:
     def _deserialize(self, raw) -> Tuple:
         """将 bytes 反序列化为 past_key_values."""
         buf = io.BytesIO(raw if isinstance(raw, bytes) else raw.encode())
-        data = np.load(buf)
+        data = np.load(buf, allow_pickle=True)
         meta = data["meta"]
         num_layers, seq_len, head_dim = (
             int(meta[0]),

@@ -559,7 +559,10 @@ class GenerativeInferenceService:
                                 'inference_time_ms': total_ms,
                             }
                     except Exception as e:
-                        print(f"[ResultCache] DataSystem onboard failed: {e}")
+                        # "Key not found" 是首次请求的正常 miss, 不打印
+                        msg = str(e)
+                        if "Key not found" not in msg and "not found" not in msg.lower():
+                            print(f"[ResultCache] DataSystem onboard error: {e}")
 
                 # 3. 全部 miss → TRT-LLM 引擎推理
                 tokens = self._trt_backend.generate(
