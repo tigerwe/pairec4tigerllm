@@ -510,11 +510,13 @@ class GenerativeInferenceService:
 
         with torch.no_grad():
             if self._trt_backend is not None:
-                # ── TRT-LLM 结果缓存 ─────────────────
+                # ── TRT-LLM 结果缓存 (HBM + DataSystem onboard) ─
                 cache_key = f"{user_id}:{history_hash}"
+
+                # 1. 查 HBM 内存缓存
                 if cache_key in self._result_cache:
                     self._result_cache.move_to_end(cache_key)
-                    result = dict(self._result_cache[cache_key])  # 浅拷贝
+                    result = dict(self._result_cache[cache_key])
                     result['trace'] = dict(result['trace'])
                     result['trace']['kv_source'] = 'hbm_hit'
                     result['trace']['kv_lookup_ms'] = 0.0
@@ -522,11 +524,44 @@ class GenerativeInferenceService:
                     result['trace']['total_ms'] = total_ms
                     result['inference_time_ms'] = total_ms
                     self.kv_cache_hits += 1
-                    print(f"[ResultCache] hit: user={user_id}, hash={history_hash[:16]}..., "
-                          f"total_ms={total_ms:.0f}")
+                    print(f"[ResultCache] hbm_hit: user={user_id}, total_ms={total_ms:.0f}")
                     return result
 
-                # TRT-LLM 引擎路径 (后处理解析替代 prefix_allowed_tokens_fn)
+                # 2. DataSystem onboard (内存 miss 时回读)
+                onboard_result = None
+                if self.kv_manager is not None and self.kv_manager.ds is not None:
+                    try:
+                        t_ds = time.perf_counter()
+                        ds_key = self.kv_manager._ds_key(cache_key)
+                        raw = self.kv_manager.ds.kv().get([ds_key], convert_to_str=False)
+                        if raw and raw[0] is not None:
+                            onboard_result = json.loads(
+                                raw[0] if isinstance(raw[0], bytes) else raw[0]
+                            )
+                            ds_lookup_ms = (time.perf_counter() - t_ds) * 1000
+                            print(f"[ResultCache] ds_hit: user={user_id}, "
+                                  f"ds_lookup_ms={ds_lookup_ms:.0f}")
+                            # 回填 HBM
+                            self._result_cache[cache_key] = onboard_result
+                            self._result_cache.move_to_end(cache_key)
+                            kv_source = 'ds_hit'
+                            kv_lookup_ms = ds_lookup_ms
+                            self.kv_cache_hits += 1
+                            total_ms = (time.perf_counter() - t0) * 1000
+                            return {
+                                **onboard_result,
+                                'trace': {
+                                    **onboard_result.get('trace', {}),
+                                    'kv_source': 'ds_hit',
+                                    'kv_lookup_ms': ds_lookup_ms,
+                                    'total_ms': total_ms,
+                                },
+                                'inference_time_ms': total_ms,
+                            }
+                    except Exception as e:
+                        print(f"[ResultCache] DataSystem onboard failed: {e}")
+
+                # 3. 全部 miss → TRT-LLM 引擎推理
                 tokens = self._trt_backend.generate(
                     input_ids, max_new_tokens=topk * 2
                 )  # [batch, max_items, 4]
