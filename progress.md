@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-05-27 | 当前阻塞: 无（推理已打通）
+> 最后更新: 2026-05-28 | 当前阻塞: 无 | 下一步: Go pairec 联调 (F08)
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **5/28** | **KV Cache + offload/onboard 闭环: 修复 TRT/PyTorch 双路径 miss loop; TRT 路径加结果缓存(OrderedDict LRU → DataSystem onboard); eviction 触发验证; ds_hit(~3ms) / hbm_hit(~2ms) / miss(~220ms) 三层全通** |
 | **5/27** | **推理打通: 根因定位为 FMHA bfloat16 kernel SM 89 非法内存访问(非 cuBLAS 问题); context_fmha disable 绕过; cudaCoreGemm.cu 补 error check; verify_kv.sh 验证脚本; 推理 code=200 hit=5/5** |
 | 5/26 | 分析引擎不兼容根因; 创建一键验证脚本 rebuild_and_verify_offload.sh; 推送到 gitcode |
 | 5/25 | DataSystem KV Cache 集成：Python 层 + C++ 层连接验证通过；offload/onboard 阻断已绕过 |
@@ -20,14 +21,16 @@
 
 - **训练**: ✅ epoch 20, loss 2.49, checkpoint `decoder_epoch_20.pt`
 - **PyTorch 推理**: ✅ Flask 服务, hit/miss=5/0
-- **TRT-LLM 引擎**: ✅ bfloat16, 1.46 GB (旧 engine `qwen3_rec` 可用; 新 engine `qwen3_rec_v3` 已构建但 cuBLAS 不兼容)
+- **TRT-LLM 引擎**: ✅ bfloat16, 1.46 GB
 - **约束解码**: ✅ prefix tree (PyTorch) / 多轮采样去重 (TRT)
 - **Executor 构造**: ✅ 通过 (stub_gpu.so + block_ds_consumer.so + abseil 三链)
-- **DataSystem 连接**: ✅ KvCacheManagerDataSystem Init success (host=127.0.0.1:31501)
+- **DataSystem 连接**: ✅ KvCacheManagerDataSystem Init success
 - **/health 接口**: ✅ 200, datasystem=connected
-- **推理**: ✅ code=200, hit=5/5, ~595ms (context_fmha disable 绕过 FMHA bfloat16 SM 89 bug)
+- **推理**: ✅ code=200, hit=5/5, ~220ms (TRT)
+- **KV Cache 三层**: ✅ hbm_hit (~2ms) / ds_hit (~3ms) / miss (~220ms)
+- **offload/onboard**: ✅ LRU 淘汰 → DataSystem 写入 → 重启后 onboard 回读
 - **引擎**: v4 (bfloat16 GEMM + FP16 attention via context_fmha=disable)
-- **根因**: `FusedMultiHeadAttentionXMMAKernelV2` bfloat16 路径在 SM 89 上 `cuLaunchKernel` 非法内存访问（非 cuBLAS、非 GCC 14）
+- **根因**: `FusedMultiHeadAttentionXMMAKernelV2` bfloat16 路径在 SM 89 上 `cuLaunchKernel` 非法内存访问（已绕过）
 
 ---
 
@@ -87,14 +90,16 @@ GDB 定位（5/27 15:04）：
 - C++ DataSystem 连接: `KvCacheManagerDataSystem` 单例，KVCacheManager 构造时自动连接
 - abseil 冲突: `LD_PRELOAD` 三链 (stub_gpu + stub_consumer + abseil)
 - ARM GPU 兼容: stub 绕过 DataSystem SDK 0.7.7 的 GPU ID 解析 bug
+- **TRT 路径结果缓存**: TRT-LLM 不暴露 past_key_values → 改用 OrderedDict LRU 缓存推理结果 JSON，二层: HBM → DataSystem onboard (与 PyTorch KV 路径并行)
+- **双 DataSystem namespace**: `kv:*` (past_key_values, numpy) 和 `result:*` (JSON) 隔离，避免反序列化冲突
 
 ## 下一步
 
-1. ~~ARM 4090D 推理通过~~ ✅ (context_fmha disable 绕过 FMHA bfloat16 问题)
-2. 批量请求触发 eviction → 验证 DataSystem offload/onboard 日志 (verify_kv.sh)
+1. ~~ARM 4090D 推理通过~~ ✅ (context_fmha disable 绕过)
+2. ~~KV Cache 验证 + offload/onboard 闭环~~ ✅ (hbm_hit/ds_hit/miss 三层全通)
 3. Go pairec 联调 (F08)
 4. TRT 引擎延迟优化 (profiling, KV Cache 池化)
-5. [待修] FMHA bfloat16 kernel SM 89 修复 (fused_multihead_attention_v2.cpp:379)
+5. [待修] FMHA bfloat16 kernel SM 89 修复
 
 ---
 
