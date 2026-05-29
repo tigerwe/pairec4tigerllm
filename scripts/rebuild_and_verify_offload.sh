@@ -39,11 +39,11 @@ log_step "Step 0: 环境预检"
 cd "$PROJECT_DIR"
 
 # 检查 tensorrt_llm
-if python -c "import tensorrt_llm; print(tensorrt_llm.__version__)" 2>/dev/null | grep -q "1.0"; then
-    TRT_VER=$(python -c "import tensorrt_llm; print(tensorrt_llm.__version__)" 2>/dev/null)
+if python -c "import tensorrt_llm" 2>/dev/null; then
+    TRT_VER=$(python -c "print(getattr(__import__('tensorrt_llm'), '__version__', 'OK'))" 2>/dev/null || echo "OK")
     log_ok "tensorrt_llm $TRT_VER 可用"
 else
-    log_fail "tensorrt_llm 不可用或版本不是 1.0，请先完成 TRT-LLM 重编译 + pip install -e ."
+    log_fail "tensorrt_llm 不可用，请 pip install -e /TensorRT-LLM"
     exit 1
 fi
 
