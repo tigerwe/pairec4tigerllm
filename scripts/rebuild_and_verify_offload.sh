@@ -149,8 +149,8 @@ else
         --gemm_plugin bfloat16 \
         --gpt_attention_plugin bfloat16 \
         --max_batch_size 32 \
-        --max_input_len 20 \
-        --max_seq_len 30 \
+        --max_input_len 256 \
+        --max_seq_len 320 \
         --max_beam_width 1 \
         --remove_input_padding enable \
         --context_fmha enable
