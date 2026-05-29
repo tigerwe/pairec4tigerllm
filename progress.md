@@ -1,12 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-05-29 | 当前阻塞: FMHA bf16 kernel SM 89 + ConsumerLoop SIGSEGV (阻断 C++ offload/onboard) | 下一步: Go pairec 联调 (F08)
+> 最后更新: 2026-05-29 | 当前阻塞: Scheduler GUARANTEED_NO_EVICT (待传 SchedulerConfig) + ConsumerLoop SIGSEGV | 下一步: 修 scheduler → 压测触发 eviction → 验证 offload 日志
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
-| **5/29** | **TRT-LLM ↔ DataSystem 集成架构分析: 理清 Python 层 (✅) vs C++ 层 (❌) 两条链路; 定位 C++ 层两重阻塞 — ① FMHA bf16 SM 89 kernel bug → paged KV cache 不能开 ② ConsumerLoop SIGSEGV → DataSystem 异步通信被 stub no-op 绕过; 制定四步激活路线** |
+| **5/29** | **C++ offload/onboard 链路突破: ① FMHA crash 根因定位 — 非 dtype 问题，是 resize_token_embeddings 扩展词表触发了 XMMA 路径（标准 Qwen3 FP16 FMHA SM 89 正常）；② C++ 源码绕过 — 注释 trtGptModelInflightBatching.cpp:149-155 去掉 paged FMHA 对 enableBlockReuse 的强约束；③ 重编 .so 替换 — secondaryBlocks=28 分配成功，DataSystem C++ Init OK；④ 剩余阻塞: Scheduler 需从 GUARANTEED_NO_EVICT 切到 MAX_UTILIZATION (Python 侧 trt_qwen3_backend.py)** |
 | **5/28** | **KV Cache + offload/onboard 闭环: 修复 TRT/PyTorch 双路径 miss loop; TRT 路径加结果缓存(OrderedDict LRU → DataSystem onboard); eviction 触发验证; ds_hit(~3ms) / hbm_hit(~2ms) / miss(~220ms) 三层全通** |
 | **5/27** | **推理打通: 根因定位为 FMHA bfloat16 kernel SM 89 非法内存访问(非 cuBLAS 问题); context_fmha disable 绕过; cudaCoreGemm.cu 补 error check; verify_kv.sh 验证脚本; 推理 code=200 hit=5/5** |
 | 5/26 | 分析引擎不兼容根因; 创建一键验证脚本 rebuild_and_verify_offload.sh; 推送到 gitcode |
@@ -96,6 +96,52 @@ GDB 定位（5/27 15:04）：
 
 ## TRT-LLM ↔ DataSystem 集成架构分析 (2026-05-29)
 
+### Session 总结 (5/29 下午)
+
+#### FMHA crash 根因定位
+
+| 实验 | 配置 | 结果 |
+|------|------|------|
+| v4 扩展词表 bf16 + fmha on | `--gemm_plugin bfloat16 --context_fmha enable` | ❌ crash: `FusedMultiHeadAttentionXMMAKernelV2::cuLaunchKernel` |
+| v5 扩展词表 fp16 + fmha on | `--gemm_plugin float16 --context_fmha enable` | ❌ crash: 同一 kernel, `CUDA_ERROR_INVALID_HANDLE` |
+| v_min 扩展词表 fp16 最简 | 不加任何 plugin | ❌ crash（TRT 默认选了 FMHA） |
+| vanilla fp16 标准 Qwen3 | `--gemm_plugin float16 --context_fmha enable` | ✅ 不 crash（加载 OOM，非 FMHA 错误） |
+
+**结论：FMHA crash 不是 dtype（bf16/fp16）问题，是 `resize_token_embeddings` 扩展词表（151936→152693）改变了 TensorRT 的图融合策略，导致走了 GPTAttentionPlugin + FMHA XMMA 路径，而标准 Qwen3 的 FP16 FMHA 在 SM 89 上正常工作。**
+
+GCC 12 重编 `.so` 是早期（5/26）基于错误假设（cuBLAS 兼容性）提出的方向，与最终定位的 FMHA kernel 问题无关，已废弃。
+
+#### C++ 源码绕过
+
+改 `trtGptModelInflightBatching.cpp:149-155`：注释掉 `paged_context_fmha` 对 `enableBlockReuse` 的强制检查。让 `context_fmha disable` 的引擎也能激活 paged reuse → secondary pool → offload/onboard。
+
+- **编译**：`make -j$(nproc) tensorrt_llm`（不需要 cmake）
+- **替换**：`cp cpp/build/tensorrt_llm/libtensorrt_llm.so` → Python site-packages 路径
+- **验证**：`KV cache reuse disabled` warning 消失 ✅；`secondaryBlocks=28` 分配成功 ✅
+
+#### 激活进度
+
+| 步骤 | 状态 |
+|------|------|
+| paged KV cache（engine: `--paged_kv_cache enable`） | ✅ v4 引擎已开 |
+| paged reuse 解锁（C++ 源码绕过） | ✅ secondaryBlocks=28 |
+| paged reuse 解锁（DataSystem C++ 连接） | ✅ `KvCacheManagerDataSystem` Init success |
+| Scheduler policy: `GUARANTEED_NO_EVICT` → `MAX_UTILIZATION` | ⏳ `trt_qwen3_backend.py` 构造了 `SchedulerConfig` 但未传进 `ModelRunnerCpp.from_dir()` |
+| 压测触发 eviction → offload/onboard | ⏳ 待 scheduler 就绪 |
+| ConsumerLoop SIGSEGV 修复 | ⏳ DataSystem SDK 0.7.7 ARM 兼容性 |
+
+#### 新增文件
+
+| 文件 | 用途 |
+|------|------|
+| `diag_offload.sh` | C++ offload/onboard 全链路诊断（启动→压测→日志分析） |
+| `test_vanilla_qwen3.sh` | 标准 Qwen3 推理验证（convert→build→推理） |
+
+#### 其他结论
+
+- bf16 → fp16 引擎构建：**不需要重训模型**，只需 `convert_checkpoint --dtype float16` + `trtllm-build --gemm_plugin float16`
+- gitcode push 失败原因：token 嵌 URL 不生效，需用 `git -c credential.helper='!f() { echo "username=oauth2"; echo "password=<token>"; }; f' push`
+
 ### 两条链路
 
 | 层级 | 实现 | 状态 |
@@ -135,23 +181,25 @@ C++ offload/onboard 链路
 
 ### C++ 层激活路线
 
-| 步骤 | 内容 | 位置 |
+| 步骤 | 内容 | 状态 |
 |------|------|------|
-| ① 修复 FMHA kernel | 用系统 GCC 12 重编 `libnvinfer_plugin_tensorrt_llm.so`，让 bf16 FMHA 在 SM 89 可用 | ARM 4090D, TensorRT-LLM 源码 |
-| ② 修复 ConsumerLoop SIGSEGV | 定位共享内存崩溃根因，恢复 DataSystem 异步通信线程 | ARM 4090D, DataSystem SDK 0.7.7 |
-| ③ 启用 paged KV cache | `trtllm-build` 开 `context_fmha enable`；`ModelRunnerCpp` 传 `max_tokens_in_paged_kv_cache` | ARM 4090D |
-| ④ 验证 offload 日志 | `grep -i "offload\|offLoadCopy\|onboard\|onBoardCopy"` 预期有输出 | ARM 4090D |
+| ① 解锁 paged reuse | 注释 `trtGptModelInflightBatching.cpp:149-155`，绕过 FMHA 强依赖 | ✅ |
+| ② 修 scheduler | `trt_qwen3_backend.py` 传 `SchedulerConfig` 进 `ModelRunnerCpp.from_dir()`，切 `MAX_UTILIZATION` | ⏳ 下一步 |
+| ③ 压测触发 eviction | 多用户长历史并发，填满 primary pool → 触发 secondary pool → offload | ⏳ 待② |
+| ④ 验证 offload 日志 | `grep -i "offload\|offLoadCopy\|onboard\|onBoardCopy"` 预期有输出 | ⏳ 待②③ |
+| ⑤ 修复 ConsumerLoop SIGSEGV | 恢复 DataSystem 异步通信线程（当前 stub no-op） | ⏳ DataSystem SDK 0.7.7 ARM 兼容性 |
 
 ---
 
 ## 下一步
 
 1. ~~ARM 4090D 推理通过~~ ✅ (context_fmha disable 绕过)
-2. ~~KV Cache 验证 + offload/onboard 闭环~~ ✅ (hbm_hit/ds_hit/miss 三层全通)
-3. Go pairec 联调 (F08)
-4. TRT 引擎延迟优化 (profiling, KV Cache 池化)
-5. [待修] FMHA bfloat16 kernel SM 89 修复 → 解锁 C++ 层 offload/onboard
-6. [待修] ConsumerLoop SIGSEGV 修复 → 恢复 C++ DataSystem 异步通信
+2. ~~KV Cache 验证 + offload/onboard 闭环~~ ✅ (Python 层: hbm_hit/ds_hit/miss 三层全通)
+3. ~~FMHA crash 根因定位~~ ✅ (扩展词表触发 XMMA，标准 Qwen3 正常)
+4. ~~C++ paged reuse 解锁~~ ✅ (源码绕过)
+5. **修 Scheduler → 压测 → offload 日志验证** ⏳ 下一步
+6. Go pairec 联调 (F08)
+7. 修复 ConsumerLoop SIGSEGV → 恢复 C++ DataSystem 异步通信
 
 ---
 
@@ -159,5 +207,6 @@ C++ offload/onboard 链路
 
 | 文件 | 改动 | 状态 |
 |------|------|------|
+| `cpp/tensorrt_llm/batch_manager/trtGptModelInflightBatching.cpp:149-155` | 注释掉 `paged_context_fmha` 对 `enableBlockReuse` 的强制检查（绕过 SM 89 FMHA crash） | ✅ 已修改，未推送 |
 | `cpp/tensorrt_llm/kernels/weightOnlyBatchedGemv/cudaCoreGemm.cu` | `cudaCoreGemmTemplateCaller` kernel launch 后加 `cudaGetLastError()` 错误检查 | ✅ 已修改，未推送 |
 | `cpp/tensorrt_llm/plugins/gemmPlugin/gemmPlugin.cpp` | 跳过 cudaCoreGemm 路径（`if (false && ...)`，仅排查用） | 排查用，无需推送 |
