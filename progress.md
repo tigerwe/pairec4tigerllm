@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-05-28 | 当前阻塞: 无 | 下一步: Go pairec 联调 (F08)
+> 最后更新: 2026-05-29 | 当前阻塞: FMHA bf16 kernel SM 89 + ConsumerLoop SIGSEGV (阻断 C++ offload/onboard) | 下一步: Go pairec 联调 (F08)
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **5/29** | **TRT-LLM ↔ DataSystem 集成架构分析: 理清 Python 层 (✅) vs C++ 层 (❌) 两条链路; 定位 C++ 层两重阻塞 — ① FMHA bf16 SM 89 kernel bug → paged KV cache 不能开 ② ConsumerLoop SIGSEGV → DataSystem 异步通信被 stub no-op 绕过; 制定四步激活路线** |
 | **5/28** | **KV Cache + offload/onboard 闭环: 修复 TRT/PyTorch 双路径 miss loop; TRT 路径加结果缓存(OrderedDict LRU → DataSystem onboard); eviction 触发验证; ds_hit(~3ms) / hbm_hit(~2ms) / miss(~220ms) 三层全通** |
 | **5/27** | **推理打通: 根因定位为 FMHA bfloat16 kernel SM 89 非法内存访问(非 cuBLAS 问题); context_fmha disable 绕过; cudaCoreGemm.cu 补 error check; verify_kv.sh 验证脚本; 推理 code=200 hit=5/5** |
 | 5/26 | 分析引擎不兼容根因; 创建一键验证脚本 rebuild_and_verify_offload.sh; 推送到 gitcode |
@@ -93,13 +94,64 @@ GDB 定位（5/27 15:04）：
 - **TRT 路径结果缓存**: TRT-LLM 不暴露 past_key_values → 改用 OrderedDict LRU 缓存推理结果 JSON，二层: HBM → DataSystem onboard (与 PyTorch KV 路径并行)
 - **双 DataSystem namespace**: `kv:*` (past_key_values, numpy) 和 `result:*` (JSON) 隔离，避免反序列化冲突
 
+## TRT-LLM ↔ DataSystem 集成架构分析 (2026-05-29)
+
+### 两条链路
+
+| 层级 | 实现 | 状态 |
+|------|------|------|
+| **Python 层** | `inference/kv_cache/manager.py` → `KVCacheManager` (OrderedDict LRU) → `DsClient.kv().get/set` | ✅ 已走通 |
+| **C++ 层** | TRT-LLM 内置 `KVCacheManager` (C++) → `KVCacheTransferManager::offload/onboard` → `KVCacheManagerDataSystem` (C++ 单例) | ❌ 两重阻塞 |
+
+#### Python 层（已走通）
+- `result:*` namespace: 推理结果 JSON 缓存（TRT 路径用）
+- `kv:*` namespace: past_key_values 二进制缓存（PyTorch 路径用）
+- 共享同一个 `DsClient` 实例，key 前缀隔离
+- 三层延迟: hbm_hit ~2ms / ds_hit ~3ms / miss ~220ms
+
+#### C++ 层（未激活）
+- `libtensorrt_llm.so` 已链接 DataSystem SDK（证据：需要 `LD_PRELOAD=block_ds_consumer.so` + stub_gpu.so + libabseil_dll.so）
+- `KVCacheManagerDataSystem` Init 成功（连接 127.0.0.1:31501 OK）
+- 但实际 offload/onboard 数据流未触发
+
+### C++ 层两重阻塞
+
+```
+C++ offload/onboard 链路
+    │
+    ├─ 需要 paged KV cache mode
+    │       │
+    │       └─ 需要 context_fmha enable
+    │               │
+    │               └─ 阻塞①: FMHA bfloat16 kernel SM 89 非法内存访问
+    │                   (FusedMultiHeadAttentionXMMAKernelV2::cuLaunchKernel)
+    │                   当前绕过: context_fmha disable + use_paged_context_fmha disable
+    │
+    └─ 需要 ConsumerLoop 异步线程正常运行
+            │
+            └─ 阻塞②: ConsumerLoop 共享内存 SIGSEGV
+                当前绕过: block_ds_consumer.so stub no-op
+```
+
+### C++ 层激活路线
+
+| 步骤 | 内容 | 位置 |
+|------|------|------|
+| ① 修复 FMHA kernel | 用系统 GCC 12 重编 `libnvinfer_plugin_tensorrt_llm.so`，让 bf16 FMHA 在 SM 89 可用 | ARM 4090D, TensorRT-LLM 源码 |
+| ② 修复 ConsumerLoop SIGSEGV | 定位共享内存崩溃根因，恢复 DataSystem 异步通信线程 | ARM 4090D, DataSystem SDK 0.7.7 |
+| ③ 启用 paged KV cache | `trtllm-build` 开 `context_fmha enable`；`ModelRunnerCpp` 传 `max_tokens_in_paged_kv_cache` | ARM 4090D |
+| ④ 验证 offload 日志 | `grep -i "offload\|offLoadCopy\|onboard\|onBoardCopy"` 预期有输出 | ARM 4090D |
+
+---
+
 ## 下一步
 
 1. ~~ARM 4090D 推理通过~~ ✅ (context_fmha disable 绕过)
 2. ~~KV Cache 验证 + offload/onboard 闭环~~ ✅ (hbm_hit/ds_hit/miss 三层全通)
 3. Go pairec 联调 (F08)
 4. TRT 引擎延迟优化 (profiling, KV Cache 池化)
-5. [待修] FMHA bfloat16 kernel SM 89 修复
+5. [待修] FMHA bfloat16 kernel SM 89 修复 → 解锁 C++ 层 offload/onboard
+6. [待修] ConsumerLoop SIGSEGV 修复 → 恢复 C++ DataSystem 异步通信
 
 ---
 
