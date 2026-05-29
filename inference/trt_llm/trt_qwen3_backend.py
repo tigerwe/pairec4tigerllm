@@ -34,10 +34,10 @@ class TRTQwen3Backend:
             print(f"[TRTQwen3Backend] SchedulerConfig unavailable: {e}")
             import traceback; traceback.print_exc()
 
-        self.runner = ModelRunnerCpp.from_dir(
-            engine_dir,
-            max_tokens_in_paged_kv_cache=max_tokens_in_paged_kv_cache,
-        )
+        runner_kwargs = {}
+        if max_tokens_in_paged_kv_cache is not None:
+            runner_kwargs["max_tokens_in_paged_kv_cache"] = max_tokens_in_paged_kv_cache
+        self.runner = ModelRunnerCpp.from_dir(engine_dir, **runner_kwargs)
         self.tokenizer = tokenizer
         self.num_quantizers = num_quantizers
         self.vocab_size = vocab_size

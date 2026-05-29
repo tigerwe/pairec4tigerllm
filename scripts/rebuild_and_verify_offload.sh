@@ -152,10 +152,8 @@ else
         --max_input_len 20 \
         --max_seq_len 30 \
         --max_beam_width 1 \
-        --paged_kv_cache enable \
         --remove_input_padding enable \
-        --context_fmha enable \
-        --use_paged_context_fmha enable
+        --context_fmha enable
 
     if [ -f "$ENGINE_DIR/rank0.engine" ]; then
         ENGINE_SIZE=$(du -h "$ENGINE_DIR/rank0.engine" | cut -f1)

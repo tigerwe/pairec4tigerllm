@@ -336,7 +336,8 @@ class GenerativeInferenceService:
             vocab_size=model_config['vocab_size'],
             temperature=self.config.temperature,
             top_k=self.config.top_k,
-            max_tokens_in_paged_kv_cache=256,  # 故意设小，强制触发 eviction
+            # max_tokens_in_paged_kv_cache 不传 = 连续 KV cache = FlashAttention 路径
+            # SM89 bf16 XMMA kernel 缺失, 不能开 paged 模式
         )
 
         if '_id_to_sem' in checkpoint:
