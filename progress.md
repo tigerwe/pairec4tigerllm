@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-05-30 | 当前状态: C++ KV cache offload/onboard 已跑通 | 下一步: 提高 secondary replay 命中率，确认 onboard 稳定性与性能
+> 最后更新: 2026-05-30 | 当前状态: C++ KV cache offload/onboard 已跑通，任务切换到推荐链路工程化 | 下一步: 接通 PaiRec (F08) → 时延分析 (F12) → K8s 部署 (F13) → brpc (F14)
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **5/30** | **后续任务更新: C++ KV cache offload/onboard 先收口，新增/更新 F08 接通 PaiRec、F12 推荐系统各阶段时延分析、F13 K8s 部署、F14 引入 brpc。** |
 | **5/30** | **C++ KV offload/onboard 闭环确认: `TRT_MAX_KV_TOKENS=1024` 时 primaryBlocks=32/secondaryBlocks=28；180+64 串行压测 `copyBlock entered=6067`、`OffLoad copy=4116`、`Create/Set Key=4116/4116`、`Get/OnBoard Key=1/1`、`error=0`，证明 C++ 写入 DataSystem 与从 DataSystem 回读 onboard 均已真实触发。** |
 | **5/30** | **C++ KV offload 已确认: Scheduler 已切到 MAX_UTILIZATION，reuse disabled warning 消失，primaryBlocks=64/secondaryBlocks=28，DataSystem primary/TMP 均连接 127.0.0.1；压测 120+32 请求出现 `copyBlock entered=3735`、`OffLoad copy=2520`、`Create/Set Key=2520/2520`、`error=0`；剩余阻塞是 DataSystem onboard 未触发 (`Get Key=0`、`OnBoard copy=0`)，需要构造 secondary 命中 replay。** |
 | **5/29** | **C++ offload/onboard 链路突破: ① FMHA crash 根因定位 — 非 dtype 问题，是 resize_token_embeddings 扩展词表触发了 XMMA 路径（标准 Qwen3 FP16 FMHA SM 89 正常）；② C++ 源码绕过 — 注释 trtGptModelInflightBatching.cpp:149-155 去掉 paged FMHA 对 enableBlockReuse 的强约束；③ 重编 .so 替换 — secondaryBlocks=28 分配成功，DataSystem C++ Init OK；④ 剩余阻塞: Scheduler 需从 GUARANTEED_NO_EVICT 切到 MAX_UTILIZATION (Python 侧 trt_qwen3_backend.py)** |
@@ -186,9 +187,9 @@ C++ offload/onboard 链路
 | 步骤 | 内容 | 状态 |
 |------|------|------|
 | ① 解锁 paged reuse | 注释 `trtGptModelInflightBatching.cpp:149-155`，绕过 FMHA 强依赖 | ✅ |
-| ② 修 scheduler | `trt_qwen3_backend.py` 传 `SchedulerConfig` 进 `ModelRunnerCpp.from_dir()`，切 `MAX_UTILIZATION` | ⏳ 下一步 |
-| ③ 压测触发 eviction | 多用户长历史并发，填满 primary pool → 触发 secondary pool → offload | ⏳ 待② |
-| ④ 验证 offload 日志 | `grep -i "offload\|offLoadCopy\|onboard\|onBoardCopy"` 预期有输出 | ⏳ 待②③ |
+| ② 修 scheduler | `trt_qwen3_backend.py` 传 `SchedulerConfig` 进 `ModelRunnerCpp.from_dir()`，切 `MAX_UTILIZATION` | ✅ |
+| ③ 压测触发 eviction | 多用户长历史串行压测，填满 primary pool → 触发 secondary pool → offload | ✅ |
+| ④ 验证 offload/onboard 日志 | `OffLoad copy=4116`、`Set Key=4116`、`Get/OnBoard=1/1` | ✅ |
 | ⑤ 修复 ConsumerLoop SIGSEGV | 恢复 DataSystem 异步通信线程（当前 stub no-op） | ⏳ DataSystem SDK 0.7.7 ARM 兼容性 |
 
 ---
@@ -199,9 +200,12 @@ C++ offload/onboard 链路
 2. ~~KV Cache 验证 + offload/onboard 闭环~~ ✅ (Python 层: hbm_hit/ds_hit/miss 三层全通)
 3. ~~FMHA crash 根因定位~~ ✅ (扩展词表触发 XMMA，标准 Qwen3 正常)
 4. ~~C++ paged reuse 解锁~~ ✅ (源码绕过)
-5. **C++ offload 已触发；继续验证 secondary 命中后的 DataSystem `Get Key` / `OnBoard copy`** ⏳ 下一步
-6. Go pairec 联调 (F08)
-7. 修复 ConsumerLoop SIGSEGV → 恢复 C++ DataSystem 异步通信
+5. ~~C++ offload/onboard 闭环验证~~ ✅ (`OffLoad copy` + `Set Key` + `Get Key` + `OnBoard copy`)
+6. **接通 PaiRec (F08)** ⏳ 下一步
+7. 推荐系统各阶段时延分析 (F12)
+8. K8s 部署 (F13)
+9. 引入 brpc (F14)
+10. 修复 ConsumerLoop SIGSEGV → 恢复 C++ DataSystem 异步通信
 
 ---
 

@@ -73,12 +73,12 @@
     },
     {
       "id": "F08",
-      "name": "Go pairec 联调",
+      "name": "接通 PaiRec",
       "status": "pending",
-      "description": "Go 服务配置指向 Python 推理服务 /recommend, 端到端召回验证",
-      "files": ["services/recall/trtllm_client.go", "configs/pairec_config.json"],
-      "validation_method": "Go服务调用/recommend, 返回召回结果",
-      "next_step": "Python 推理服务已就绪, 待 Go 侧配置"
+      "description": "将 PaiRec 召回链路接到当前 TRT-LLM /recommend 服务, 完成端到端推荐请求验证",
+      "files": ["scripts/start_pairec.sh", "services/recall/trtllm_client.go", "configs/pairec_config.json"],
+      "validation_method": "PaiRec 服务调用 /recommend 成功, 返回可用召回结果并保留 trace",
+      "next_step": "确认 PaiRec 侧配置/代码路径, 配置 Python TRT 服务地址, 跑通一次端到端请求"
     },
     {
       "id": "F09",
@@ -107,9 +107,36 @@
       "description": "Python 推理服务层 KVCacheManager 对接 DataSystem KV 存储, 实现 HBM LRU → DataSystem → Prefill 三层缓存架构",
       "files": ["inference/kv_cache/manager.py", "inference/trt_llm/server.py"],
       "validation_method": "DataSystem 连接成功 (import yr.datasystem OK), --datasystem_host/port 参数可用, /health 显示 datasystem 状态",
-      "validation_evidence": "5/25: Python + C++ 连接验证通过; 5/28: TRT 结果缓存 hbm_hit(~2ms) / ds_hit(~3ms) / miss(~220ms) 三层全通, LRU 淘汰 → DataSystem onboard 闭环",
+      "validation_evidence": "5/25: Python + C++ 连接验证通过; 5/28: TRT 结果缓存 hbm_hit(~2ms) / ds_hit(~3ms) / miss(~220ms) 三层全通; 5/30: TensorRT-LLM C++ KV offload/onboard 闭环, OffLoad copy=4116, Set Key=4116, Get/OnBoard=1/1, error=0",
       "done_date": "2026-05-25",
-      "notes": "C++ 层需 LD_PRELOAD=libabseil_dll.so.2407.0.0; TRT 路径单独结果缓存(namespace result:* 与 kv:* 隔离); PyTorch 路径 past_key_values 注入 generate()"
+      "notes": "C++ 层需 LD_PRELOAD=libabseil_dll.so.2407.0.0; TRT 路径单独结果缓存(namespace result:* 与 kv:* 隔离); PyTorch 路径 past_key_values 注入 generate(); C++ KV 验证脚本: scripts/test_trt_cpp_kv_offload.py"
+    },
+    {
+      "id": "F12",
+      "name": "推荐系统各阶段时延分析",
+      "status": "pending",
+      "description": "拆解 PaiRec → Python/TRT 服务 → DataSystem/KV cache → 模型生成 → item 映射各阶段耗时, 输出 trace 和瓶颈分析",
+      "files": ["inference/trt_llm/server.py", "scripts/test_trt_cpp_kv_offload.py"],
+      "validation_method": "一次端到端请求输出分阶段 trace, 压测报告包含 p50/p95/p99 和阶段占比",
+      "next_step": "先定义 trace 字段与日志格式, 再在服务端和 PaiRec 调用侧补齐阶段耗时"
+    },
+    {
+      "id": "F13",
+      "name": "K8s 部署",
+      "status": "pending",
+      "description": "将 TRT-LLM 推理服务、DataSystem 依赖和 PaiRec 联调链路整理为可部署的 Kubernetes manifests/Helm 配置",
+      "files": ["k8s/", "docker/", "scripts/start_trt_server.sh"],
+      "validation_method": "K8s 环境中 Pod Ready, /health 返回 healthy, PaiRec 端到端推荐请求成功",
+      "next_step": "梳理镜像、GPU 资源、LD_PRELOAD、DataSystem 地址、模型/engine 挂载和探针配置"
+    },
+    {
+      "id": "F14",
+      "name": "引入 brpc",
+      "status": "pending",
+      "description": "评估并引入 brpc 作为 PaiRec 与推理服务之间的高性能 RPC 通道, 替代或并行 HTTP /recommend",
+      "files": [],
+      "validation_method": "brpc 调用返回与 HTTP /recommend 等价结果, 并输出延迟对比",
+      "next_step": "确认 brpc 服务边界和 proto/IDL, 选择 Python/C++/Go 哪一侧承载 RPC server/client"
     }
   ]
 }
