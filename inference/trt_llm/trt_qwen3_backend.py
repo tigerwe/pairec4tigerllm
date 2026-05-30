@@ -15,6 +15,11 @@ class TRTQwen3Backend:
         from tensorrt_llm.runtime import ModelRunnerCpp
         from tensorrt_llm.bindings.executor import SamplingConfig
 
+        if max_tokens_in_paged_kv_cache is None:
+            # Keep the pool intentionally small for offload/onboard diagnostics.
+            # Production can pass a larger value once the C++ path is verified.
+            max_tokens_in_paged_kv_cache = 2048
+
         # ── 构造 scheduler_config (需 MONKEY-PATCH model_runner_cpp.py) ──
         scheduler_config = None
         try:
@@ -22,11 +27,13 @@ class TRTQwen3Backend:
                 CapacitySchedulerPolicy,
                 SchedulerConfig,
             )
-            policy = (
-                CapacitySchedulerPolicy.MAX_UTILIZATION
-                if scheduler_policy == "max_utilization"
-                else CapacitySchedulerPolicy.GUARANTEED_NO_EVICT
-            )
+            normalized_policy = scheduler_policy.lower().replace("-", "_")
+            if normalized_policy in ("max_utilization", "max_util", "max"):
+                policy = CapacitySchedulerPolicy.MAX_UTILIZATION
+            elif normalized_policy in ("guaranteed_no_evict", "no_evict"):
+                policy = CapacitySchedulerPolicy.GUARANTEED_NO_EVICT
+            else:
+                raise ValueError(f"Unsupported scheduler_policy: {scheduler_policy}")
             scheduler_config = SchedulerConfig(policy)
             print(f"[TRTQwen3Backend] Scheduler policy: {scheduler_policy}, "
                   f"max_kv_tokens={max_tokens_in_paged_kv_cache}")
@@ -34,10 +41,25 @@ class TRTQwen3Backend:
             print(f"[TRTQwen3Backend] SchedulerConfig unavailable: {e}")
             import traceback; traceback.print_exc()
 
-        runner_kwargs = {}
-        if max_tokens_in_paged_kv_cache is not None:
-            runner_kwargs["max_tokens_in_paged_kv_cache"] = max_tokens_in_paged_kv_cache
-        self.runner = ModelRunnerCpp.from_dir(engine_dir, **runner_kwargs)
+        if scheduler_config is None:
+            raise RuntimeError("SchedulerConfig is required for C++ KV offload diagnostics")
+
+        runner_kwargs = {
+            "max_tokens_in_paged_kv_cache": max_tokens_in_paged_kv_cache,
+            "kv_cache_enable_block_reuse": True,
+            "scheduler_config": scheduler_config,
+        }
+        try:
+            self.runner = ModelRunnerCpp.from_dir(engine_dir, **runner_kwargs)
+        except TypeError as e:
+            if "scheduler_config" in str(e):
+                raise RuntimeError(
+                    "TensorRT-LLM ModelRunnerCpp.from_dir does not accept "
+                    "scheduler_config yet. Patch "
+                    "tensorrt_llm/runtime/model_runner_cpp.py to forward it "
+                    "into ExecutorConfig before starting the service."
+                ) from e
+            raise
         self.tokenizer = tokenizer
         self.num_quantizers = num_quantizers
         self.vocab_size = vocab_size
