@@ -1,12 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-05-30 | 当前阻塞: C++ KV offload/onboard 待压测确认 | 下一步: 运行 `scripts/test_trt_cpp_kv_offload.py` 验证 copyBlock/OffLoad/Set/Get/OnBoard 日志
+> 最后更新: 2026-05-30 | 当前阻塞: C++ DataSystem onboard/Get 路径未触发 | 下一步: 构造 secondary 命中 replay，验证 `Get Key`/`OnBoard copy`
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
-| **5/30** | **C++ KV offload/onboard 启动前置条件已满足: Scheduler 已切到 MAX_UTILIZATION，reuse disabled warning 消失，primaryBlocks=64/secondaryBlocks=28，DataSystem primary/TMP 均连接 127.0.0.1；新增 `scripts/test_trt_cpp_kv_offload.py`，用于已启动 TRT 服务的复用波、压力波、回放波压测，并解析 C++ KV transfer 日志。** |
+| **5/30** | **C++ KV offload 已确认: Scheduler 已切到 MAX_UTILIZATION，reuse disabled warning 消失，primaryBlocks=64/secondaryBlocks=28，DataSystem primary/TMP 均连接 127.0.0.1；压测 120+32 请求出现 `copyBlock entered=3735`、`OffLoad copy=2520`、`Create/Set Key=2520/2520`、`error=0`；剩余阻塞是 DataSystem onboard 未触发 (`Get Key=0`、`OnBoard copy=0`)，需要构造 secondary 命中 replay。** |
 | **5/29** | **C++ offload/onboard 链路突破: ① FMHA crash 根因定位 — 非 dtype 问题，是 resize_token_embeddings 扩展词表触发了 XMMA 路径（标准 Qwen3 FP16 FMHA SM 89 正常）；② C++ 源码绕过 — 注释 trtGptModelInflightBatching.cpp:149-155 去掉 paged FMHA 对 enableBlockReuse 的强约束；③ 重编 .so 替换 — secondaryBlocks=28 分配成功，DataSystem C++ Init OK；④ 剩余阻塞: Scheduler 需从 GUARANTEED_NO_EVICT 切到 MAX_UTILIZATION (Python 侧 trt_qwen3_backend.py)** |
 | **5/28** | **KV Cache + offload/onboard 闭环: 修复 TRT/PyTorch 双路径 miss loop; TRT 路径加结果缓存(OrderedDict LRU → DataSystem onboard); eviction 触发验证; ds_hit(~3ms) / hbm_hit(~2ms) / miss(~220ms) 三层全通** |
 | **5/27** | **推理打通: 根因定位为 FMHA bfloat16 kernel SM 89 非法内存访问(非 cuBLAS 问题); context_fmha disable 绕过; cudaCoreGemm.cu 补 error check; verify_kv.sh 验证脚本; 推理 code=200 hit=5/5** |
@@ -198,7 +198,7 @@ C++ offload/onboard 链路
 2. ~~KV Cache 验证 + offload/onboard 闭环~~ ✅ (Python 层: hbm_hit/ds_hit/miss 三层全通)
 3. ~~FMHA crash 根因定位~~ ✅ (扩展词表触发 XMMA，标准 Qwen3 正常)
 4. ~~C++ paged reuse 解锁~~ ✅ (源码绕过)
-5. **压测 C++ KV offload/onboard → 验证 copyBlock/OffLoad/Set/Get/OnBoard 日志** ⏳ 下一步
+5. **C++ offload 已触发；继续验证 secondary 命中后的 DataSystem `Get Key` / `OnBoard copy`** ⏳ 下一步
 6. Go pairec 联调 (F08)
 7. 修复 ConsumerLoop SIGSEGV → 恢复 C++ DataSystem 异步通信
 

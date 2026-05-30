@@ -353,15 +353,17 @@ def print_log_report(before: Dict[str, int], after: Dict[str, int], log_text: st
         return 2
     if delta["copy_block"] == 0 or (delta["offload_copy"] == 0 and delta["set_key"] == 0):
         print("\nFAIL: pressure wave did not trigger C++ offload.")
-        print("Hint: retry with --requests 180 --concurrency 8, or lower max_tokens_in_paged_kv_cache.")
+        print("Hint: retry with --requests 180 --history-len 10 --concurrency 1, "
+              "or lower max_tokens_in_paged_kv_cache.")
         return 3
 
-    onboard_seen = delta["get_key"] > 0 or delta["onboard_copy"] > 0 or delta["hbm_kv"] > 0
+    onboard_seen = delta["get_key"] > 0 or delta["onboard_copy"] > 0
     if not onboard_seen:
-        print("\nWARN: offload was observed, but onboard/reuse was not proven by this run.")
+        print("\nWARN: C++ KV offload was observed, but DataSystem onboard was not proven.")
+        print("Observed HBM reuse/copy lines do not prove kvClient Get/onBoardCopy.")
         return 4
 
-    print("\nPASS: C++ KV offload was observed; onboard/reuse evidence is present.")
+    print("\nPASS: C++ KV offload and DataSystem onboard were both observed.")
     return 0
 
 
