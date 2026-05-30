@@ -572,9 +572,13 @@ class GenerativeInferenceService:
                 tokens = self._trt_backend.generate(
                     input_ids, max_new_tokens=topk * 2
                 )  # [batch, max_items, 4]
-                tokens = tokens[0]  # [max_items, 4]
-                print(f"[TRT generate] topk={topk}, output shape={tokens.shape}, "
-                      f"nonzero={(tokens.sum(dim=1) != 0).sum().item()}/{tokens.shape[0]}")
+                if tokens.shape[0] == 0:
+                    print(f"[TRT generate] topk={topk}, output shape={tokens.shape} → empty batch, skip")
+                    tokens = torch.zeros(0, self.num_quantizers, dtype=torch.long, device=self.device)
+                else:
+                    tokens = tokens[0]  # [max_items, 4]
+                    print(f"[TRT generate] topk={topk}, output shape={tokens.shape}, "
+                          f"nonzero={(tokens.sum(dim=1) != 0).sum().item()}/{tokens.shape[0]}")
             elif hasattr(self.model, '_id_to_sem'):
                 # Qwen3 Prompt Mode: 原生 generate (内含 tokenizer + prompt 构造)
                 result = self.model.generate(
@@ -1013,9 +1017,12 @@ class HTTPServer:
                       f"items={len(result['recommendations'])}")
 
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 return jsonify({
                     'code': 500,
-                    'error': str(e)
+                    'error': str(e),
+                    'error_type': type(e).__name__,
                 }), 500
 
         print(f"Starting HTTP server on port {self.port}")

@@ -102,6 +102,9 @@ class TRTQwen3Backend:
             # ── 构造 prompt (tokenize 一次) ──
             history = input_ids[b].cpu().tolist()
             history = [h for h in history if not all(v == 0 for v in h)]
+            print(f"[TRT generate] batch={b}, history_len={len(history)}, "
+                  f"vocab check: min={min((min(h) for h in history), default=-1)}, "
+                  f"max={max((max(h) for h in history), default=-1)}")
             history_str = ",".join(
                 f"<s0_{s[0]}><s1_{s[1]}><s2_{s[2]}><s3_{s[3]}>" for s in history
             )
@@ -115,6 +118,8 @@ class TRTQwen3Backend:
                                      max_length=2048).to(device)
             prompt_len = encoded["input_ids"].shape[1]
             input_id_list = [encoded["input_ids"][0]]
+            print(f"[TRT generate] batch={b}, prompt_len={prompt_len}, "
+                  f"max_new_tokens={max_new_tokens}, num_samples={num_samples}")
 
             # ── 多轮采样 + 去重 ──
             from tensorrt_llm.bindings.executor import SamplingConfig
@@ -126,13 +131,21 @@ class TRTQwen3Backend:
                     top_k=self.sampling_config.top_k,
                     seed=self._seed + s,
                 )
-                outputs = self.runner.generate(
-                    input_id_list,
-                    sampling_config=cfg,
-                    max_new_tokens=max_new_tokens,
-                    end_id=self.eos_id,
-                    pad_id=self.pad_id,
-                )
+                try:
+                    outputs = self.runner.generate(
+                        input_id_list,
+                        sampling_config=cfg,
+                        max_new_tokens=max_new_tokens,
+                        end_id=self.eos_id,
+                        pad_id=self.pad_id,
+                    )
+                except Exception as e:
+                    print(f"[TRT generate] ERROR in runner.generate (batch={b}, sample={s}, "
+                          f"prompt_len={prompt_len}): {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # 单轮失败不中断，继续下一轮
+                    continue
                 new_tokens = outputs[0][0][prompt_len:].tolist()
                 for sem in self._parse_output(new_tokens):
                     key = tuple(sem)
