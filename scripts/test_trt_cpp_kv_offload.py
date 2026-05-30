@@ -120,6 +120,12 @@ def latest_event_lines(log_text: str, limit: int = 40) -> List[str]:
     return lines[-limit:]
 
 
+def latest_pattern_lines(log_text: str, pattern: str, limit: int = 20) -> List[str]:
+    regex = re.compile(pattern, re.IGNORECASE)
+    lines = [line for line in log_text.splitlines() if regex.search(line)]
+    return lines[-limit:]
+
+
 def latest_run_segment(log_text: str) -> str:
     start = max(log_text.rfind(marker) for marker in RUN_MARKERS)
     if start < 0:
@@ -333,6 +339,14 @@ def print_log_report(before: Dict[str, int], after: Dict[str, int], log_text: st
     print(f"  new HBM reuse lines:           {delta['hbm_kv']}")
     print(f"  new matched/reused lines:      {delta['matched_full'] + delta['partial_reuse']}")
     print(f"  new error-like lines:          {delta['errors']}")
+
+    print("\n== Recent DataSystem onboard lines ==")
+    onboard_lines = latest_pattern_lines(run_log, r"Get Key|Get KvCache|OnBoard copy")
+    if onboard_lines:
+        for line in onboard_lines:
+            print(f"  {line}")
+    else:
+        print("  (no Get/OnBoard lines)")
 
     print("\n== Recent matching log lines ==")
     recent = latest_event_lines(log_text)

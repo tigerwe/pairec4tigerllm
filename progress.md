@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-05-30 | 当前阻塞: C++ DataSystem onboard/Get 路径未触发 | 下一步: 构造 secondary 命中 replay，验证 `Get Key`/`OnBoard copy`
+> 最后更新: 2026-05-30 | 当前状态: C++ KV cache offload/onboard 已跑通 | 下一步: 提高 secondary replay 命中率，确认 onboard 稳定性与性能
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **5/30** | **C++ KV offload/onboard 闭环确认: `TRT_MAX_KV_TOKENS=1024` 时 primaryBlocks=32/secondaryBlocks=28；180+64 串行压测 `copyBlock entered=6067`、`OffLoad copy=4116`、`Create/Set Key=4116/4116`、`Get/OnBoard Key=1/1`、`error=0`，证明 C++ 写入 DataSystem 与从 DataSystem 回读 onboard 均已真实触发。** |
 | **5/30** | **C++ KV offload 已确认: Scheduler 已切到 MAX_UTILIZATION，reuse disabled warning 消失，primaryBlocks=64/secondaryBlocks=28，DataSystem primary/TMP 均连接 127.0.0.1；压测 120+32 请求出现 `copyBlock entered=3735`、`OffLoad copy=2520`、`Create/Set Key=2520/2520`、`error=0`；剩余阻塞是 DataSystem onboard 未触发 (`Get Key=0`、`OnBoard copy=0`)，需要构造 secondary 命中 replay。** |
 | **5/29** | **C++ offload/onboard 链路突破: ① FMHA crash 根因定位 — 非 dtype 问题，是 resize_token_embeddings 扩展词表触发了 XMMA 路径（标准 Qwen3 FP16 FMHA SM 89 正常）；② C++ 源码绕过 — 注释 trtGptModelInflightBatching.cpp:149-155 去掉 paged FMHA 对 enableBlockReuse 的强约束；③ 重编 .so 替换 — secondaryBlocks=28 分配成功，DataSystem C++ Init OK；④ 剩余阻塞: Scheduler 需从 GUARANTEED_NO_EVICT 切到 MAX_UTILIZATION (Python 侧 trt_qwen3_backend.py)** |
 | **5/28** | **KV Cache + offload/onboard 闭环: 修复 TRT/PyTorch 双路径 miss loop; TRT 路径加结果缓存(OrderedDict LRU → DataSystem onboard); eviction 触发验证; ds_hit(~3ms) / hbm_hit(~2ms) / miss(~220ms) 三层全通** |
