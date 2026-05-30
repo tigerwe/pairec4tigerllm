@@ -51,6 +51,7 @@ class InferenceConfig:
     datasystem_port: int = 31501  # DataSystem worker port
     trt_max_kv_tokens: int = 2048  # TRT-LLM paged KV cache pressure knob
     trt_scheduler_policy: str = 'max_utilization'
+    trt_max_input_len: int = 64   # TRT engine max_input_len (match trtllm-build --max_input_len)
 
 
 class TensorRTLLMInference:
@@ -340,6 +341,7 @@ class GenerativeInferenceService:
             top_k=self.config.top_k,
             max_tokens_in_paged_kv_cache=self.config.trt_max_kv_tokens,
             scheduler_policy=self.config.trt_scheduler_policy,
+            max_input_len=self.config.trt_max_input_len,
         )
 
         if '_id_to_sem' in checkpoint:
@@ -1061,6 +1063,10 @@ def main():
                         default=os.environ.get('TRT_SCHEDULER_POLICY', 'max_utilization'),
                         help='TRT-LLM scheduler policy '
                              '(env: TRT_SCHEDULER_POLICY, default: max_utilization)')
+    parser.add_argument('--trt_max_input_len', type=int,
+                        default=int(os.environ.get('TRT_MAX_INPUT_LEN', '64')),
+                        help='TRT engine max input length '
+                             '(env: TRT_MAX_INPUT_LEN, default: 64)')
 
     args = parser.parse_args()
 
@@ -1077,6 +1083,7 @@ def main():
         datasystem_port=args.datasystem_port,
         trt_max_kv_tokens=args.trt_max_kv_tokens,
         trt_scheduler_policy=args.trt_scheduler_policy,
+        trt_max_input_len=args.trt_max_input_len,
     )
 
     # 创建推理服务

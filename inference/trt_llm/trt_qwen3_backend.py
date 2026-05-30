@@ -11,7 +11,8 @@ class TRTQwen3Backend:
     def __init__(self, engine_dir: str, tokenizer, num_quantizers: int = 4,
                  vocab_size: int = 256, temperature: float = 0.7, top_k: int = 50,
                  max_tokens_in_paged_kv_cache: int = None,
-                 scheduler_policy: str = "max_utilization"):
+                 scheduler_policy: str = "max_utilization",
+                 max_input_len: int = 64):
         from tensorrt_llm.runtime import ModelRunnerCpp
         from tensorrt_llm.bindings.executor import SamplingConfig
 
@@ -75,9 +76,11 @@ class TRTQwen3Backend:
 
         self.eos_id = tokenizer.eos_token_id
         self.pad_id = tokenizer.pad_token_id
+        self.max_input_len = max_input_len
         self._seed = 42  # multi-sample: incremented per call
 
-        print(f"[TRTQwen3Backend] Engine loaded, id_to_sem={len(self._id_to_sem)} tokens")
+        print(f"[TRTQwen3Backend] Engine loaded, id_to_sem={len(self._id_to_sem)} tokens, "
+              f"max_input_len={self.max_input_len}")
 
     def generate(self, input_ids: torch.Tensor, max_new_tokens: int = 32,
                  num_samples: int = 8) -> torch.Tensor:
@@ -99,24 +102,39 @@ class TRTQwen3Backend:
 
         all_results = []
         for b in range(batch_size):
-            # ── 构造 prompt (tokenize 一次) ──
+            # ── 构造 prompt (逐条截断直到满足引擎 max_input_len) ──
             history = input_ids[b].cpu().tolist()
             history = [h for h in history if not all(v == 0 for v in h)]
+            orig_history_len = len(history)
             print(f"[TRT generate] batch={b}, history_len={len(history)}, "
                   f"vocab check: min={min((min(h) for h in history), default=-1)}, "
                   f"max={max((max(h) for h in history), default=-1)}")
-            history_str = ",".join(
-                f"<s0_{s[0]}><s1_{s[1]}><s2_{s[2]}><s3_{s[3]}>" for s in history
-            )
-            prompt = (
-                "用户按时间顺序点击过以下商品：\n"
-                f"{history_str}\n"
-                "请预测用户下一个可能点击的商品："
-            )
 
-            encoded = self.tokenizer(prompt, return_tensors="pt", truncation=True,
-                                     max_length=2048).to(device)
-            prompt_len = encoded["input_ids"].shape[1]
+            # 截断循环: prompt 超限时去掉最早的历史条目
+            encoded = None
+            trunc_history_len = len(history)
+            while True:
+                history_str = ",".join(
+                    f"<s0_{s[0]}><s1_{s[1]}><s2_{s[2]}><s3_{s[3]}>" for s in history
+                )
+                prompt = (
+                    "用户按时间顺序点击过以下商品：\n"
+                    f"{history_str}\n"
+                    "请预测用户下一个可能点击的商品："
+                )
+                encoded = self.tokenizer(prompt, return_tensors="pt", truncation=True,
+                                         max_length=2048).to(device)
+                prompt_len = encoded["input_ids"].shape[1]
+                if prompt_len <= self.max_input_len or len(history) <= 1:
+                    break
+                # 去掉最早的一条历史，保留最近的
+                history = history[1:]
+                trunc_history_len = len(history)
+
+            if trunc_history_len < orig_history_len:
+                print(f"[TRT generate] batch={b}, history truncated {orig_history_len}→{trunc_history_len} "
+                      f"(prompt_len={prompt_len}, max_input_len={self.max_input_len})")
+
             input_id_list = [encoded["input_ids"][0]]
             print(f"[TRT generate] batch={b}, prompt_len={prompt_len}, "
                   f"max_new_tokens={max_new_tokens}, num_samples={num_samples}")
