@@ -7,7 +7,7 @@ prefixes, then checks the TRT-LLM log for C++ KV transfer events.
 
 Typical use:
   python scripts/test_trt_cpp_kv_offload.py --log /tmp/server_v4.log
-  python scripts/test_trt_cpp_kv_offload.py --requests 160 --concurrency 8
+  python scripts/test_trt_cpp_kv_offload.py --requests 160 --concurrency 1
 """
 
 from __future__ import annotations
@@ -74,17 +74,25 @@ class RequestResult:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        allow_abbrev=False,
         description="Stress TRT-LLM C++ KV cache offload/onboard and parse logs."
     )
     parser.add_argument("--url", default=os.environ.get("TRT_SERVER_URL", "http://localhost:18000"))
     parser.add_argument("--log", default=os.environ.get("TRT_SERVER_LOG", "/tmp/server_v4.log"))
-    parser.add_argument("--requests", type=int, default=120, help="pressure wave request count")
-    parser.add_argument("--repeat-requests", type=int, default=32, help="same-history reuse/onboard wave count")
+    parser.add_argument("--requests", "--request", type=int, default=120,
+                        help="pressure wave request count")
+    parser.add_argument("--repeat-requests", type=int, default=32,
+                        help="replay/onboard wave request count")
+    parser.add_argument("--warmup-requests", type=int, default=4,
+                        help="small same-prefix warmup count; 0 disables warmup")
     parser.add_argument("--history-len", type=int, default=8)
-    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="client-side HTTP concurrency; keep 1 unless runner.generate is known thread-safe")
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument("--timeout", type=float, default=90.0)
     parser.add_argument("--prefix", default=f"cppkv_{int(time.time())}")
+    parser.add_argument("--max-phase-failures", type=int, default=5,
+                        help="abort a phase after this many HTTP failures; 0 disables fail-fast")
     parser.add_argument("--strict-onboard", action="store_true",
                         help="return non-zero if Get/OnBoard events are not observed")
     parser.add_argument("--no-fail-on-missing-log", action="store_true",
@@ -200,10 +208,21 @@ def run_phase(
     results: List[RequestResult] = []
     print(f"\n== {phase}: {len(job_list)} requests, concurrency={args.concurrency} ==")
     started = time.perf_counter()
+    fail_count = 0
+    submitted = 0
+    aborted = False
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-        futures = [
-            executor.submit(
+        job_iter = iter(enumerate(job_list, start=1))
+        pending: Dict[concurrent.futures.Future[RequestResult], int] = {}
+
+        def submit_next() -> bool:
+            nonlocal submitted
+            try:
+                i, (user_id, history) = next(job_iter)
+            except StopIteration:
+                return False
+            future = executor.submit(
                 request_one,
                 phase,
                 i,
@@ -213,16 +232,47 @@ def run_phase(
                 args.topk,
                 args.timeout,
             )
-            for i, (user_id, history) in enumerate(job_list, start=1)
-        ]
-        for done, future in enumerate(concurrent.futures.as_completed(futures), start=1):
-            result = future.result()
-            results.append(result)
-            if done == 1 or done == len(futures) or done % 10 == 0:
-                ok_count = sum(1 for item in results if item.ok)
-                print(f"  progress {done}/{len(futures)} ok={ok_count} last={format_result(result)}")
+            pending[future] = i
+            submitted += 1
+            return True
+
+        for _ in range(min(args.concurrency, len(job_list))):
+            submit_next()
+
+        while pending:
+            done_set, _ = concurrent.futures.wait(
+                pending, return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            for future in done_set:
+                pending.pop(future, None)
+                result = future.result()
+                results.append(result)
+                if not result.ok:
+                    fail_count += 1
+                done = len(results)
+                if done == 1 or done == len(job_list) or done % 10 == 0 or not result.ok:
+                    ok_count = sum(1 for item in results if item.ok)
+                    print(
+                        f"  progress {done}/{len(job_list)} submitted={submitted} "
+                        f"ok={ok_count} fail={fail_count} last={format_result(result)}"
+                    )
+
+            if args.max_phase_failures > 0 and fail_count >= args.max_phase_failures:
+                aborted = True
+                for future in pending:
+                    future.cancel()
+                break
+
+            while len(pending) < args.concurrency and submitted < len(job_list):
+                if not submit_next():
+                    break
 
     elapsed = time.perf_counter() - started
+    if aborted:
+        print(
+            f"  aborting {phase}: {fail_count} failures reached "
+            f"--max-phase-failures={args.max_phase_failures}"
+        )
     print_summary(phase, results, elapsed)
     return sorted(results, key=lambda item: item.index)
 
@@ -318,6 +368,9 @@ def print_log_report(before: Dict[str, int], after: Dict[str, int], log_text: st
 def main() -> int:
     args = parse_args()
     args.url = args.url.rstrip("/")
+    if args.concurrency < 1:
+        print("FAIL: --concurrency must be >= 1")
+        return 2
 
     print("TRT-LLM C++ KV offload/onboard stress test")
     print(f"  url={args.url}")
@@ -340,10 +393,10 @@ def main() -> int:
             print("Use --no-fail-on-missing-log to run HTTP-only smoke testing.")
     before_counts = count_events(before_log)
 
-    shared_history = make_history(seed=777, length=args.history_len)
-    reuse_jobs = [
-        (f"{args.prefix}_reuse_{i}", shared_history)
-        for i in range(args.repeat_requests)
+    warmup_history = make_history(seed=777, length=args.history_len)
+    warmup_jobs = [
+        (f"{args.prefix}_warmup_{i}", warmup_history)
+        for i in range(args.warmup_requests)
     ]
 
     pressure_histories = [
@@ -362,8 +415,9 @@ def main() -> int:
     ]
 
     all_results: List[RequestResult] = []
-    all_results.extend(run_phase("same-prefix reuse wave", reuse_jobs, args))
-    time.sleep(0.5)
+    if warmup_jobs:
+        all_results.extend(run_phase("same-prefix warmup wave", warmup_jobs, args))
+        time.sleep(0.5)
     all_results.extend(run_phase("pressure wave", pressure_jobs, args))
     time.sleep(0.5)
     all_results.extend(run_phase("replay/onboard wave", replay_jobs, args))
