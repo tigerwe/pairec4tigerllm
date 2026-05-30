@@ -49,6 +49,8 @@ class InferenceConfig:
     trt_engine_dir: str = ''   # TRT-LLM engine dir (Qwen3, > PyTorch)
     datasystem_host: str = ''  # DataSystem worker host (empty = disabled)
     datasystem_port: int = 31501  # DataSystem worker port
+    trt_max_kv_tokens: int = 2048  # TRT-LLM paged KV cache pressure knob
+    trt_scheduler_policy: str = 'max_utilization'
 
 
 class TensorRTLLMInference:
@@ -336,8 +338,8 @@ class GenerativeInferenceService:
             vocab_size=model_config['vocab_size'],
             temperature=self.config.temperature,
             top_k=self.config.top_k,
-            # max_tokens_in_paged_kv_cache 不传 = 连续 KV cache = FlashAttention 路径
-            # SM89 bf16 XMMA kernel 缺失, 不能开 paged 模式
+            max_tokens_in_paged_kv_cache=self.config.trt_max_kv_tokens,
+            scheduler_policy=self.config.trt_scheduler_policy,
         )
 
         if '_id_to_sem' in checkpoint:
@@ -1044,6 +1046,14 @@ def main():
                         help='DataSystem worker host (env: DATASYSTEM_HOST)')
     parser.add_argument('--datasystem_port', type=int, default=31501,
                         help='DataSystem worker port (env: DATASYSTEM_PORT, default: 31501)')
+    parser.add_argument('--trt_max_kv_tokens', type=int,
+                        default=int(os.environ.get('TRT_MAX_KV_TOKENS', '2048')),
+                        help='TRT-LLM max tokens in paged KV cache '
+                             '(env: TRT_MAX_KV_TOKENS, default: 2048)')
+    parser.add_argument('--trt_scheduler_policy', type=str,
+                        default=os.environ.get('TRT_SCHEDULER_POLICY', 'max_utilization'),
+                        help='TRT-LLM scheduler policy '
+                             '(env: TRT_SCHEDULER_POLICY, default: max_utilization)')
 
     args = parser.parse_args()
 
@@ -1058,6 +1068,8 @@ def main():
         trt_engine_dir=args.trt_engine_dir,
         datasystem_host=args.datasystem_host,
         datasystem_port=args.datasystem_port,
+        trt_max_kv_tokens=args.trt_max_kv_tokens,
+        trt_scheduler_policy=args.trt_scheduler_policy,
     )
 
     # 创建推理服务
