@@ -9,11 +9,9 @@ echo "========================================="
 
 # 默认参数
 CONFIG_PATH="${CONFIG_PATH:-./configs/pairec_config.json}"
-PORT="${PORT:-8080}"
 
 echo "Configuration:"
 echo "  Config path: $CONFIG_PATH"
-echo "  Port: $PORT"
 echo ""
 
 # 检查配置文件
@@ -28,8 +26,8 @@ cd "$(dirname "$0")/../services"
 if [[ ! "$CONFIG_PATH" = /* ]]; then
     CONFIG_PATH="../$CONFIG_PATH"
 fi
+export CONFIG_PATH
 
 # 启动服务
 go run main.go \
-    --config "$CONFIG_PATH" \
-    --port "$PORT"
+    --config "$CONFIG_PATH"

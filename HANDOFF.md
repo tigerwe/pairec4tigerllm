@@ -25,6 +25,11 @@
 - Go 默认值同步改为 `3s`、单次尝试
 - 本地验证: `go test ./services/...` 通过
 
+**远程启动修复**:
+- 仓库原先忽略 `go.sum`，远程 `go run` 会报依赖校验缺失；现已纳入版本控制
+- `scripts/start_pairec.sh` 现在会导出 `CONFIG_PATH`，确保 `main.go` 首次加载正确配置
+- 移除脚本中 PaiRec 未定义的 `--port` 参数
+
 ### 6/1 探索：推理命中率优化
 
 **背景**: PaiRec 调用推理服务 → 绝大多数用户返回 `code:299 "items size not enough"`。
