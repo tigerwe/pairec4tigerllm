@@ -31,6 +31,8 @@
 - 移除脚本中 PaiRec 未定义的 `--port` 参数
 - 远程 DNS 无法解析 `mirrors.aliyun.com`；现已将完整 `vendor/` 纳入仓库
 - 启动脚本固定使用 `go run -mod=vendor`，不再依赖在线下载
+- 首次 vendor 提交遗漏 128 个文件：`.gitignore` 的通用 `lib/` 规则误伤 vendor 内 ClickHouse、Apache Thrift 和 PostgreSQL 驱动目录
+- 已增加 `!vendor/**` 例外并补齐文件；从 Git 索引导出临时副本后，以 `GOPROXY=off`、空 `GOMODCACHE` 和空 `GOCACHE` 编译通过，模块缓存文件数为 0
 
 ### 6/1 探索：推理命中率优化
 

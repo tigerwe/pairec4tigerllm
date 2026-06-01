@@ -84,3 +84,7 @@ tensorboard/
 # Go build artifacts
 pairec-server-arm64
 services/pairec-server
+
+# Vendored Go dependencies must remain complete for offline builds.
+!vendor/
+!vendor/**
