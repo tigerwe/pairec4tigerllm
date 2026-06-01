@@ -139,10 +139,9 @@ class TRTQwen3Backend:
             print(f"[TRT generate] batch={b}, prompt_len={prompt_len}, "
                   f"max_new_tokens={max_new_tokens}, num_samples={num_samples}")
 
-            # ── 多轮采样 + 去重 ──
+            # ── 多轮采样: 合并所有轮次 token 到统一池子再做组合 ──
             from tensorrt_llm.bindings.executor import SamplingConfig
-            seen = set()
-            items = []
+            all_sampled_tokens = []
             for s in range(num_samples):
                 cfg = SamplingConfig(
                     temperature=self.sampling_config.temperature,
@@ -162,21 +161,25 @@ class TRTQwen3Backend:
                           f"prompt_len={prompt_len}): {type(e).__name__}: {e}")
                     import traceback
                     traceback.print_exc()
-                    # 单轮失败不中断，继续下一轮
                     continue
                 new_tokens = outputs[0][0][prompt_len:].tolist()
-                parsed, diag = self._parse_output(new_tokens, return_diag=True)
-                if s == 0:  # 第一轮打印 token 分布诊断
-                    print(f"[TRT parse] sample={s}, total_tokens={diag['total']}, "
-                          f"valid_sem={diag['valid_sem']}, "
-                          f"layer_counts={diag['layer_counts']}, "
-                          f"matched={len(parsed)}, "
-                          f"first_20_tokens={new_tokens[:20]}")
-                for sem in parsed:
-                    key = tuple(sem)
-                    if key not in seen:
-                        seen.add(key)
-                        items.append(sem)
+                all_sampled_tokens.extend(new_tokens)
+
+            # 合并后统一组合解析
+            parsed, diag = self._parse_output(all_sampled_tokens, return_diag=True)
+            print(f"[TRT parse] merged {num_samples} rounds, "
+                  f"total_tokens={diag['total']}, "
+                  f"valid_sem={diag['valid_sem']}, "
+                  f"layer_counts={diag['layer_counts']}, "
+                  f"combo_total={diag.get('combo_total', 0)}, "
+                  f"matched={len(parsed)}")
+            seen = set()
+            items = []
+            for sem in parsed:
+                key = tuple(sem)
+                if key not in seen:
+                    seen.add(key)
+                    items.append(sem)
             self._seed += num_samples
             all_results.append(items)
 
