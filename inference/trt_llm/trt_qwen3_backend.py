@@ -184,19 +184,32 @@ class TRTQwen3Backend:
         return padded
 
     def _parse_output(self, token_ids: List[int]) -> List[List[int]]:
-        """从生成 token 流中提取语义 ID 四元组 (s0,s1,s2,s3 严格有序)."""
+        """从生成 token 流中提取语义 ID 四元组 (s0,s1,s2,s3 层序递增).
+
+        宽松匹配: 跳过非语义 token (pad/eos/普通文字),
+        在有效语义 token 子序列中寻找 layer 0→1→2→3 连续递增模式.
+        原始 token 流中不要求四个 token 位置连续.
+        """
+        # 第一步: 过滤出所有有效语义 token, 保留原始位置和层号
+        valid = [(pos,) + self._id_to_sem[tid]
+                 for pos, tid in enumerate(token_ids)
+                 if tid in self._id_to_sem]
+        if not valid:
+            return []
+
         items = []
         i = 0
-        n = len(token_ids)
+        n = len(valid)
         while i <= n - self.num_quantizers:
-            window = token_ids[i:i + self.num_quantizers]
-            parsed = [self._id_to_sem.get(tid) for tid in window]
-            if all(p is not None for p in parsed):
-                layers = [p[0] for p in parsed]
-                if layers == list(range(self.num_quantizers)):
-                    values = [p[1] for p in parsed]
-                    items.append(values)
-                    i += self.num_quantizers
-                    continue
-            i += 1
+            # 在有效 token 子序列上检查连续递增层号
+            if (valid[i][1] == 0 and           # layer 0
+                valid[i+1][1] == 1 and         # layer 1
+                valid[i+2][1] == 2 and         # layer 2
+                valid[i+3][1] == 3):           # layer 3
+                values = [valid[i][2], valid[i+1][2],
+                          valid[i+2][2], valid[i+3][2]]
+                items.append(values)
+                i += self.num_quantizers
+            else:
+                i += 1
         return items
