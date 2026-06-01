@@ -1,12 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-01 | 当前状态: 推荐链路工程化 — PaiRec接通过程中 | 下一步: 验证 max_new_tokens≤32 + 组合 + layer填充 后 PaiRec 端到端
+> 最后更新: 2026-06-01 | 当前状态: PaiRec 端到端功能已打通 | 下一步: 远程部署 Go 超时修复，确认单次请求只触发一次推理
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
-| **6/1** | **推荐链路对接 — 推理服务命中率优化: 发现并修复5个瓶颈 (input截断/max_new上限/宽松匹配/组合模式/layer3填充)** |
+| **6/1** | **推荐链路对接 — PaiRec 端到端返回成功；修复 Go 客户端 500ms 超时导致的重复推理** |
 | **5/30** | C++ KV cache offload/onboard 闭环验证通过; 任务切换到推荐链路工程化 |
 | **5/29** | C++ offload/onboard 链路突破 (FMHA crash根因/C++源码绕过/重编.so) |
 | **5/28** | KV Cache + offload/onboard 闭环 (TRT/PyTorch双路径/三层缓存全通) |
@@ -21,7 +21,7 @@
 - **TRT-LLM 引擎**: ✅ bfloat16, 1.46 GB, 限制: max_input_len=64, max_new_tokens=32, max_seq_len=96
 - **C++ KV offload/onboard**: ✅ 闭环验证通过
 - **推理服务**: ✅ /recommend 可用
-- **PaiRec 对接**: 🔄 进行中 — 推理命中率已改善，待验证端到端
+- **PaiRec 对接**: 🔄 功能已打通 — 3 个用户端到端返回 `code=200` 和 5 个 item，待复验重复推理修复
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 
@@ -58,9 +58,25 @@ max_seq_len = 96
 
 **layer 填充**: 当某层缺失时用 {0} 补位 → 组合出候选 → map 验证真假
 
+## 6/1 验证：PaiRec 端到端功能打通
+
+### 验证证据
+
+| 用户 | history_len | PaiRec 响应 |
+|------|-------------|-------------|
+| `303` | 20 | `code=200`, `size=5`, 5 个 `generative_recall` item |
+| `1201` | 1 | `code=200`, `size=5`, 5 个 `generative_recall` item |
+| `130` | 1 | `code=200`, `size=5`, 5 个 `generative_recall` item |
+
+### 新发现：Go 客户端超时导致重复推理
+
+单次 TRT miss 约 `667-812ms`，但 Go 客户端默认超时仅 `500ms` 且最多尝试 3 次。同一个 PaiRec 请求会并发触发多次 GPU 推理，再由后续重试命中 HBM 结果缓存。
+
+已在本地修复：`RecallAlgo` 增加 `timeout_ms=3000`、`max_retries=1`，并同步修改默认配置。待远程部署后确认单次 PaiRec 请求只触发一次 `/recommend`。
+
 ## 下一步
 
-1. 验证当前版本 (max_new≤32 + 组合 + layer填充) 在 PaiRec 端到端的表现
-2. 如果 history_len=1 用户仍不足: 重建引擎放大 max_seq_len (256) + max_new_tokens (128)
-3. 继续 F08 接通 PaiRec (写测试 curl、trace 验证)
-4. F12 推荐系统各阶段时延分析
+1. 远程部署 Go 超时修复并重启 PaiRec
+2. 复验单个 PaiRec 请求只触发一次 `/recommend`
+3. 确认稳定后将 F08 标记为完成
+4. 开始 F12 推荐系统各阶段时延分析

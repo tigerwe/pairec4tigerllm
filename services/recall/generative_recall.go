@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alibaba/pairec/v2/persist/cache"
 	"github.com/alibaba/pairec/v2/context"
 	"github.com/alibaba/pairec/v2/log"
 	"github.com/alibaba/pairec/v2/module"
+	"github.com/alibaba/pairec/v2/persist/cache"
 	"github.com/alibaba/pairec/v2/recconf"
 	"github.com/alibaba/pairec/v2/service/recall"
 	"github.com/alibaba/pairec/v2/utils"
@@ -47,8 +47,8 @@ var (
 type GenerativeRecall struct {
 	*recall.BaseRecall
 	client             *TRTLLMClient
-	modelName          string        // 自己保存 modelName
-	itemType           string        // 自己保存 itemType
+	modelName          string // 自己保存 modelName
+	itemType           string // 自己保存 itemType
 	historyFrom        string
 	historyFeatureName string
 	historyDelimiter   string
@@ -59,39 +59,43 @@ type GenerativeRecall struct {
 	cachePrefix        string
 	cacheTime          int
 	semanticIDMapPath  string
-	cache              cache.Cache // 自己管理缓存
+	cache              cache.Cache       // 自己管理缓存
 	featureProvider    *feature.Provider // 特征提供器（新增）
 }
 
 // recallConfigJSON 用于从 RecallAlgo 字段解析配置
 type recallConfigJSON struct {
-	ServerURL          string                `json:"server_url"`
-	TopK               int                   `json:"topk"`
-	Temperature        float64               `json:"temperature"`
-	BeamWidth          int                   `json:"beam_width"`
-	HistoryFrom        string                `json:"history_from"`
-	HistoryFeatureName string                `json:"history_feature_name"`
-	HistoryDelimiter   string                `json:"history_delimiter"`
-	HistoryMaxLength   int                   `json:"history_max_length"`
-	FeatureSource      string                `json:"feature_source"`
-	KafkaConfig        *config.KafkaConfig   `json:"kafka_config"`
+	ServerURL          string              `json:"server_url"`
+	TimeoutMs          int                 `json:"timeout_ms"`
+	MaxRetries         int                 `json:"max_retries"`
+	TopK               int                 `json:"topk"`
+	Temperature        float64             `json:"temperature"`
+	BeamWidth          int                 `json:"beam_width"`
+	HistoryFrom        string              `json:"history_from"`
+	HistoryFeatureName string              `json:"history_feature_name"`
+	HistoryDelimiter   string              `json:"history_delimiter"`
+	HistoryMaxLength   int                 `json:"history_max_length"`
+	FeatureSource      string              `json:"feature_source"`
+	KafkaConfig        *config.KafkaConfig `json:"kafka_config"`
 }
 
 // NewGenerativeRecall 创建生成式召回实例.
 func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
-	writeDebugLog(" NewGenerativeRecall called, name=%s, RecallAlgo=%s\n", 
+	writeDebugLog(" NewGenerativeRecall called, name=%s, RecallAlgo=%s\n",
 		conf.Name, conf.RecallAlgo)
-	
+
 	// 从 RecallAlgo 字段解析 JSON 配置
 	var algoConf recallConfigJSON
 	var genConfig *config.GenerativeRecallConfig
-	
+
 	if conf.RecallAlgo != "" {
 		if err := json.Unmarshal([]byte(conf.RecallAlgo), &algoConf); err == nil {
 			writeDebugLog(" Parsed RecallAlgo: server_url=%s, history_feature_name=%s\n",
 				algoConf.ServerURL, algoConf.HistoryFeatureName)
 			genConfig = &config.GenerativeRecallConfig{
 				ServerURL:          algoConf.ServerURL,
+				Timeout:            time.Duration(algoConf.TimeoutMs) * time.Millisecond,
+				MaxRetries:         algoConf.MaxRetries,
 				TopK:               algoConf.TopK,
 				Temperature:        algoConf.Temperature,
 				BeamWidth:          algoConf.BeamWidth,
@@ -107,7 +111,7 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 			}
 		}
 	}
-	
+
 	// 如果解析失败，使用默认配置
 	if genConfig == nil {
 		writeDebugLog(" Using default config\n")
@@ -162,7 +166,7 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 			featureProvider = feature.NewProvider(nil, "../data/user_features.json")
 		} else {
 			featureProvider = feature.NewProvider(consumer, "../data/user_features.json")
-			log.Info(fmt.Sprintf("[GenerativeRecall] Kafka feature consumer started: topic=%s", 
+			log.Info(fmt.Sprintf("[GenerativeRecall] Kafka feature consumer started: topic=%s",
 				genConfig.KafkaConfig.Topic))
 		}
 	} else {
@@ -190,7 +194,7 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 		cache:              c,
 		featureProvider:    featureProvider,
 	}
-	
+
 	writeDebugLog(" GenerativeRecall instance created: name=%s, historyFeatureName=%s, topK=%d\n",
 		recallInstance.modelName, recallInstance.historyFeatureName, recallInstance.topK)
 
@@ -234,16 +238,16 @@ func loadSemanticIDMap(path string) {
 func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.RecommendContext) []*module.Item {
 	// ========== 非侵入式时延打点：阶段计时器 ==========
 	var (
-		stageStart      = time.Now()
-		stageCache      time.Duration
-		stageHistory    time.Duration
-		stageConvert    time.Duration
-		stageHTTP       time.Duration
-		stageItems      time.Duration
-		traceID         = string(ctx.RecommendId)
+		stageStart   = time.Now()
+		stageCache   time.Duration
+		stageHistory time.Duration
+		stageConvert time.Duration
+		stageHTTP    time.Duration
+		stageItems   time.Duration
+		traceID      = string(ctx.RecommendId)
 	)
 	// ================================================
-	
+
 	// 调试日志 - 输出到文件
 	f, _ := os.OpenFile("/tmp/recall_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if f != nil {
@@ -265,7 +269,7 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		}
 	}
 	stageCache = time.Since(stageStart)
-	
+
 	writeDebugLog("[DEBUG] Cache miss or empty, getting user history")
 
 	// 获取用户历史行为
@@ -278,9 +282,9 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		return nil
 	}
 	stageHistory = time.Since(historyStart)
-	
+
 	writeDebugLog(" Got history, len=%d\n", len(history))
-	
+
 	// 限制历史长度，避免超过模型 max_seq_len (50)
 	if len(history) > 49 {
 		history = history[len(history)-49:]
@@ -311,22 +315,22 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		Temperature: r.temperature,
 		BeamWidth:   r.beamWidth,
 	}
-	
+
 	writeDebugLog(" Calling inference service, history=%v\n", semanticHistory)
 
 	// ========== 非侵入式时延打点：HTTP 调用计时 ==========
 	httpStart := time.Now()
-	response, err := r.client.Recommend(request, traceID)  // traceID 透传给推理服务
+	response, err := r.client.Recommend(request, traceID) // traceID 透传给推理服务
 	stageHTTP = time.Since(httpStart)
 	// ===================================================
-	
+
 	if err != nil {
 		writeDebugLog(" Inference error: %v\n", err)
 		log.Error(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tname=%s\terr=generative_recommend:%v",
 			ctx.RecommendId, r.modelName, err))
 		return nil
 	}
-	
+
 	writeDebugLog(" Got response, recommendations=%d\n", len(response.Recommendations))
 
 	// 转换结果为 pairec Item
@@ -359,9 +363,9 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 	if response.Trace != nil {
 		log.Info(fmt.Sprintf(
 			"requestId=%s\tmodule=GenerativeRecall\tname=%s\tcount=%d\tcost=%d"+
-			"\tcache_ms=%d\thistory_ms=%d\tconvert_ms=%d\thttp_ms=%d\titems_ms=%d"+
-			"\ttr_backend=%s\ttr_total_ms=%.0f\ttr_prepare_ms=%.0f\ttr_forward_ms=%.0f\ttr_generate_ms=%.0f\ttr_map_ms=%.0f"+
-			"\ttr_kv_lookup_ms=%.0f\ttr_kv_write_ms=%.0f\tqueue_ms=%d",
+				"\tcache_ms=%d\thistory_ms=%d\tconvert_ms=%d\thttp_ms=%d\titems_ms=%d"+
+				"\ttr_backend=%s\ttr_total_ms=%.0f\ttr_prepare_ms=%.0f\ttr_forward_ms=%.0f\ttr_generate_ms=%.0f\ttr_map_ms=%.0f"+
+				"\ttr_kv_lookup_ms=%.0f\ttr_kv_write_ms=%.0f\tqueue_ms=%d",
 			ctx.RecommendId, r.modelName, len(items), totalCost,
 			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
 			stageHTTP.Milliseconds(), stageItems.Milliseconds(),
@@ -375,7 +379,7 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		// 兼容旧版推理服务（未返回 Trace 信息）
 		log.Info(fmt.Sprintf(
 			"requestId=%s\tmodule=GenerativeRecall\tname=%s\tcount=%d\tcost=%d"+
-			"\tcache_ms=%d\thistory_ms=%d\tconvert_ms=%d\thttp_ms=%d\titems_ms=%d\tinference_svc_ms=%.0f",
+				"\tcache_ms=%d\thistory_ms=%d\tconvert_ms=%d\thttp_ms=%d\titems_ms=%d\tinference_svc_ms=%.0f",
 			ctx.RecommendId, r.modelName, len(items), totalCost,
 			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
 			stageHTTP.Milliseconds(), stageItems.Milliseconds(),
@@ -430,7 +434,7 @@ func (r *GenerativeRecall) getHistoryFromUserFeature(user *module.User) ([]int, 
 
 	// 降级：直接读取离线 JSON（兼容旧逻辑）
 	loadUserFeatures()
-	
+
 	if r.historyFeatureName == "" {
 		return nil, fmt.Errorf("history_feature_name is empty")
 	}
@@ -439,12 +443,12 @@ func (r *GenerativeRecall) getHistoryFromUserFeature(user *module.User) ([]int, 
 	if !ok {
 		return nil, fmt.Errorf("user %s not found in features", user.Id)
 	}
-	
+
 	historyStr := ""
 	if val, ok := userData[r.historyFeatureName]; ok {
 		historyStr = fmt.Sprintf("%v", val)
 	}
-	
+
 	if historyStr == "" {
 		return nil, nil
 	}
@@ -511,7 +515,7 @@ func (r *GenerativeRecall) convertToSemanticIDs(history []int) [][]int {
 
 	for _, itemID := range history {
 		var semIDs []int
-		
+
 		// 优先从映射表查询
 		if semanticIDMap != nil {
 			if fullIDs, ok := semanticIDMap[itemID]; ok {

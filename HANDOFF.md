@@ -5,7 +5,25 @@
 ## 最近一次交接 (2026-06-01)
 
 ### 当前任务
-推荐链路工程化 — PaiRec 对接中。推理服务命中率优化已做完，待验证 PaiRec 端到端。
+推荐链路工程化 — PaiRec 端到端功能已打通。待远程部署 Go 超时修复，确认单次请求只触发一次推理。
+
+### 6/1 PaiRec 端到端验证
+
+**功能验证通过**:
+
+| 用户 | history_len | PaiRec 响应 |
+|------|-------------|-------------|
+| `303` | 20 | `code=200`, `size=5`, 5 个 `generative_recall` item |
+| `1201` | 1 | `code=200`, `size=5`, 5 个 `generative_recall` item |
+| `130` | 1 | `code=200`, `size=5`, 5 个 `generative_recall` item |
+
+**新发现**: 单次 TRT miss 约 `667-812ms`，Go 客户端默认超时仅 `500ms` 且最多尝试 3 次。日志显示同一用户请求会并发触发多次推理，随后由重试命中 HBM 结果缓存。
+
+**本地修复**:
+- `RecallAlgo` 支持 `timeout_ms` 和 `max_retries`
+- PaiRec 配置设为 `timeout_ms=3000`、`max_retries=1`
+- Go 默认值同步改为 `3s`、单次尝试
+- 本地验证: `go test ./services/...` 通过
 
 ### 6/1 探索：推理命中率优化
 
@@ -103,7 +121,7 @@ export LD_PRELOAD="\
 
 ### 下一步
 
-1. 验证推理服务命中率是否满足 PaiRec size=10 的要求
-2. 若短历史用户仍不足 → 重建引擎放大 max_seq_len
-3. 继续 F08 接通 PaiRec
+1. 远程部署 Go 超时修复并重启 PaiRec
+2. 复验单个 PaiRec 请求只触发一次 `/recommend`
+3. 确认稳定后将 F08 标记为完成
 4. F12 时延分析

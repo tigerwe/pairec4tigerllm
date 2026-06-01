@@ -279,8 +279,8 @@ curl -X POST http://localhost:8000/recommend \
 
 ```yaml
 server_url: "http://localhost:8000"
-timeout: 500ms
-max_retries: 3
+timeout: 3s
+max_retries: 1
 topk: 50
 temperature: 1.0
 beam_width: 1
