@@ -198,38 +198,44 @@ class TRTQwen3Backend:
         在有效语义 token 子序列中寻找 layer 0→1→2→3 连续递增模式.
         原始 token 流中不要求四个 token 位置连续.
         """
+        import itertools
+
         diag = {
             'total': len(token_ids),
             'valid_sem': 0,
             'layer_counts': [0, 0, 0, 0],
         }
-        # 第一步: 过滤出所有有效语义 token, 保留原始位置和层号
-        valid = []
-        for pos, tid in enumerate(token_ids):
+        # 第一步: 按层收集所有 value (去重)
+        layer_values = {0: set(), 1: set(), 2: set(), 3: set()}
+        for tid in token_ids:
             sem = self._id_to_sem.get(tid)
             if sem is not None:
-                valid.append((pos,) + sem)
+                layer, val = sem
                 diag['valid_sem'] += 1
-                if sem[0] < self.num_quantizers:
-                    diag['layer_counts'][sem[0]] += 1
-        if not valid:
+                if layer < self.num_quantizers:
+                    diag['layer_counts'][layer] += 1
+                    layer_values[layer].add(val)
+
+        # 第二步: 任一层为空则无法拼出四元组
+        if any(len(layer_values[l]) == 0 for l in range(self.num_quantizers)):
             return ([], diag) if return_diag else []
 
+        # 第三步: 笛卡尔积组合, 去重后返回
+        # 限制组合上限防止爆炸 (layer 2 可能很多)
+        sorted_layers = [sorted(layer_values[l]) for l in range(self.num_quantizers)]
+        combo_count = 1
+        for vals in sorted_layers:
+            combo_count *= len(vals)
         items = []
-        i = 0
-        n = len(valid)
-        while i <= n - self.num_quantizers:
-            # 在有效 token 子序列上检查连续递增层号
-            if (valid[i][1] == 0 and           # layer 0
-                valid[i+1][1] == 1 and         # layer 1
-                valid[i+2][1] == 2 and         # layer 2
-                valid[i+3][1] == 3):           # layer 3
-                values = [valid[i][2], valid[i+1][2],
-                          valid[i+2][2], valid[i+3][2]]
-                items.append(values)
-                i += self.num_quantizers
-            else:
-                i += 1
+        seen = set()
+        for combo in itertools.product(*sorted_layers[:3], sorted_layers[3]):
+            key = tuple(combo)
+            if key not in seen:
+                seen.add(key)
+                items.append(list(combo))
+        diag['combo_total'] = combo_count
+        diag['matched'] = len(items)
+
         if return_diag:
             return items, diag
         return items
