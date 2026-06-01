@@ -571,8 +571,9 @@ class GenerativeInferenceService:
                             print(f"[ResultCache] DataSystem onboard error: {e}")
 
                 # 3. 全部 miss → TRT-LLM 引擎推理
-                # 足够大的生成空间确保能产出完整的四层语义 token
-                max_new_tokens = max(128, topk * 4)
+                # 引擎max_new_tokens硬上限32 (96-64), 超了C++层卡死不报错
+                # 8轮合并后token池=8×32=256, 配合组合+填充足够覆盖
+                max_new_tokens = max(32, topk * 3)
                 tokens = self._trt_backend.generate(
                     input_ids, max_new_tokens=max_new_tokens
                 )  # [batch, max_items, 4]
