@@ -490,11 +490,34 @@ class GenerativeInferenceService:
         """生成推荐 (支持 Qwen3 KV Cache 加速)."""
         t0 = time.perf_counter()
         temperature = temperature or self.config.temperature
+        trace = {
+            'total_ms': 0.0,
+            'prepare_input_ms': 0.0,
+            'infer_ms': 0.0,
+            'generate_ms': 0.0,
+            'model_forward_ms': 0.0,
+            'prompt_ms': 0.0,
+            'runner_generate_ms': 0.0,
+            'parse_combo_ms': 0.0,
+            'output_pad_ms': 0.0,
+            'backend_total_ms': 0.0,
+            'map_item_ms': 0.0,
+            'kv_lookup_ms': 0.0,
+            'kv_write_ms': 0.0,
+            'kv_source': 'miss',
+            'result_cache_source': 'miss',
+            'result_cache_lookup_ms': 0.0,
+            'result_cache_ds_lookup_ms': 0.0,
+            'result_cache_write_submit_ms': 0.0,
+            'backend': 'unknown',
+        }
 
         # 1. 输入准备
+        prepare_started = time.perf_counter()
         input_ids = self._prepare_input(user_history)
         input_ids = input_ids.to(self.device)
         history_hash = self._hash_history(user_history)
+        trace['prepare_input_ms'] = (time.perf_counter() - prepare_started) * 1000
 
         # 2. KV Cache 查询
         kv_source = "miss"
@@ -505,6 +528,8 @@ class GenerativeInferenceService:
             past_kv, kv_source, kv_lookup_ms = self.kv_manager.query(
                 user_id, history_hash
             )
+            trace['kv_source'] = kv_source
+            trace['kv_lookup_ms'] = kv_lookup_ms
             if past_kv is not None:
                 print(f"[KV Cache] hit: user={user_id}, hash={history_hash[:16]}..., "
                       f"lookup_ms={kv_lookup_ms:.1f}")
@@ -520,26 +545,38 @@ class GenerativeInferenceService:
                 cache_key = f"{user_id}:{history_hash}"
 
                 # 1. 查 HBM 内存缓存
+                result_cache_started = time.perf_counter()
                 if cache_key in self._result_cache:
                     self._result_cache.move_to_end(cache_key)
-                    result = dict(self._result_cache[cache_key])
-                    result['trace'] = dict(result['trace'])
-                    result['trace']['kv_source'] = 'hbm_hit'
-                    result['trace']['kv_lookup_ms'] = 0.0
+                    result = self._result_cache[cache_key]
+                    trace['result_cache_lookup_ms'] = (
+                        time.perf_counter() - result_cache_started
+                    ) * 1000
+                    trace['result_cache_source'] = 'hbm_hit'
+                    trace['backend'] = 'trt-qwen3'
                     total_ms = (time.perf_counter() - t0) * 1000
-                    result['trace']['total_ms'] = total_ms
-                    result['inference_time_ms'] = total_ms
+                    trace['total_ms'] = total_ms
                     self.kv_cache_hits += 1
                     print(f"[ResultCache] hbm_hit: user={user_id}, total_ms={total_ms:.0f}")
-                    return result
+                    return {
+                        'recommendations': result['recommendations'],
+                        'inference_time_ms': total_ms,
+                        'trace': trace,
+                    }
+                trace['result_cache_lookup_ms'] = (
+                    time.perf_counter() - result_cache_started
+                ) * 1000
 
                 # 2. DataSystem onboard (内存 miss 时回读)
                 onboard_result = None
                 if self.kv_manager is not None and self.kv_manager.ds is not None:
+                    t_ds = time.perf_counter()
                     try:
-                        t_ds = time.perf_counter()
                         ds_key = f"{self._result_ds_prefix}:{cache_key}"
                         raw = self.kv_manager.ds.kv().get([ds_key], convert_to_str=False)
+                        trace['result_cache_ds_lookup_ms'] = (
+                            time.perf_counter() - t_ds
+                        ) * 1000
                         if raw and raw[0] is not None:
                             onboard_result = json.loads(
                                 raw[0] if isinstance(raw[0], bytes) else raw[0]
@@ -550,21 +587,20 @@ class GenerativeInferenceService:
                             # 回填 HBM
                             self._result_cache[cache_key] = onboard_result
                             self._result_cache.move_to_end(cache_key)
-                            kv_source = 'ds_hit'
-                            kv_lookup_ms = ds_lookup_ms
+                            trace['result_cache_source'] = 'ds_hit'
                             self.kv_cache_hits += 1
                             total_ms = (time.perf_counter() - t0) * 1000
+                            trace['total_ms'] = total_ms
+                            trace['backend'] = 'trt-qwen3'
                             return {
-                                **onboard_result,
-                                'trace': {
-                                    **onboard_result.get('trace', {}),
-                                    'kv_source': 'ds_hit',
-                                    'kv_lookup_ms': ds_lookup_ms,
-                                    'total_ms': total_ms,
-                                },
+                                'recommendations': onboard_result['recommendations'],
+                                'trace': trace,
                                 'inference_time_ms': total_ms,
                             }
                     except Exception as e:
+                        trace['result_cache_ds_lookup_ms'] = (
+                            time.perf_counter() - t_ds
+                        ) * 1000
                         # "Key not found" 是首次请求的正常 miss, 不打印
                         msg = str(e)
                         if "Key not found" not in msg and "not found" not in msg.lower():
@@ -574,9 +610,10 @@ class GenerativeInferenceService:
                 # 引擎max_new_tokens硬上限32 (96-64), 超了C++层卡死不报错
                 # 8轮合并后token池=8×32=256, 配合组合+填充足够覆盖
                 max_new_tokens = max(32, topk * 3)
-                tokens = self._trt_backend.generate(
-                    input_ids, max_new_tokens=max_new_tokens
+                tokens, backend_trace = self._trt_backend.generate(
+                    input_ids, max_new_tokens=max_new_tokens, return_trace=True
                 )  # [batch, max_items, 4]
+                trace.update(backend_trace)
                 if tokens.shape[0] == 0:
                     print(f"[TRT generate] topk={topk}, output shape={tokens.shape} → empty batch, skip")
                     tokens = torch.zeros(0, self.num_quantizers, dtype=torch.long, device=self.device)
@@ -630,17 +667,25 @@ class GenerativeInferenceService:
                     )
                 # 已有 recommendations，跳过后续转换
                 total_ms = (time.perf_counter() - t0) * 1000
+                trace['total_ms'] = total_ms
+                trace['backend'] = 'pytorch'
                 return {
                     'recommendations': recommendations,
                     'inference_time_ms': total_ms,
-                    'trace': {'total_ms': total_ms, 'backend': 'pytorch'},
+                    'trace': trace,
                 }
 
         infer_ms = (time.perf_counter() - t_infer_start) * 1000
+        trace['infer_ms'] = infer_ms
+        trace['generate_ms'] = (
+            trace['backend_total_ms'] if self._trt_backend is not None else infer_ms
+        )
 
         # 4. 语义 ID → 物品 ID
+        map_started = time.perf_counter()
         if not recommendations:
             recommendations = self._tokens_to_items(tokens, topk)
+        trace['map_item_ms'] = (time.perf_counter() - map_started) * 1000
 
         # 5. 异步存储 KV Cache
         kv_write_ms = 0.0
@@ -650,6 +695,7 @@ class GenerativeInferenceService:
                 user_id, history_hash, final_past_kv, async_write=True
             )
             kv_write_ms = (time.perf_counter() - t_write) * 1000
+        trace['kv_write_ms'] = kv_write_ms
 
         # 6. Trace
         total_ms = (time.perf_counter() - t0) * 1000
@@ -661,6 +707,7 @@ class GenerativeInferenceService:
             backend = 'tensorrt'
         else:
             backend = 'pytorch'
+        trace['backend'] = backend
 
         if kv_source == 'hbm_hit':
             self.kv_cache_hits += 1
@@ -669,21 +716,13 @@ class GenerativeInferenceService:
 
         # 7. TRT-LLM 结果缓存存储
         if self._trt_backend is not None:
+            result_cache_write_started = time.perf_counter()
             cache_key = f"{user_id}:{history_hash}"
             while len(self._result_cache) >= self._result_cache_max:
                 evicted_key, _ = self._result_cache.popitem(last=False)
                 print(f"[ResultCache] evicted: {evicted_key}")
             self._result_cache[cache_key] = {
                 'recommendations': recommendations,
-                'inference_time_ms': total_ms,
-                'trace': {
-                    'total_ms': total_ms,
-                    'infer_ms': infer_ms,
-                    'kv_lookup_ms': kv_lookup_ms,
-                    'kv_write_ms': kv_write_ms,
-                    'kv_source': kv_source,
-                    'backend': backend,
-                },
             }
             # 异步写入 DataSystem (持久化)
             if self.kv_manager is not None and self.kv_manager.ds is not None:
@@ -699,18 +738,16 @@ class GenerativeInferenceService:
                     ).start()
                 except Exception:
                     pass
+            trace['result_cache_write_submit_ms'] = (
+                time.perf_counter() - result_cache_write_started
+            ) * 1000
 
+        total_ms = (time.perf_counter() - t0) * 1000
+        trace['total_ms'] = total_ms
         return {
             'recommendations': recommendations,
             'inference_time_ms': total_ms,
-            'trace': {
-                'total_ms': total_ms,
-                'infer_ms': infer_ms,
-                'kv_lookup_ms': kv_lookup_ms,
-                'kv_write_ms': kv_write_ms,
-                'kv_source': kv_source,
-                'backend': backend,
-            },
+            'trace': trace,
         }
 
     def _hash_history(self, user_history: List[List[int]]) -> str:
@@ -1006,20 +1043,24 @@ class HTTPServer:
                     user_id=user_id,
                 )
 
+                trace = result.get('trace', {})
+                print(f"[TRACE] request_id={request.headers.get('X-Request-ID','')} "
+                      f"total_ms={trace.get('total_ms',0):.1f} backend={trace.get('backend','unknown')} "
+                      f"cache={trace.get('result_cache_source','miss')} "
+                      f"prepare_ms={trace.get('prepare_input_ms',0):.1f} kv_lookup_ms={trace.get('kv_lookup_ms',0):.1f} "
+                      f"result_cache_lookup_ms={trace.get('result_cache_lookup_ms',0):.1f} "
+                      f"result_cache_ds_lookup_ms={trace.get('result_cache_ds_lookup_ms',0):.1f} "
+                      f"prompt_ms={trace.get('prompt_ms',0):.1f} runner_ms={trace.get('runner_generate_ms',0):.1f} "
+                      f"parse_ms={trace.get('parse_combo_ms',0):.1f} map_ms={trace.get('map_item_ms',0):.1f} "
+                      f"items={len(result['recommendations'])}")
+
                 return jsonify({
                     'code': 200,
                     'user_id': user_id,
                     'recommendations': result['recommendations'],
                     'inference_time_ms': result['inference_time_ms'],
-                    'trace': result.get('trace', {}),
+                    'trace': trace,
                 })
-
-                trace = result.get('trace', {})
-                print(f"[TRACE] request_id={request.headers.get('X-Request-ID','')} "
-                      f"total_ms={trace.get('total_ms',0):.1f} backend={trace.get('backend','unknown')} "
-                      f"prepare_ms={trace.get('prepare_input_ms',0):.1f} forward_ms={trace.get('model_forward_ms',0):.1f} "
-                      f"generate_ms={trace.get('generate_ms',0):.1f} map_ms={trace.get('map_item_ms',0):.1f} "
-                      f"items={len(result['recommendations'])}")
 
             except Exception as e:
                 import traceback

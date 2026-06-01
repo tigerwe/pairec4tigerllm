@@ -74,12 +74,12 @@
     {
       "id": "F08",
       "name": "接通 PaiRec",
-      "status": "pending",
+      "status": "done",
       "description": "将 PaiRec 召回链路接到当前 TRT-LLM /recommend 服务, 完成端到端推荐请求验证",
       "files": ["scripts/start_pairec.sh", "services/recall/trtllm_client.go", "configs/pairec_config.json"],
       "validation_method": "PaiRec 服务调用 /recommend 成功, 返回可用召回结果并保留 trace",
-      "validation_evidence": "2026-06-01: 用户 303(history_len=20)、1201(history_len=1)、130(history_len=1) 均通过 PaiRec /api/recommend 返回 code=200、size=5 和 5 个 generative_recall item；发现 Go 客户端 500ms 超时触发重复推理，已本地修复待远程复验",
-      "next_step": "远程部署 timeout_ms=3000、max_retries=1 修复，确认单次 PaiRec 请求只触发一次 /recommend 后标记完成"
+      "validation_evidence": "2026-06-01: 用户 303(history_len=20)、1201(history_len=1)、130(history_len=1) 均通过 PaiRec /api/recommend 返回 code=200、size=5 和 5 个 generative_recall item；部署 timeout_ms=3000、max_retries=1 后，Kafka 实时用户 130 和 2184 均只触发一次 TRT generate，item 映射 hit=10 miss=0",
+      "done_date": "2026-06-01"
     },
     {
       "id": "F09",
@@ -119,7 +119,7 @@
       "description": "拆解 PaiRec → Python/TRT 服务 → DataSystem/KV cache → 模型生成 → item 映射各阶段耗时, 输出 trace 和瓶颈分析",
       "files": ["inference/trt_llm/server.py", "scripts/test_trt_cpp_kv_offload.py"],
       "validation_method": "一次端到端请求输出分阶段 trace, 压测报告包含 p50/p95/p99 和阶段占比",
-      "next_step": "先定义 trace 字段与日志格式, 再在服务端和 PaiRec 调用侧补齐阶段耗时"
+      "next_step": "第一版 trace 与 scripts/benchmark_e2e_latency.py 已落地；远程重启 TRT 和 PaiRec 后采集 miss / hbm_hit / ds_hit 的 p50/p95/p99，输出瓶颈占比"
     },
     {
       "id": "F13",

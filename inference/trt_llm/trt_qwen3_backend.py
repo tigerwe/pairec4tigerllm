@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """TRT-LLM Qwen3 后端 — 用 ModelRunnerCpp + 后处理解析替代 generate() 约束解码."""
 
+import time
+from typing import Dict, List, Tuple, Union
+
 import torch
-from typing import List
 
 
 class TRTQwen3Backend:
@@ -83,7 +85,8 @@ class TRTQwen3Backend:
               f"max_input_len={self.max_input_len}")
 
     def generate(self, input_ids: torch.Tensor, max_new_tokens: int = 32,
-                 num_samples: int = 8) -> torch.Tensor:
+                 num_samples: int = 8, return_trace: bool = False
+                 ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, float]]]:
         """TRT generate → 多轮采样 + 去重 → [batch, max_items, 4] 张量.
 
         TRT-LLM generate() 不支持 per-step 约束解码, 用多轮采样弥补命中率.
@@ -95,14 +98,24 @@ class TRTQwen3Backend:
             num_samples: 采样轮数
 
         Returns:
-            [batch, max_items, 4] 去重后的语义 ID (不足补 0)
+            [batch, max_items, 4] 去重后的语义 ID (不足补 0).
+            return_trace=True 时额外返回后端分阶段耗时.
         """
+        backend_started = time.perf_counter()
+        trace = {
+            "prompt_ms": 0.0,
+            "runner_generate_ms": 0.0,
+            "parse_combo_ms": 0.0,
+            "output_pad_ms": 0.0,
+            "backend_total_ms": 0.0,
+        }
         batch_size = input_ids.shape[0]
         device = input_ids.device
 
         all_results = []
         for b in range(batch_size):
             # ── 构造 prompt (逐条截断直到满足引擎 max_input_len) ──
+            prompt_started = time.perf_counter()
             history = input_ids[b].cpu().tolist()
             history = [h for h in history if not all(v == 0 for v in h)]
             orig_history_len = len(history)
@@ -136,6 +149,7 @@ class TRTQwen3Backend:
                       f"(prompt_len={prompt_len}, max_input_len={self.max_input_len})")
 
             input_id_list = [encoded["input_ids"][0]]
+            trace["prompt_ms"] += (time.perf_counter() - prompt_started) * 1000
 
             # 引擎硬限制: max_new_tokens≤32 (96-64), 总长≤95
             # 超32 C++层分配buffer失败卡死不报错, 总长超95抛RuntimeError
@@ -158,6 +172,7 @@ class TRTQwen3Backend:
                     top_k=self.sampling_config.top_k,
                     seed=self._seed + s,
                 )
+                runner_started = time.perf_counter()
                 try:
                     outputs = self.runner.generate(
                         input_id_list,
@@ -172,10 +187,15 @@ class TRTQwen3Backend:
                     import traceback
                     traceback.print_exc()
                     continue
+                finally:
+                    trace["runner_generate_ms"] += (
+                        time.perf_counter() - runner_started
+                    ) * 1000
                 new_tokens = outputs[0][0][prompt_len:].tolist()
                 all_sampled_tokens.extend(new_tokens)
 
             # 合并后统一组合解析
+            parse_started = time.perf_counter()
             parsed, diag = self._parse_output(all_sampled_tokens, return_diag=True)
             print(f"[TRT parse] merged {num_samples} rounds, "
                   f"total_tokens={diag['total']}, "
@@ -192,8 +212,10 @@ class TRTQwen3Backend:
                     items.append(sem)
             self._seed += num_samples
             all_results.append(items)
+            trace["parse_combo_ms"] += (time.perf_counter() - parse_started) * 1000
 
         # ── 填充 ──
+        pad_started = time.perf_counter()
         max_items = max((len(r) for r in all_results), default=1)
         padded = torch.zeros(batch_size, max_items, self.num_quantizers,
                              dtype=torch.long, device=device)
@@ -201,6 +223,10 @@ class TRTQwen3Backend:
             for i, sem in enumerate(items):
                 if i < max_items:
                     padded[b, i] = torch.tensor(sem, device=device)
+        trace["output_pad_ms"] = (time.perf_counter() - pad_started) * 1000
+        trace["backend_total_ms"] = (time.perf_counter() - backend_started) * 1000
+        if return_trace:
+            return padded, trace
         return padded
 
     def _parse_output(self, token_ids: List[int],

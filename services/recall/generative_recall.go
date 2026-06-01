@@ -345,12 +345,12 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 
 	totalCost := utils.CostTime(stageStart)
 
-	// 估算排队/网络开销 = HTTP 往返 - Python 侧内部处理时间
-	var queueMs int64
+	// HTTP 额外开销包含 JSON 编解码、Flask 路由、网络和可能的排队时间。
+	var httpOverheadMs int64
 	if response.Trace != nil {
-		queueMs = stageHTTP.Milliseconds() - int64(response.Trace.TotalMs)
-		if queueMs < 0 {
-			queueMs = 0
+		httpOverheadMs = stageHTTP.Milliseconds() - int64(response.Trace.TotalMs)
+		if httpOverheadMs < 0 {
+			httpOverheadMs = 0
 		}
 	}
 
@@ -359,21 +359,29 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 	//       | count=50 | cost=45 | cache_ms=2 | history_ms=5 | convert_ms=1
 	//       | http_ms=30 | items_ms=1 | inference_svc_ms=25
 	//       | tr_backend=pytorch | tr_prepare_ms=2 | tr_forward_ms=15 | tr_generate_ms=5 | tr_map_ms=2
-	//       | tr_kv_lookup_ms=2 | tr_kv_write_ms=1 | queue_ms=5
+	//       | tr_kv_lookup_ms=2 | tr_kv_write_ms=1 | http_overhead_ms=5
 	if response.Trace != nil {
 		log.Info(fmt.Sprintf(
 			"requestId=%s\tmodule=GenerativeRecall\tname=%s\tcount=%d\tcost=%d"+
 				"\tcache_ms=%d\thistory_ms=%d\tconvert_ms=%d\thttp_ms=%d\titems_ms=%d"+
-				"\ttr_backend=%s\ttr_total_ms=%.0f\ttr_prepare_ms=%.0f\ttr_forward_ms=%.0f\ttr_generate_ms=%.0f\ttr_map_ms=%.0f"+
-				"\ttr_kv_lookup_ms=%.0f\ttr_kv_write_ms=%.0f\tqueue_ms=%d",
+				"\ttr_backend=%s\ttr_total_ms=%.1f\ttr_prepare_ms=%.1f\ttr_infer_ms=%.1f\ttr_forward_ms=%.1f\ttr_generate_ms=%.1f"+
+				"\ttr_prompt_ms=%.1f\ttr_runner_ms=%.1f\ttr_parse_ms=%.1f\ttr_pad_ms=%.1f\ttr_backend_total_ms=%.1f\ttr_map_ms=%.1f"+
+				"\ttr_kv_source=%s\ttr_kv_lookup_ms=%.1f\ttr_kv_write_ms=%.1f"+
+				"\ttr_result_cache_source=%s\ttr_result_cache_lookup_ms=%.1f\ttr_result_cache_ds_lookup_ms=%.1f"+
+				"\ttr_result_cache_write_submit_ms=%.1f\thttp_overhead_ms=%d",
 			ctx.RecommendId, r.modelName, len(items), totalCost,
 			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
 			stageHTTP.Milliseconds(), stageItems.Milliseconds(),
 			response.Trace.Backend, response.Trace.TotalMs,
-			response.Trace.PrepareInputMs, response.Trace.ModelForwardMs,
-			response.Trace.GenerateMs, response.Trace.MapItemMs,
-			response.Trace.KvLookupMs, response.Trace.KvWriteMs,
-			queueMs,
+			response.Trace.PrepareInputMs, response.Trace.InferMs,
+			response.Trace.ModelForwardMs, response.Trace.GenerateMs,
+			response.Trace.PromptMs, response.Trace.RunnerGenerateMs,
+			response.Trace.ParseComboMs, response.Trace.OutputPadMs,
+			response.Trace.BackendTotalMs, response.Trace.MapItemMs,
+			response.Trace.KvSource, response.Trace.KvLookupMs, response.Trace.KvWriteMs,
+			response.Trace.ResultCacheSource, response.Trace.ResultCacheLookupMs,
+			response.Trace.ResultCacheDSLookupMs, response.Trace.ResultCacheWriteSubmitMs,
+			httpOverheadMs,
 		))
 	} else {
 		// 兼容旧版推理服务（未返回 Trace 信息）

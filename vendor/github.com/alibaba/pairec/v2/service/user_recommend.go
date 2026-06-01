@@ -56,14 +56,10 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	userId := r.GetUID(context)
 	user := module.NewUserWithContext(userId, context)
 
-	//loadFeatureStart := time.Now()
-
 	// load user features
+	userFeatureStart := time.Now()
 	r.userFeatureService.LoadUserFeatures(user, context)
-
-	//if metrics.Enabled() {
-	//metrics.LoadFeatureDurSecs.WithLabelValues(scene, expId, "before_recall").Observe(time.Since(loadFeatureStart).Seconds())
-	//}
+	userFeatureDuration := time.Since(userFeatureStart)
 
 	debugService := debug.NewDebugService(user, context)
 
@@ -79,9 +75,10 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	recallStart := time.Now()
 
 	items := r.recallService.GetItems(user, context)
+	recallDuration := time.Since(recallStart)
 
 	if metrics.Enabled() {
-		metrics.RecallDurSecs.WithLabelValues(scene, expId).Observe(time.Since(recallStart).Seconds())
+		metrics.RecallDurSecs.WithLabelValues(scene, expId).Observe(recallDuration.Seconds())
 		metrics.RecallCountTotal.WithLabelValues(scene).Add(float64(len(items)))
 
 		recallCountMap := map[string]int{}
@@ -101,9 +98,10 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 
 	// filter
 	items = r.Filter(user, items, context)
+	filterDuration := time.Since(filterStart)
 
 	if metrics.Enabled() {
-		metrics.FilterDurSecs.WithLabelValues(scene, expId).Observe(time.Since(filterStart).Seconds())
+		metrics.FilterDurSecs.WithLabelValues(scene, expId).Observe(filterDuration.Seconds())
 	}
 
 	debugService.WriteFilterLog(user, items, context)
@@ -112,34 +110,36 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 
 	// general rank
 	items = r.generalRankService.Rank(user, items, context)
+	generalRankDuration := time.Since(generalRankStart)
 
 	if metrics.Enabled() {
-		metrics.GeneralRankDurSecs.WithLabelValues(scene, expId).Observe(time.Since(generalRankStart).Seconds())
+		metrics.GeneralRankDurSecs.WithLabelValues(scene, expId).Observe(generalRankDuration.Seconds())
 	}
 
 	debugService.WriteGeneralLog(user, items, context)
 
-	//loadFeatureStart = time.Now()
-
 	// load user or item features
 	// can load data from datasource(holo, ots, redis)
 	// after load data, use feature engine to create or modify features
+	featureStart := time.Now()
 	items = r.featureService.LoadFeatures(user, items, context)
-
-	//if metrics.Enabled() {
-	//metrics.LoadFeatureDurSecs.WithLabelValues(scene, expId, "before_rank").Observe(time.Since(loadFeatureStart).Seconds())
-	//}
+	featureDuration := time.Since(featureStart)
 
 	rankStart := time.Now()
 
 	r.rankService.Rank(user, items, context)
+	rankDuration := time.Since(rankStart)
 
 	if metrics.Enabled() {
-		metrics.RankDurSecs.WithLabelValues(scene, expId).Observe(time.Since(rankStart).Seconds())
+		metrics.RankDurSecs.WithLabelValues(scene, expId).Observe(rankDuration.Seconds())
 	}
 
+	pipelineWaitStart := time.Now()
 	wg.Wait()
+	pipelineWaitDuration := time.Since(pipelineWaitStart)
+	mergeStart := time.Now()
 	items = r.mergePipelineItems(items, pipelineItems)
+	mergeDuration := time.Since(mergeStart)
 
 	debugService.WriteRankLog(user, items, context)
 
@@ -147,9 +147,10 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 
 	// sort items
 	items = r.Sort(user, items, context)
+	sortDuration := time.Since(sortStart)
 
 	if metrics.Enabled() {
-		metrics.SortDurSecs.WithLabelValues(scene, expId).Observe(time.Since(sortStart).Seconds())
+		metrics.SortDurSecs.WithLabelValues(scene, expId).Observe(sortDuration.Seconds())
 	}
 	debugService.WriteSortLog(user, items, context)
 
@@ -172,9 +173,22 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 		go hf(context, user, items)
 	}
 
+	totalDuration := time.Since(start)
+	log.Info(fmt.Sprintf(
+		"requestId=%s\tmodule=RecommendTrace\tuid=%s\tcount=%d\ttotal_ms=%d"+
+			"\tuser_feature_ms=%d\trecall_ms=%d\tfilter_ms=%d\tgeneral_rank_ms=%d"+
+			"\tfeature_ms=%d\trank_ms=%d\tpipeline_wait_ms=%d\tmerge_ms=%d\tsort_ms=%d",
+		context.RecommendId, userId, len(items), totalDuration.Milliseconds(),
+		userFeatureDuration.Milliseconds(), recallDuration.Milliseconds(),
+		filterDuration.Milliseconds(), generalRankDuration.Milliseconds(),
+		featureDuration.Milliseconds(), rankDuration.Milliseconds(),
+		pipelineWaitDuration.Milliseconds(), mergeDuration.Milliseconds(),
+		sortDuration.Milliseconds(),
+	))
+
 	if metrics.Enabled() {
 		metrics.RecTotal.WithLabelValues(scene, expId).Inc()
-		metrics.RecDurSecs.WithLabelValues(scene, expId).Observe(time.Since(start).Seconds())
+		metrics.RecDurSecs.WithLabelValues(scene, expId).Observe(totalDuration.Seconds())
 	}
 
 	return items

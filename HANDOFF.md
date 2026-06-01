@@ -5,7 +5,7 @@
 ## 最近一次交接 (2026-06-01)
 
 ### 当前任务
-推荐链路工程化 — PaiRec 端到端功能已打通。待远程部署 Go 超时修复，确认单次请求只触发一次推理。
+F12 推荐系统各阶段时延分析 — 第一版埋点和端到端压测脚本已完成，待远程 L40S 采集 p50/p95/p99。
 
 ### 6/1 PaiRec 端到端验证
 
@@ -24,6 +24,11 @@
 - PaiRec 配置设为 `timeout_ms=3000`、`max_retries=1`
 - Go 默认值同步改为 `3s`、单次尝试
 - 本地验证: `go test ./services/...` 通过
+
+**远程复验通过**:
+- Kafka 实时特征用户 `130`：`history_len=20`，只触发一次 TRT generate，`hit=10, miss=0`
+- Kafka 实时特征用户 `2184`：`history_len=20`，只触发一次 TRT generate，`hit=10, miss=0`
+- F08 PaiRec 对接可以标记完成
 
 **远程启动修复**:
 - 仓库原先忽略 `go.sum`，远程 `go run` 会报依赖校验缺失；现已纳入版本控制
@@ -79,6 +84,36 @@
 输出: 去重后的有效item列表
 ```
 
+### F12 第一版时延分解
+
+已补齐当前 Qwen3 TRT 链路的结构化 trace：
+
+| 层级 | 字段 |
+|------|------|
+| PaiRec 入口内部 | `user_feature_ms`, `recall_ms`, `filter_ms`, `general_rank_ms`, `feature_ms`, `rank_ms`, `pipeline_wait_ms`, `merge_ms`, `sort_ms` |
+| GenerativeRecall | `history_ms`, `convert_ms`, `http_ms`, `items_ms`, `http_overhead_ms` |
+| Python TRT 服务 | `prepare_input_ms`, `kv_lookup_ms`, `result_cache_lookup_ms`, `result_cache_ds_lookup_ms`, `result_cache_write_submit_ms` |
+| TRT 后端 | `prompt_ms`, `runner_generate_ms`, `parse_combo_ms`, `output_pad_ms`, `backend_total_ms` |
+
+新增 `scripts/benchmark_e2e_latency.py`：
+- 从 PaiRec `/api/recommend` 入口发请求
+- 用 PaiRec `request_id` 关联 Go 和 Python TRT 日志
+- 汇总各阶段 p50/p95/p99
+- 按结果缓存来源 `miss` / `hbm_hit` / `ds_hit` 分组
+
+本机验证：
+
+```text
+python -m py_compile inference/trt_llm/server.py inference/trt_llm/trt_qwen3_backend.py scripts/benchmark_e2e_latency.py
+# exit 0
+
+go test -mod=vendor ./services/...
+# pass
+
+trace parser assertions
+# trace parser OK
+```
+
 ### 关键修改文件
 
 | 文件 | 改动内容 |
@@ -132,7 +167,7 @@ export LD_PRELOAD="\
 
 ### 下一步
 
-1. 远程部署 Go 超时修复并重启 PaiRec
-2. 复验单个 PaiRec 请求只触发一次 `/recommend`
-3. 确认稳定后将 F08 标记为完成
-4. F12 时延分析
+1. 远程拉取 F12 埋点并重启 TRT 服务和 PaiRec
+2. 运行 `scripts/benchmark_e2e_latency.py`
+3. 分别采集 `miss`、`hbm_hit`、`ds_hit` 的 p50/p95/p99
+4. 根据阶段占比确定下一轮优化目标

@@ -1,11 +1,13 @@
 # 工作进度
 
-> 最后更新: 2026-06-01 | 当前状态: PaiRec 端到端功能已打通 | 下一步: 远程部署 Go 超时修复，确认单次请求只触发一次推理
+> 最后更新: 2026-06-01 | 当前状态: F08 PaiRec 对接完成，F12 时延分解埋点已落地 | 下一步: 远程压测 miss / hbm_hit / ds_hit 的 p50/p95/p99
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/1** | **开始 F12 推荐系统时延分析: 补齐 PaiRec 入口、GenerativeRecall、Python TRT 服务和 TRT runner 分阶段 trace；新增端到端压测汇总脚本** |
+| **6/1** | **F08 PaiRec 对接完成: 远程复验 Kafka 实时特征用户 `130`、`2184` 均单次触发 TRT 推理并返回完整映射结果** |
 | **6/1** | **修复 PaiRec 自定义 recall 启动 panic: 外部注册同步写入配置签名，框架二次加载时正确跳过内置工厂** |
 | **6/1** | **修复远程 DNS 不可用: 将完整 Go `vendor/` 纳入仓库，PaiRec 启动固定使用 `-mod=vendor` 离线依赖** |
 | **6/1** | **修复 PaiRec 远程启动: 将 `go.sum` 纳入版本控制；启动脚本正确导出 `CONFIG_PATH` 并移除无效 `--port` 参数** |
@@ -24,7 +26,8 @@
 - **TRT-LLM 引擎**: ✅ bfloat16, 1.46 GB, 限制: max_input_len=64, max_new_tokens=32, max_seq_len=96
 - **C++ KV offload/onboard**: ✅ 闭环验证通过
 - **推理服务**: ✅ /recommend 可用
-- **PaiRec 对接**: 🔄 功能已打通 — 3 个用户端到端返回 `code=200` 和 5 个 item，待复验重复推理修复
+- **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
+- **时延分析**: 🔄 第一版 trace 埋点和压测脚本已完成，待远程 L40S 采样
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 
@@ -91,9 +94,32 @@ PaiRec 启动时会再次执行 `recall.Load()`。此前 `main.go` 手工注册 
 
 已在 vendored recall 包增加 `RegisterRecallWithConfig()`，同步写入实例和配置签名，`main.go` 改用该入口。启动级验证已越过注册阶段并输出 `server start`。
 
+## 6/1 F12：推荐系统端到端时延分解
+
+已按当前 Qwen3 TRT 链路补齐 trace：
+
+- PaiRec 入口内部：`user_feature_ms`、`recall_ms`、`filter_ms`、`general_rank_ms`、`feature_ms`、`rank_ms`、`pipeline_wait_ms`、`merge_ms`、`sort_ms`
+- GenerativeRecall：`history_ms`、`convert_ms`、`http_ms`、`items_ms`、`http_overhead_ms`
+- Python TRT 服务：`prepare_input_ms`、`kv_lookup_ms`、结果缓存查询和异步写入提交耗时
+- TRT 后端：`prompt_ms`、8 轮累计 `runner_generate_ms`、`parse_combo_ms`、`output_pad_ms`
+- 新增 `scripts/benchmark_e2e_latency.py`：从 PaiRec 入口发请求，用 `request_id` 关联 PaiRec 和 TRT 日志，汇总 p50/p95/p99，并按 `miss` / `hbm_hit` / `ds_hit` 分组
+
+本机验证：
+
+```text
+python -m py_compile inference/trt_llm/server.py inference/trt_llm/trt_qwen3_backend.py scripts/benchmark_e2e_latency.py
+# exit 0
+
+go test -mod=vendor ./services/...
+# services / config / feature / recall 均通过
+
+python -c '<trace parser assertions>'
+# trace parser OK
+```
+
 ## 下一步
 
-1. 远程部署 Go 超时修复并重启 PaiRec
-2. 复验单个 PaiRec 请求只触发一次 `/recommend`
-3. 确认稳定后将 F08 标记为完成
-4. 开始 F12 推荐系统各阶段时延分析
+1. 远程拉取 F12 埋点并重启 TRT 服务和 PaiRec
+2. 运行 `scripts/benchmark_e2e_latency.py`，采集端到端 p50/p95/p99
+3. 分别统计 `miss`、`hbm_hit`、`ds_hit`，确认主要瓶颈占比
+4. 根据报告决定是否优先优化 8 轮 runner、prompt tokenize 或结果缓存路径
