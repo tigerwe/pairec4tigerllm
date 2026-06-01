@@ -69,7 +69,6 @@ tensorboard/
 !data/tenrec/processed/*.npy
 
 # Go
-vendor/
 *.exe
 *.dll
 *.so
@@ -83,6 +82,5 @@ vendor/
 .env.local
 
 # Go build artifacts
-vendor/
 pairec-server-arm64
 services/pairec-server

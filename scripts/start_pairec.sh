@@ -29,5 +29,5 @@ fi
 export CONFIG_PATH
 
 # 启动服务
-go run main.go \
+go run -mod=vendor main.go \
     --config "$CONFIG_PATH"

@@ -29,6 +29,8 @@
 - 仓库原先忽略 `go.sum`，远程 `go run` 会报依赖校验缺失；现已纳入版本控制
 - `scripts/start_pairec.sh` 现在会导出 `CONFIG_PATH`，确保 `main.go` 首次加载正确配置
 - 移除脚本中 PaiRec 未定义的 `--port` 参数
+- 远程 DNS 无法解析 `mirrors.aliyun.com`；现已将完整 `vendor/` 纳入仓库
+- 启动脚本固定使用 `go run -mod=vendor`，不再依赖在线下载
 
 ### 6/1 探索：推理命中率优化
 
