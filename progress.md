@@ -103,6 +103,7 @@ PaiRec 启动时会再次执行 `recall.Load()`。此前 `main.go` 手工注册 
 - Python TRT 服务：`prepare_input_ms`、`kv_lookup_ms`、结果缓存查询和异步写入提交耗时
 - TRT 后端：`prompt_ms`、8 轮累计 `runner_generate_ms`、`parse_combo_ms`、`output_pad_ms`
 - 新增 `scripts/benchmark_e2e_latency.py`：从 PaiRec 入口发请求，用 `request_id` 关联 PaiRec 和 TRT 日志，汇总 p50/p95/p99，并按 `miss` / `hbm_hit` / `ds_hit` 分组
+- 修正小样本 percentile 插值：2 个样本的 p50 使用中位数，不再错误取最小值
 
 本机验证：
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import math
 import os
 import statistics
 import time
@@ -207,8 +208,15 @@ def parse_trace_logs(
 
 def percentile(values: List[float], quantile: float) -> float:
     ordered = sorted(values)
-    index = max(0, min(len(ordered) - 1, int(len(ordered) * quantile) - 1))
-    return ordered[index]
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * quantile
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return ordered[lower]
+    weight = rank - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
 
 
 def summarize(values: Iterable[float]) -> Optional[Dict[str, float]]:

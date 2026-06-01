@@ -100,6 +100,7 @@ F12 推荐系统各阶段时延分析 — 第一版埋点和端到端压测脚�
 - 用 PaiRec `request_id` 关联 Go 和 Python TRT 日志
 - 汇总各阶段 p50/p95/p99
 - 按结果缓存来源 `miss` / `hbm_hit` / `ds_hit` 分组
+- percentile 使用线性插值，2 个样本的 p50 为中位数
 
 本机验证：
 
