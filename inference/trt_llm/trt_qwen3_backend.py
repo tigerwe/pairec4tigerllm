@@ -165,7 +165,14 @@ class TRTQwen3Backend:
                     # 单轮失败不中断，继续下一轮
                     continue
                 new_tokens = outputs[0][0][prompt_len:].tolist()
-                for sem in self._parse_output(new_tokens):
+                parsed, diag = self._parse_output(new_tokens, return_diag=True)
+                if s == 0:  # 第一轮打印 token 分布诊断
+                    print(f"[TRT parse] sample={s}, total_tokens={diag['total']}, "
+                          f"valid_sem={diag['valid_sem']}, "
+                          f"layer_counts={diag['layer_counts']}, "
+                          f"matched={len(parsed)}, "
+                          f"first_20_tokens={new_tokens[:20]}")
+                for sem in parsed:
                     key = tuple(sem)
                     if key not in seen:
                         seen.add(key)
@@ -183,19 +190,30 @@ class TRTQwen3Backend:
                     padded[b, i] = torch.tensor(sem, device=device)
         return padded
 
-    def _parse_output(self, token_ids: List[int]) -> List[List[int]]:
+    def _parse_output(self, token_ids: List[int],
+                       return_diag: bool = False):
         """从生成 token 流中提取语义 ID 四元组 (s0,s1,s2,s3 层序递增).
 
         宽松匹配: 跳过非语义 token (pad/eos/普通文字),
         在有效语义 token 子序列中寻找 layer 0→1→2→3 连续递增模式.
         原始 token 流中不要求四个 token 位置连续.
         """
+        diag = {
+            'total': len(token_ids),
+            'valid_sem': 0,
+            'layer_counts': [0, 0, 0, 0],
+        }
         # 第一步: 过滤出所有有效语义 token, 保留原始位置和层号
-        valid = [(pos,) + self._id_to_sem[tid]
-                 for pos, tid in enumerate(token_ids)
-                 if tid in self._id_to_sem]
+        valid = []
+        for pos, tid in enumerate(token_ids):
+            sem = self._id_to_sem.get(tid)
+            if sem is not None:
+                valid.append((pos,) + sem)
+                diag['valid_sem'] += 1
+                if sem[0] < self.num_quantizers:
+                    diag['layer_counts'][sem[0]] += 1
         if not valid:
-            return []
+            return ([], diag) if return_diag else []
 
         items = []
         i = 0
@@ -212,4 +230,6 @@ class TRTQwen3Backend:
                 i += self.num_quantizers
             else:
                 i += 1
+        if return_diag:
+            return items, diag
         return items
