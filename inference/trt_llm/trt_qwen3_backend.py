@@ -229,12 +229,17 @@ class TRTQwen3Backend:
                     diag['layer_counts'][layer] += 1
                     layer_values[layer].add(val)
 
-        # 第二步: 任一层为空则无法拼出四元组
-        if any(len(layer_values[l]) == 0 for l in range(self.num_quantizers)):
-            return ([], diag) if return_diag else []
+        # 第二步: 任一层为空, 用 {0} 填充 (默认值, 由 semantic_id_map 验证)
+        filled_layers = []
+        for l in range(self.num_quantizers):
+            if len(layer_values[l]) == 0:
+                filled_layers.append(True)
+                layer_values[l] = {0}
+                diag['layer_counts'][l] = -1  # 负数标记为填充
+            else:
+                filled_layers.append(False)
 
         # 第三步: 笛卡尔积组合, 去重后返回
-        # 限制组合上限防止爆炸 (layer 2 可能很多)
         sorted_layers = [sorted(layer_values[l]) for l in range(self.num_quantizers)]
         combo_count = 1
         for vals in sorted_layers:
@@ -248,6 +253,7 @@ class TRTQwen3Backend:
                 items.append(list(combo))
         diag['combo_total'] = combo_count
         diag['matched'] = len(items)
+        diag['fill_layer3'] = filled_layers[3]  # 标记 layer 3 是否被填充
 
         if return_diag:
             return items, diag
