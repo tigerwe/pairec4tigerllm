@@ -104,6 +104,9 @@ PaiRec 启动时会再次执行 `recall.Load()`。此前 `main.go` 手工注册 
 - TRT 后端：`prompt_ms`、8 轮累计 `runner_generate_ms`、`parse_combo_ms`、`output_pad_ms`
 - 新增 `scripts/benchmark_e2e_latency.py`：从 PaiRec 入口发请求，用 `request_id` 关联 PaiRec 和 TRT 日志，汇总 p50/p95/p99，并按 `miss` / `hbm_hit` / `ds_hit` 分组
 - 修正小样本 percentile 插值：2 个样本的 p50 使用中位数，不再错误取最小值
+- 修复 PaiRec trace 采集：`glog` 默认写独立文件，`scripts/start_pairec.sh` 现在默认传入 `--alsologtostderr=true`，保留文件日志并可由 `tee /tmp/pairec.log` 捕获结构化日志
+
+远程首次冷请求初步数据：2 个 fallback 用户均为 TRT `miss`，Python TRT 平均 `740.2ms`，其中 8 轮 `runner_generate` 平均 `680.0ms`，占比约 `92%`。首个客户端请求额外慢约 `2.7s`，结合首次输出 `Loaded fallback: 999447 users`，疑似 fallback JSON 懒加载；待 PaiRec `history_ms` 复验。
 
 本机验证：
 

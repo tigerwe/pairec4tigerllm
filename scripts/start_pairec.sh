@@ -9,9 +9,11 @@ echo "========================================="
 
 # 默认参数
 CONFIG_PATH="${CONFIG_PATH:-./configs/pairec_config.json}"
+PAIREC_ALSO_LOG_TO_STDERR="${PAIREC_ALSO_LOG_TO_STDERR:-true}"
 
 echo "Configuration:"
 echo "  Config path: $CONFIG_PATH"
+echo "  Also log to stderr: $PAIREC_ALSO_LOG_TO_STDERR"
 echo ""
 
 # 检查配置文件
@@ -30,4 +32,5 @@ export CONFIG_PATH
 
 # 启动服务
 go run -mod=vendor main.go \
-    --config "$CONFIG_PATH"
+    --config "$CONFIG_PATH" \
+    --alsologtostderr="$PAIREC_ALSO_LOG_TO_STDERR"

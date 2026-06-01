@@ -313,6 +313,10 @@ def main() -> int:
     print_metric_table("PaiRec recommend stages", recommend_metrics)
     print_metric_table("GenerativeRecall stages", recall_metrics)
     print_metric_table("TRT service stages", trt_metrics)
+    if not recommend_traces or not recall_traces:
+        print("\nWARN: PaiRec structured trace lines were not found.")
+        print("  Restart PaiRec with scripts/start_pairec.sh and capture stderr:")
+        print("  CONFIG_PATH=./configs/pairec_config.kafka.json bash scripts/start_pairec.sh 2>&1 | tee /tmp/pairec.log")
 
     grouped: Dict[str, List[str]] = {}
     for request_id in request_ids:
