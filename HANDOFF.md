@@ -33,6 +33,8 @@
 - 启动脚本固定使用 `go run -mod=vendor`，不再依赖在线下载
 - 首次 vendor 提交遗漏 128 个文件：`.gitignore` 的通用 `lib/` 规则误伤 vendor 内 ClickHouse、Apache Thrift 和 PostgreSQL 驱动目录
 - 已增加 `!vendor/**` 例外并补齐文件；从 Git 索引导出临时副本后，以 `GOPROXY=off`、空 `GOMODCACHE` 和空 `GOCACHE` 编译通过，模块缓存文件数为 0
+- PaiRec 启动曾 panic：`recall empty, name:generative_recall`。根因是手工注册自定义 recall 时未同步写入框架配置签名，框架二次加载时错误进入内置工厂
+- 已在 vendored recall 包增加 `RegisterRecallWithConfig()` 并让 `main.go` 使用；本地短暂启动已输出 `server start`，原 panic 消失
 
 ### 6/1 探索：推理命中率优化
 

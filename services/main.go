@@ -18,7 +18,7 @@ import (
 
 func main() {
 	fmt.Println("========PAIREC STARING===============")
-	
+
 	// 设置配置路径（环境变量或默认）
 	configPath := os.Getenv("CONFIG_PATH")
 	if configPath == "" {
@@ -41,11 +41,11 @@ func main() {
 		if conf.RecallType == "GenerativeRecall" {
 			fmt.Printf("Registering GenerativeRecall: %s\n", conf.Name)
 			instance := myrecall.NewGenerativeRecall(conf)
-			recall.RegisterRecall(conf.Name, instance)
+			recall.RegisterRecallWithConfig(conf, instance)
 			fmt.Printf("[DEBUG] Registered recall: name=%s, instance=%p\n", conf.Name, instance)
 		}
 	}
-	
+
 	// 验证注册是否成功
 	fmt.Println("[DEBUG] All recalls registered, starting pairec...")
 

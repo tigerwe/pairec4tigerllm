@@ -22,6 +22,11 @@ var recallSigns = make(map[string]string)
 func RegisterRecall(name string, recall Recall) {
 	recalls[name] = recall
 }
+func RegisterRecallWithConfig(config recconf.RecallConfig, recall Recall) {
+	RegisterRecall(config.Name, recall)
+	sign, _ := json.Marshal(&config)
+	recallSigns[config.Name] = utils.Md5(string(sign))
+}
 func GetRecall(name string) (Recall, error) {
 	recall, ok := recalls[name]
 	if !ok {
@@ -88,9 +93,7 @@ func Load(config *recconf.RecommendConfig) {
 			panic(fmt.Sprintf("recall empty, name:%s", conf.Name))
 		}
 
-		RegisterRecall(conf.Name, recall)
-		sign, _ := json.Marshal(&conf)
-		recallSigns[conf.Name] = utils.Md5(string(sign))
+		RegisterRecallWithConfig(conf, recall)
 
 	}
 
