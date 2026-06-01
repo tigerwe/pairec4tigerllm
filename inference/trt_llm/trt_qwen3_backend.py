@@ -138,8 +138,8 @@ class TRTQwen3Backend:
             input_id_list = [encoded["input_ids"][0]]
 
             # 引擎总长限制: max_input_len + max_new_tokens ≤ engine_max_seq_len
-            # 当前引擎 max_seq_len=96, max_input_len=64
-            engine_max_seq_len = self.max_input_len + 32
+            # 当前引擎 max_seq_len=96, max_input_len=64, 留1 token余量防边界阻塞
+            engine_max_seq_len = self.max_input_len + 31  # = 95
             if prompt_len + max_new_tokens > engine_max_seq_len:
                 max_new_tokens = max(8, engine_max_seq_len - prompt_len)
                 print(f"[TRT generate] batch={b}, prompt_len={prompt_len}, "
