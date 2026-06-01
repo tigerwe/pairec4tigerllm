@@ -2,72 +2,70 @@
 
 > 供 Agent 跨 session 恢复上下文。只记录关键决策和当前任务。
 
-## 最近一次交接 (2026-05-30)
+## 最近一次交接 (2026-06-01)
 
 ### 当前任务
-TensorRT-LLM C++ 层 KV cache offload/onboard 已跑通并收口。任务切换到推荐链路工程化。
+推荐链路工程化 — PaiRec 对接中。推理服务命中率优化已做完，待验证 PaiRec 端到端。
 
-下一阶段优先级:
-1. **F08 接通 PaiRec**
-2. **F12 推荐系统各阶段时延分析**
-3. **F13 K8s 部署**
-4. **F14 引入 brpc**
+### 6/1 探索：推理命中率优化
 
-### 本 session 解决的问题和关键结论
+**背景**: PaiRec 调用推理服务 → 绝大多数用户返回 `code:299 "items size not enough"`。
 
-1. **Scheduler 真实切到 MAX_UTILIZATION**
-   - `inference/trt_llm/trt_qwen3_backend.py` 现在构造 `SchedulerConfig(MAX_UTILIZATION)` 并传给 `ModelRunnerCpp.from_dir()`。
-   - 前提: 远程 TensorRT-LLM 的 `tensorrt_llm/runtime/model_runner_cpp.py` 也需要支持 `scheduler_config` 参数并写入 `ExecutorConfig`。
-2. **KV block reuse 不再被禁用**
-   - 远程 TensorRT-LLM C++ 层已绕过 `paged_context_fmha` 对 `enableBlockReuse` 的强约束。
-   - 目标日志: 不再出现 `KV cache reuse disabled`，出现 `KV cache block reuse is enabled`。
-3. **DataSystem primary/TMP 连接修正**
-   - 必须导出 `DATASYSTEM_HOST=127.0.0.1`、`DATASYSTEM_PORT=31501`，否则 TMP 可能默认走 `127.0.0.2`。
-4. **C++ offload 写侧已验证**
-   - 2048 tokens 配置下: `primaryBlocks=64 secondaryBlocks=28`。
-   - 120+32 请求压测出现 `copyBlock entered=3735`、`OffLoad copy=2520`、`Create/Set Key=2520/2520`、`error=0`。
-5. **C++ onboard 读侧已验证**
-   - 1024 tokens 配置下: `primaryBlocks=32 secondaryBlocks=28`。
-   - 180+64 串行压测出现 `copyBlock entered=6067`、`OffLoad copy=4116`、`Create/Set Key=4116/4116`、`Get/OnBoard Key=1/1`、`error=0`。
-   - 这证明 TensorRT-LLM C++ 写入 DataSystem 与从 DataSystem 回读 onboard 均已真实触发。
-6. **`CacheTransceiver is disabled` 不是这条链路的 blocker**
-   - 当前 fork 的证据来自 `KVCacheTransferManager::copyBlock()` 内 DataSystem `Create/Set/Get` 日志。
-7. **旧定位修正**
-   - GCC/cuBLAS 兼容性不是主因，早期方向已废弃。
-   - FMHA crash、reuse 被禁、scheduler 未生效、pool 压力不够，这几条是真 blocker。
+**根因链**:
+```
+20条历史(117 tokens) > max_input_len=64 → 截断到9条
+→ max_new_tokens=128 > 引擎预留32 → C++卡死不报错
+→ 即使生成成功, 每轮20 tokens太短, layer 3永远为0
+→ 有效四元组=0 → PaiRec拿不到item → 299
+```
 
-### 本 session 关键提交
+**已修复的5个瓶颈**:
 
-| 提交 | 内容 |
-|------|------|
-| `b34db88` | Python TRT backend 传入 scheduler config、block reuse 和 KV token 上限 |
-| `e6d7c65` | 新增 C++ KV offload/onboard 压测脚本 |
-| `156c600` | 压测脚本改为默认串行并加 fail-fast |
-| `5561f5b` | 严格区分 DataSystem onboard 与 HBM reuse |
-| `219a71f` | 暴露 `--trt_max_kv_tokens` / `TRT_MAX_KV_TOKENS` |
-| `d795947` | 记录 C++ onboard 证据并增强脚本日志输出 |
-| `75e1214` | 更新后续任务: PaiRec、时延分析、K8s、brpc |
+| 提交 | 问题 | 修复 |
+|------|------|------|
+| `f7beeb4` | input超64 | prompt自动截断到最近9条 |
+| `fb1cb98` | 语义token被非语义token隔开 | 先过滤再匹配 |
+| `326e1bb` | 层序乱(2,1,0,3)→连续模式miss | 按层收集+笛卡尔积组合 |
+| `5533a16` + `1544a3f` | token太少+合并池 | 8轮×32=256 token统一组合 |
+| `b44dbc6` | layer 3=0(短历史用户) | 补{0}由map验证 |
 
-### 关键新增/修改文件
+### 引擎硬限制 (重要！)
 
-| 文件 | 用途 |
-|------|------|
-| `inference/trt_llm/trt_qwen3_backend.py` | 传 `SchedulerConfig(MAX_UTILIZATION)`、`max_tokens_in_paged_kv_cache`、`kv_cache_enable_block_reuse=True` |
-| `inference/trt_llm/server.py` | 新增 `--trt_max_kv_tokens` / `TRT_MAX_KV_TOKENS` 和 `--trt_scheduler_policy` |
-| `scripts/test_trt_cpp_kv_offload.py` | C++ KV offload/onboard 压测和日志判定 |
-| `feature_list.json` | 更新 F08/F12/F13/F14 |
-| `progress.md` | 记录 C++ offload/onboard 闭环证据 |
+```
+引擎: max_seq_len=96, max_input_len=64, max_new_tokens=32
+
+⚠️ max_new_tokens>32 → C++层buffer分配失败卡死不报错!
+   Python except捕获不到, 必须代码层硬限制≤32
+
+⚠️ prompt_len + max_new_tokens == 96 → C++层边界卡死!
+   必须控制在≤95
+```
+
+### 当前推理流程
+
+```
+输入: history[20条] → 截断到[9条] → tokenize → prompt_len=62
+生成: 8轮 × max_new=32 → 256 token池
+解析: 按层收集 → 笛卡尔积组合 → layer缺失补{0} → semantic_id_map验证
+输出: 去重后的有效item列表
+```
+
+### 关键修改文件
+
+| 文件 | 改动内容 |
+|------|---------|
+| `inference/trt_llm/trt_qwen3_backend.py` | prompt自动截断、max_new双限制、多轮token合并池、组合模式、layer填充 |
+| `inference/trt_llm/server.py` | max_new_tokens≤32、500异常traceback、防御性shape检查 |
 
 ### 远程验证命令
 
-启动服务时建议显式设置:
-
 ```bash
-export DATASYSTEM_HOST=127.0.0.1
-export DATASYSTEM_PORT=31501
-export TLLM_LOG_LEVEL=DEBUG
-export TRT_MAX_KV_TOKENS=1024
+cd /home/workspace/zcx/pairectest/pairec4tigerllm
+git pull gitcode dev
 
+export DATASYSTEM_HOST=127.0.0.1 DATASYSTEM_PORT=31501 TRT_MAX_KV_TOKENS=1024
+
+pkill -f "inference.trt_llm.server" || true
 python -m inference.trt_llm.server \
   --model_path ./checkpoints/decoder_qwen3/decoder_epoch_20.pt \
   --qwen3_model_path ./models/Qwen3-0.6B \
@@ -77,36 +75,26 @@ python -m inference.trt_llm.server \
   2>&1 | tee /tmp/server_v4.log
 ```
 
-压测验证:
+直接打推理服务验证:
 
 ```bash
-python scripts/test_trt_cpp_kv_offload.py \
-  --log /tmp/server_v4.log \
-  --request 180 \
-  --repeat-requests 64 \
-  --warmup-requests 0 \
-  --history-len 8 \
-  --concurrency 1 \
-  --strict-onboard
+# 长历史 (9条截断)
+curl -X POST http://localhost:18000/recommend \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"test_9","history":[[92,230,20,0],[129,73,21,0],[28,174,20,0],[174,241,21,0],[72,249,20,0],[66,221,20,0],[184,144,21,0],[224,97,22,0],[67,194,24,0],[223,106,22,0]],"topk":10}'
+
+# 短历史 (1条)
+curl -X POST http://localhost:18000/recommend \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"test_1","history":[[92,230,20,0]],"topk":10}'
 ```
 
-预期核心证据:
+期望看到 `[TRT parse] merged 8 rounds, layer_counts=[?,?,?,?]` 日志。
 
-```text
-latest scheduler policy: MAX_UTILIZATION
-block reuse enabled seen: True
-reuse disabled warning seen: False
-new OffLoad copy: >0
-new Create/Set Key: >0/>0
-new Get/OnBoard Key: >0/>0
-new error-like lines: 0
-```
-
-### 运行时环境变量
+### 运行时环境
 
 ```bash
 source /opt/openEuler/gcc-toolset-14/enable
-
 export LD_PRELOAD="\
 /workspace/pairec4tigerllm/scripts/block_ds_consumer.so:\
 /workspace/pairec4tigerllm/scripts/stub_gpu.so:\
@@ -115,8 +103,7 @@ export LD_PRELOAD="\
 
 ### 下一步
 
-1. 接通 PaiRec (F08): 确认 PaiRec 侧配置/代码路径，指向当前 TRT `/recommend` 服务，跑通端到端请求。
-2. 推荐系统各阶段时延分析 (F12): 定义 trace 字段，拆 PaiRec、HTTP/Python、TRT generate、DataSystem/KV、item 映射耗时。
-3. K8s 部署 (F13): 梳理镜像、GPU 资源、LD_PRELOAD、DataSystem 地址、模型/engine 挂载和探针。
-4. 引入 brpc (F14): 在 F12 确认 HTTP/Flask 通信开销后，再决定 brpc server/client 边界。
-5. 低优先级: 修复 ConsumerLoop SIGSEGV，恢复 DataSystem 异步通信线程。
+1. 验证推理服务命中率是否满足 PaiRec size=10 的要求
+2. 若短历史用户仍不足 → 重建引擎放大 max_seq_len
+3. 继续 F08 接通 PaiRec
+4. F12 时延分析
