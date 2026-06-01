@@ -103,11 +103,14 @@ F12 推荐系统各阶段时延分析 — 第一版埋点和端到端压测脚�
 - percentile 使用线性插值，2 个样本的 p50 为中位数
 - PaiRec 的结构化日志使用 `glog`；启动脚本默认传入 `--alsologtostderr=true`，保留文件日志并确保 `tee /tmp/pairec.log` 能捕获 trace
 
-远程首次冷请求初步结果：
-- fallback 用户 `13`、`218` 均为 TRT `miss`
-- Python TRT 平均 `740.2ms`
-- `runner_generate_ms` 平均 `680.0ms`，约占 TRT 内部 `92%`
-- 首个客户端请求额外慢约 `2.7s`，同一时刻首次加载 `999447` 用户 fallback JSON；待 PaiRec `history_ms` 直接确认
+远程冷请求分解已确认：
+- fallback 用户 `142`、`211` 均为 TRT `miss`
+- 首个 fallback 请求：PaiRec `3392ms`，其中 `history_ms=2573ms`；对应首次加载 `999447` 用户 fallback JSON
+- 后续稳态冷请求：PaiRec `687ms`，其中 TRT 服务 `685.3ms`，PaiRec 额外开销约 `2ms`
+- 两次 TRT 平均 `750.0ms`
+- `runner_generate_ms` 平均 `686.2ms`，约占 TRT 内部 `91.5%`
+- `output_pad_ms` 平均 `27.3ms`，`prompt_ms` 平均 `10.7ms`
+- 下一步：启动阶段预加载 fallback JSON，并使用更多新用户采集稳态 `miss` p50/p95/p99；随后补 `hbm_hit` 和 `ds_hit`
 
 本机验证：
 

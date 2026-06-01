@@ -106,7 +106,14 @@ PaiRec 启动时会再次执行 `recall.Load()`。此前 `main.go` 手工注册 
 - 修正小样本 percentile 插值：2 个样本的 p50 使用中位数，不再错误取最小值
 - 修复 PaiRec trace 采集：`glog` 默认写独立文件，`scripts/start_pairec.sh` 现在默认传入 `--alsologtostderr=true`，保留文件日志并可由 `tee /tmp/pairec.log` 捕获结构化日志
 
-远程首次冷请求初步数据：2 个 fallback 用户均为 TRT `miss`，Python TRT 平均 `740.2ms`，其中 8 轮 `runner_generate` 平均 `680.0ms`，占比约 `92%`。首个客户端请求额外慢约 `2.7s`，结合首次输出 `Loaded fallback: 999447 users`，疑似 fallback JSON 懒加载；待 PaiRec `history_ms` 复验。
+远程冷请求分解已确认：
+
+- fallback 用户 `142`、`211` 均为 TRT `miss`
+- 首个 fallback 请求：PaiRec `3392ms`，其中 `history_ms=2573ms`；对应首次加载 `999447` 用户 fallback JSON
+- 后续稳态冷请求：PaiRec `687ms`，其中 TRT 服务 `685.3ms`，PaiRec 额外开销约 `2ms`
+- 两次 TRT 平均 `750.0ms`，其中 8 轮 `runner_generate` 平均 `686.2ms`，占比约 `91.5%`
+- TRT 次要耗时：`output_pad_ms` 平均 `27.3ms`、`prompt_ms` 平均 `10.7ms`
+- 结论：fallback JSON 应在启动阶段预加载，避免首请求抖动；稳态冷请求的首要优化目标是 8 轮 TRT runner
 
 本机验证：
 
@@ -123,7 +130,7 @@ python -c '<trace parser assertions>'
 
 ## 下一步
 
-1. 远程拉取 F12 埋点并重启 TRT 服务和 PaiRec
-2. 运行 `scripts/benchmark_e2e_latency.py`，采集端到端 p50/p95/p99
-3. 分别统计 `miss`、`hbm_hit`、`ds_hit`，确认主要瓶颈占比
-4. 根据报告决定是否优先优化 8 轮 runner、prompt tokenize 或结果缓存路径
+1. 保持 PaiRec 进程运行，使用更多未请求用户采集稳态 `miss` p50/p95/p99
+2. 重复请求相同用户采集 `hbm_hit`，重启 TRT 后采集 `ds_hit`
+3. 将 fallback JSON 加载移动到 PaiRec 启动阶段，消除首请求约 `2.6s` 抖动
+4. 对比减少采样轮数后的命中率和延迟，优先优化占比约 `91.5%` 的 TRT runner

@@ -119,7 +119,8 @@
       "description": "拆解 PaiRec → Python/TRT 服务 → DataSystem/KV cache → 模型生成 → item 映射各阶段耗时, 输出 trace 和瓶颈分析",
       "files": ["inference/trt_llm/server.py", "scripts/test_trt_cpp_kv_offload.py"],
       "validation_method": "一次端到端请求输出分阶段 trace, 压测报告包含 p50/p95/p99 和阶段占比",
-      "next_step": "第一版 trace 与 scripts/benchmark_e2e_latency.py 已落地；远程重启 TRT 和 PaiRec 后采集 miss / hbm_hit / ds_hit 的 p50/p95/p99，输出瓶颈占比"
+      "validation_evidence": "2026-06-01: fallback 用户 142、211 的 TRT miss trace 完整输出。首个 fallback 请求 PaiRec=3392ms，其中 history_ms=2573ms，对应首次加载 999447 用户 JSON；后续稳态冷请求 PaiRec=687ms、TRT=685.3ms。两次 TRT 平均 750.0ms，其中 8 轮 runner_generate 平均 686.2ms，占约 91.5%",
+      "next_step": "保持 PaiRec 进程运行，用更多新用户采集稳态 miss p50/p95/p99；重复相同用户采集 hbm_hit，重启 TRT 后采集 ds_hit；将 fallback JSON 移到启动阶段预加载"
     },
     {
       "id": "F13",
