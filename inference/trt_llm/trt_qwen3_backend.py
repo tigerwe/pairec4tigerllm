@@ -136,8 +136,18 @@ class TRTQwen3Backend:
                       f"(prompt_len={prompt_len}, max_input_len={self.max_input_len})")
 
             input_id_list = [encoded["input_ids"][0]]
-            print(f"[TRT generate] batch={b}, prompt_len={prompt_len}, "
-                  f"max_new_tokens={max_new_tokens}, num_samples={num_samples}")
+
+            # 引擎总长限制: max_input_len + max_new_tokens ≤ engine_max_seq_len
+            # 当前引擎 max_seq_len=96, max_input_len=64
+            engine_max_seq_len = self.max_input_len + 32
+            if prompt_len + max_new_tokens > engine_max_seq_len:
+                max_new_tokens = max(8, engine_max_seq_len - prompt_len)
+                print(f"[TRT generate] batch={b}, prompt_len={prompt_len}, "
+                      f"max_new_tokens capped to {max_new_tokens} "
+                      f"(engine_max_seq_len={engine_max_seq_len})")
+            else:
+                print(f"[TRT generate] batch={b}, prompt_len={prompt_len}, "
+                      f"max_new_tokens={max_new_tokens}, num_samples={num_samples}")
 
             # ── 多轮采样: 合并所有轮次 token 到统一池子再做组合 ──
             from tensorrt_llm.bindings.executor import SamplingConfig
