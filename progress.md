@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-01 | 当前状态: F08 PaiRec 对接完成，F12 时延分解埋点已落地 | 下一步: 远程压测 miss / hbm_hit / ds_hit 的 p50/p95/p99
+> 最后更新: 2026-06-01 | 当前状态: 端到端基线阶段性完成，F12 进入 C++ DataSystem A/B 专项 | 下一步: 在专用分支隔离 Python 缓存并构建 DRAM / DataSystem runtime 对照组
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/1** | **端到端阶段性收口: `dev` 固化为可回退基线；后续从专用分支开展 TRT-LLM C++ DataSystem 与原生 pinned DRAM 的端到端 A/B** |
 | **6/1** | **开始 F12 推荐系统时延分析: 补齐 PaiRec 入口、GenerativeRecall、Python TRT 服务和 TRT runner 分阶段 trace；新增端到端压测汇总脚本** |
 | **6/1** | **F08 PaiRec 对接完成: 远程复验 Kafka 实时特征用户 `130`、`2184` 均单次触发 TRT 推理并返回完整映射结果** |
 | **6/1** | **修复 PaiRec 自定义 recall 启动 panic: 外部注册同步写入配置签名，框架二次加载时正确跳过内置工厂** |
@@ -27,7 +28,7 @@
 - **C++ KV offload/onboard**: ✅ 闭环验证通过
 - **推理服务**: ✅ /recommend 可用
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
-- **时延分析**: 🔄 第一版 trace 埋点和压测脚本已完成，待远程 L40S 采样
+- **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；🔄 待补 C++ DataSystem / pinned DRAM A/B
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 
@@ -130,7 +131,11 @@ python -c '<trace parser assertions>'
 
 ## 下一步
 
-1. 保持 PaiRec 进程运行，使用更多未请求用户采集稳态 `miss` p50/p95/p99
-2. 重复请求相同用户采集 `hbm_hit`，重启 TRT 后采集 `ds_hit`
-3. 将 fallback JSON 加载移动到 PaiRec 启动阶段，消除首请求约 `2.6s` 抖动
-4. 对比减少采样轮数后的命中率和延迟，优先优化占比约 `91.5%` 的 TRT runner
+`dev` 已作为端到端阶段性基线保留。后续在专用分支开展 C++ DataSystem A/B：
+
+1. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
+2. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
+3. 基于同一份 engine 构建两套 runtime：原生 pinned DRAM baseline 与 DataSystem 版本
+4. 在 C++ 层增加 offload / onboard、DataSystem `Create/Set/Get` 和 D2H/H2D 耗时日志
+5. 从 PaiRec `:18080` 入口执行 `preload + warmup + pressure + replay` A/B，分别汇总 pressure 和 replay 的 p50/p95/p99
+6. 后续独立优化 fallback JSON 启动预加载，以及占 TRT 内部约 `91.5%` 的 8 轮 runner

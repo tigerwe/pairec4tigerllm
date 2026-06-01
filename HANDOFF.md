@@ -5,7 +5,39 @@
 ## 最近一次交接 (2026-06-01)
 
 ### 当前任务
-F12 推荐系统各阶段时延分析 — 第一版埋点和端到端压测脚本已完成，待远程 L40S 采集 p50/p95/p99。
+F12 推荐系统各阶段时延分析 — `dev` 已固化为端到端阶段性基线。下一阶段在专用分支开展 TRT-LLM C++ DataSystem 与原生 pinned DRAM runtime 的端到端 A/B。
+
+### 6/1 阶段性收口
+
+当前端到端链路已经阶段性完善：
+
+```text
+PaiRec :18080
+  → GenerativeRecall
+  → Python TRT 服务 :18000
+  → TensorRT-LLM ModelRunnerCpp
+  → semantic_id 映射
+  → generative_recall items
+```
+
+已验证：
+- PaiRec API 可返回 `code=200` 和完整推荐结果
+- Kafka 实时特征用户单次触发一次 TRT 推理，不再因 500ms 超时重复请求
+- PaiRec、GenerativeRecall、Python TRT 服务和 TRT runner 的第一版结构化 trace 可通过 `request_id` 关联
+- 冷请求分解已确认：稳态 PaiRec 约 `687ms`，TRT 约 `685.3ms`，8 轮 `runner_generate` 占 TRT 内部约 `91.5%`
+
+尚未完成：
+- Python 结果缓存会掩盖 TRT-LLM C++ KV 路径，需要实验开关彻底绕过
+- TensorRT-LLM C++ DataSystem 与原生 pinned DRAM runtime 尚未做严格 A/B
+- C++ 层缺少 `Create/Set/Get`、D2H/H2D、offload/onboard 的结构化耗时
+
+下一阶段原则：
+- 不重建 `rank0.engine`，两组加载同一 engine
+- 主对比为原生 pinned DRAM baseline 与 DataSystem runtime
+- 两组使用同一 TRT-LLM 源码基线、相同 FMHA 兼容修复、相同 KV block 配置和请求序列
+- 从 PaiRec `:18080` 执行 `preload + warmup + pressure + replay`，pressure 和 replay 分开统计
+
+外部 TensorRT-LLM 源码树 `/home/vivwimp/TensorRT-LLM` 当前存在历史未提交修改。后续应先使用独立 worktree 或容器副本构建两套 runtime，不要覆盖现有跑通环境。
 
 ### 6/1 PaiRec 端到端验证
 
