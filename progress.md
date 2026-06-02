@@ -273,11 +273,41 @@ python scripts/test_trt_cpp_kv_offload.py \
   --json-output /tmp/cppkv-datasystem-onboard-10k.json
 ```
 
+### 远程 DataSystem 第四轮实测：onboard 10k+
+
+onboard 专项 replay 已完成，达到最低 p9999 尾部观测门槛：
+
+```text
+replay/onboard wave HTTP:
+  count=10000 p50=694ms p95=727ms p99=749ms p9999=832ms max=1552ms
+
+all measured phases:
+offload count=166089
+  create_ms p50=0.665 p99=0.990 p9999=1.637 max=10.910
+  d2h_ms    p50=0.483 p99=0.675 p9999=0.836 max=1.150
+  set_ms    p50=0.756 p99=1.084 p9999=1.816 max=11.055
+  total_ms  p50=1.937 p99=2.582 p9999=11.877 max=12.513
+onboard count=14208
+  get_ms    p50=0.740 p99=1.037 p9999=1.570 max=10.801
+  h2d_ms    p50=0.407 p99=0.599 p9999=0.804 max=1.021
+  total_ms  p50=1.177 p99=1.546 p9999=2.121 max=11.272
+```
+
+结论：
+
+- onboard 已有 `14208` 个样本，可观察 p9999；若需要稳定的正式 p9999
+  结论，仍建议扩大到 `>=100000`
+- onboard 极端 max `11.272ms` 主要来自 `Get max=10.801ms`，不是 H2D；
+  `h2d_ms max=1.021ms`
+- replay 请求 E2E p50 为 `694ms`，单 block onboard p50 为 `1.177ms`；
+  DataSystem 单块读回不是当前推荐请求的主耗时，主耗时仍在 8 轮 TRT runner
+- offload 已有 `166089` 个样本，写路径 p9999 具备更好的统计支撑
+
 ## 下一步
 
 `dev` 已作为端到端阶段性基线保留。后续在专用分支开展 C++ DataSystem A/B：
 
-1. 采集至少 `10000` 个 onboard 样本；如需正式 p9999 结论，再扩大到 `>=100000`
+1. 如需稳定的正式 onboard p9999 结论，再扩大到 `>=100000` 个 onboard 样本
 2. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
 3. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
 4. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
