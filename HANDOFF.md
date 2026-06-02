@@ -206,6 +206,19 @@ python scripts/test_trt_cpp_kv_offload.py \
 比较各轮数的 HTTP p50/p99 和 `full_topk` 比例。脚本默认使用带时间戳的唯一
 `user_id` 前缀，可避免重复运行命中 Python 结果缓存。默认轮数暂不修改。
 
+首轮减轮数远程结果已回传。根据请求 p50 接近预测值，推断为 `TRT_NUM_SAMPLES=4`；
+仍需通过 `/health` 的 `trt_num_samples` 或服务 TRACE 的 `runner_calls=4` 确认：
+
+```text
+pressure requests=60 concurrency=1
+HTTP: avg=360ms p50=354ms p95=375ms p99=430ms max=495ms
+items: full_topk=60/60 min=5 p50=5 p95=5 max=5
+DataSystem offload blocks=508 total p50=2.079ms p99=3.041ms max=3.413ms
+```
+
+相对 8 轮请求约 `698ms` 基线，4 轮请求 p50 约下降 `49%`。该轮样本只用于轮数
+A/B，其 p9999 不作为正式尾延迟结论。
+
 批量提交多个相同 prompt 是后续可实验方向，但当前 `ModelRunnerCpp.generate()`
 对整批默认共用 sampling config，现有逻辑依赖每轮不同 seed；需要先验证候选
 多样性再替换串行循环。

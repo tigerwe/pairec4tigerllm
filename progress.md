@@ -1,6 +1,6 @@
 # 工作进度
 
-> 最后更新: 2026-06-02 | 当前状态: F12 DataSystem onboard 已采集 14208 个样本，runner 串行 8 轮为当前主耗时 | 下一步: 执行 TRT_NUM_SAMPLES=1/2/4/8 质量-时延 A/B
+> 最后更新: 2026-06-02 | 当前状态: runner 4 轮初测推断 p50=354ms、full_topk=60/60，待 runner_calls 确认 | 下一步: 核验 4 轮配置并执行 TRT_NUM_SAMPLES=2/1/8 质量-时延 A/B
 
 ## 时间线
 
@@ -334,6 +334,20 @@ single runner.generate avg≈84.4ms
 2 rounds: runner≈169ms, request≈192ms  待实测
 1 round:  runner≈ 84ms, request≈107ms  待实测
 ```
+
+首轮减轮数远程结果已回传。根据请求 p50 接近预测值，推断为 `TRT_NUM_SAMPLES=4`；
+仍需通过 `/health` 的 `trt_num_samples` 或服务 TRACE 的 `runner_calls=4` 确认：
+
+```text
+pressure requests=60 concurrency=1
+HTTP: avg=360ms p50=354ms p95=375ms p99=430ms max=495ms
+items: full_topk=60/60 min=5 p50=5 p95=5 max=5
+DataSystem offload blocks=508 total p50=2.079ms p99=3.041ms max=3.413ms
+```
+
+相对 8 轮请求约 `698ms` 基线，4 轮请求 p50 约下降 `49%`，并且这 60 个请求
+没有出现 top-k 返回不足。该轮只有 `60` 个 HTTP 请求和 `508` 个 offload block，
+只能用于轮数 A/B；其 p9999 不作为正式尾延迟结论。
 
 远程按 `TRT_NUM_SAMPLES=1/2/4/8` 分别重启服务，再执行相同直连请求序列：
 
