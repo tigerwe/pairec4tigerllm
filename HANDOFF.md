@@ -108,7 +108,40 @@ onboard count=177
 
 replay/onboard wave 单独贡献 `174` 次 onboard。C++ DataSystem `Create/D2H/Set`
 和 `Get/H2D` 两条路径的结构化耗时均已采集。读路径只有 `177` 个样本，p9999
-接近 max，仅作观察；下一步转入 runtime A/B，不再继续调 replay 脚本。
+接近 max，仅作观察。
+
+### 6/2 Host/device 指标边界与 onboard 专项扩样
+
+已确认 DataSystem trace 中所有指标均由 host `steady_clock` 采集：
+
+```text
+create_ms/set_ms/get_ms  host 侧 DataSystem API wall-clock
+d2h_ms/h2d_ms            host 计时的同步 cudaMemcpy 完成耗时
+total_ms                 host 侧完整 offload/onboard wall-clock
+```
+
+底层 `BufferManager::offLoadCopy/onBoardCopy` 调用
+`cudaMemcpySanitized`，最终执行同步 `cudaMemcpy`。因此 `d2h_ms/h2d_ms` 包含
+CPU↔GPU 传输完成等待，但不是 CUDA event 计出的纯 device 时间；当前没有采集
+GPU kernel 或 device-only 指标。
+
+`scripts/test_trt_cpp_kv_offload.py` 已增加：
+
+- `--min-onboard-samples`：结构化 onboard trace 未达到目标时返回失败
+- 报告逐字段输出 metric scope
+- p9999 样本提示：`10000` 是最低尾部观测门槛，稳定结论建议 `>=100000`
+
+下一轮先采集 `>=10000` 个 onboard：
+
+```text
+python scripts/test_trt_cpp_kv_offload.py \
+  --log /tmp/server_v4.log \
+  --warmup-requests 0 \
+  --requests 360 --repeat-requests 10000 \
+  --replay-source-count 4 --replay-tail-offset 1 \
+  --min-onboard-samples 10000 \
+  --json-output /tmp/cppkv-datasystem-onboard-10k.json
+```
 
 ### 6/1 阶段性收口
 

@@ -10,6 +10,8 @@ Typical use:
   python scripts/test_trt_cpp_kv_offload.py --requests 160 --concurrency 1
   python scripts/test_trt_cpp_kv_offload.py --requests 360 --repeat-requests 128 \
       --replay-source-count 4 --replay-tail-offset 1 --strict-onboard
+  python scripts/test_trt_cpp_kv_offload.py --requests 360 --repeat-requests 10000 \
+      --replay-source-count 4 --replay-tail-offset 1 --min-onboard-samples 10000
 """
 
 from __future__ import annotations
@@ -70,6 +72,23 @@ DATASYSTEM_METRIC_FIELDS = {
     "onboard": ["get_ms", "h2d_ms", "total_ms"],
 }
 
+DATASYSTEM_METRIC_SCOPE = {
+    "offload": {
+        "create_ms": "host DataSystem Create API wall-clock",
+        "d2h_ms": "host-timed blocking GPU->CPU transfer wall-clock",
+        "set_ms": "host DataSystem Set API wall-clock",
+        "total_ms": "host offload end-to-end wall-clock",
+    },
+    "onboard": {
+        "get_ms": "host DataSystem Get API wall-clock",
+        "h2d_ms": "host-timed blocking CPU->GPU transfer wall-clock",
+        "total_ms": "host onboard end-to-end wall-clock",
+    },
+}
+
+P9999_MIN_SAMPLE_COUNT = 10000
+P9999_RECOMMENDED_SAMPLE_COUNT = 100000
+
 
 @dataclass
 class RequestResult:
@@ -111,6 +130,8 @@ def parse_args() -> argparse.Namespace:
                         help="abort a phase after this many HTTP failures; 0 disables fail-fast")
     parser.add_argument("--strict-onboard", action="store_true",
                         help="return non-zero if Get/OnBoard events are not observed")
+    parser.add_argument("--min-onboard-samples", type=int, default=0,
+                        help="require at least this many structured onboard traces")
     parser.add_argument("--no-fail-on-missing-log", action="store_true",
                         help="only fail on HTTP errors when the log file is absent")
     parser.add_argument("--json-output", default="",
@@ -230,6 +251,14 @@ def print_latency_summary(name: str, values: Dict[str, float], indent: str = "  
 
 def print_datasystem_latency_report(phase_logs: Dict[str, str]) -> Dict[str, Any]:
     report: Dict[str, Any] = {}
+    print("\n== DataSystem metric scope ==")
+    print("  Clock source: host std::chrono::steady_clock")
+    print("  d2h_ms/h2d_ms: host wall-clock around blocking cudaMemcpySanitized/cudaMemcpy")
+    print("  Device-only CUDA event or kernel time: not collected")
+    for op in ("offload", "onboard"):
+        print(f"  {op}:")
+        for name, scope in DATASYSTEM_METRIC_SCOPE[op].items():
+            print(f"    {name:<10} {scope}")
     print("\n== DataSystem C++ latency by phase ==")
     all_phases = {**phase_logs, "all measured phases": "".join(phase_logs.values())}
     for phase, log_text in all_phases.items():
@@ -241,6 +270,20 @@ def print_datasystem_latency_report(phase_logs: Dict[str, str]) -> Dict[str, Any
             print(f"    {op}: count={op_metrics['count']}")
             for name, values in op_metrics["metrics"].items():
                 print_latency_summary(name, values, indent="      ")
+    overall = report["all measured phases"]
+    print("\n== Percentile sample guidance ==")
+    for op in ("offload", "onboard"):
+        count = overall[op]["count"]
+        if count < P9999_MIN_SAMPLE_COUNT:
+            readiness = "insufficient"
+        elif count < P9999_RECOMMENDED_SAMPLE_COUNT:
+            readiness = "minimum tail observation only"
+        else:
+            readiness = "better supported"
+        print(
+            f"  {op}: count={count}, p9999={readiness}; "
+            f"minimum={P9999_MIN_SAMPLE_COUNT}, recommended>={P9999_RECOMMENDED_SAMPLE_COUNT}"
+        )
     return report
 
 
@@ -428,7 +471,12 @@ def print_summary(phase: str, results: List[RequestResult], elapsed_s: float) ->
             print(f"    failed[{item.index}]: {format_result(item)}")
 
 
-def print_log_report(before: Dict[str, int], after: Dict[str, int], log_text: str) -> int:
+def print_log_report(
+    before: Dict[str, int],
+    after: Dict[str, int],
+    log_text: str,
+    min_onboard_samples: int = 0,
+) -> int:
     delta = {name: after.get(name, 0) - before.get(name, 0) for name in after}
     run_log = latest_run_segment(log_text)
     run_counts = count_events(run_log)
@@ -495,6 +543,13 @@ def print_log_report(before: Dict[str, int], after: Dict[str, int], log_text: st
         return 3
 
     onboard_seen = delta["get_key"] > 0 or delta["onboard_copy"] > 0 or structured_onboard_seen
+    structured_onboard_count = delta["datasystem_onboard_trace"]
+    if structured_onboard_count < min_onboard_samples:
+        print(
+            f"\nFAIL: structured onboard samples {structured_onboard_count} "
+            f"< --min-onboard-samples={min_onboard_samples}."
+        )
+        return 5
     if not onboard_seen:
         print("\nWARN: C++ KV offload was observed, but DataSystem onboard was not proven.")
         print("Observed HBM reuse/copy lines do not prove kvClient Get/onBoardCopy.")
@@ -516,12 +571,16 @@ def main() -> int:
     if args.replay_tail_offset < 0:
         print("FAIL: --replay-tail-offset must be >= 0")
         return 2
+    if args.min_onboard_samples < 0:
+        print("FAIL: --min-onboard-samples must be >= 0")
+        return 2
 
     print("TRT-LLM C++ KV offload/onboard stress test")
     print(f"  url={args.url}")
     print(f"  log={args.log}")
     print(f"  requests={args.requests} repeat_requests={args.repeat_requests}")
     print(f"  replay_source_count={args.replay_source_count} replay_tail_offset={args.replay_tail_offset}")
+    print(f"  min_onboard_samples={args.min_onboard_samples}")
     print(f"  history_len={args.history_len} concurrency={args.concurrency} topk={args.topk}")
 
     try:
@@ -605,7 +664,7 @@ def main() -> int:
 
     after_counts = count_events(after_log)
     datasystem_report = print_datasystem_latency_report(phase_logs)
-    verdict = print_log_report(before_counts, after_counts, after_log)
+    verdict = print_log_report(before_counts, after_counts, after_log, args.min_onboard_samples)
     if args.json_output:
         report = {
             "config": vars(args),
@@ -615,6 +674,7 @@ def main() -> int:
                 for phase, results in phase_results.items()
             },
             "datasystem_metrics": datasystem_report,
+            "datasystem_metric_scope": DATASYSTEM_METRIC_SCOPE,
             "event_delta": {
                 name: after_counts.get(name, 0) - before_counts.get(name, 0)
                 for name in after_counts

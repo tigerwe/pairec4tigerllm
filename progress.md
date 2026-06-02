@@ -1,11 +1,13 @@
 # 工作进度
 
-> 最后更新: 2026-06-02 | 当前状态: F12 C++ DataSystem Set 时延已完成远程采集，Get 链路已打通但样本不足 | 下一步: 增加 DataSystem onboard/Get 样本，再采集 PaiRec E2E 指标
+> 最后更新: 2026-06-02 | 当前状态: F12 C++ DataSystem Set/Get 已完成阶段性采集，继续扩大 onboard 样本并区分 host/device 指标 | 下一步: 采集至少 10000 个 onboard 样本，再决定是否扩大到 100000 个样本
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/2** | **DataSystem onboard 专项扩样准备: 报告明确区分 host DataSystem API、host 计时同步 D2H/H2D 和总 wall-clock；新增 `--min-onboard-samples` 门槛** |
+| **6/2** | **远程 replay 修正验证通过: offload 8237 次，onboard 177 次；Get p50=0.725ms、p99=1.709ms，Get+H2D p50=1.258ms、p99=2.291ms** |
 | **6/2** | **远程应用 C++ trace patch 并完成首轮 DataSystem 实测: offload 4181 次，Set p99=1.093ms；onboard/Get 已观测到 1 次，需继续增加读样本** |
 | **6/2** | **F12 C++ DataSystem 时延观测补齐: 新增 Create/D2H/Set、Get/H2D 结构化 trace patch；C++ 压测和 PaiRec E2E 汇总新增 p99/p9999/max** |
 | **6/1** | **端到端阶段性收口: `dev` 固化为可回退基线；后续从专用分支开展 TRT-LLM C++ DataSystem 与原生 pinned DRAM 的端到端 A/B** |
@@ -30,7 +32,7 @@
 - **C++ KV offload/onboard**: ✅ 闭环验证通过
 - **推理服务**: ✅ /recommend 可用
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
-- **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set 首轮统计已完成；🔄 待增加 Get 样本和补充 pinned DRAM A/B
+- **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set/Get 阶段性统计已完成；🔄 待扩大 onboard 样本和补充 pinned DRAM A/B
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 
@@ -232,12 +234,52 @@ onboard count=177
 稳定进入 DataSystem `Get + H2D` 读路径。`Get` 的 p50/p95/p99 已具备阶段性参考
 价值；读路径只有 `177` 个样本，p9999 仍接近 max，仅作为观察值。
 
+### Host/device 指标边界与 onboard 专项扩样
+
+已展开 TensorRT-LLM runtime 实现：
+
+```text
+create_ms  host steady_clock 包围 DataSystem Create API
+set_ms     host steady_clock 包围 DataSystem Set API
+get_ms     host steady_clock 包围 DataSystem Get API
+d2h_ms     host steady_clock 包围同步 cudaMemcpySanitized/cudaMemcpy DeviceToHost
+h2d_ms     host steady_clock 包围同步 cudaMemcpySanitized/cudaMemcpy HostToDevice
+total_ms   host steady_clock 包围完整 offload/onboard 流程
+```
+
+因此：
+
+- `create_ms/set_ms/get_ms` 是 host 侧 DataSystem API wall-clock
+- `d2h_ms/h2d_ms` 是 host 观察到的同步 CPU↔GPU 传输完成耗时，包含 PCIe/DMA
+  等待，但不是 CUDA event 计出的纯 device 时间
+- 当前没有采集 GPU kernel 或 CUDA-event device-only 指标
+
+`scripts/test_trt_cpp_kv_offload.py` 已增加：
+
+- `--min-onboard-samples`：结构化 onboard trace 少于目标数量时返回失败
+- 报告开头逐项打印 metric scope
+- 报告结尾提示 p9999 样本门槛：`10000` 是最低尾部观测门槛，稳定结论建议
+  `>=100000`
+
+远程下一轮先采集 `>=10000` 个 onboard 样本：
+
+```text
+python scripts/test_trt_cpp_kv_offload.py \
+  --log /tmp/server_v4.log \
+  --warmup-requests 0 \
+  --requests 360 --repeat-requests 10000 \
+  --replay-source-count 4 --replay-tail-offset 1 \
+  --min-onboard-samples 10000 \
+  --json-output /tmp/cppkv-datasystem-onboard-10k.json
+```
+
 ## 下一步
 
 `dev` 已作为端到端阶段性基线保留。后续在专用分支开展 C++ DataSystem A/B：
 
-1. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
-2. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
-3. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
-4. 从 PaiRec `:18080` 入口执行 `preload + warmup + pressure + replay` A/B，分别汇总 pressure 和 replay 的 p50/p95/p99/p9999/max
-5. 后续独立优化 fallback JSON 启动预加载，以及占 TRT 内部约 `91.5%` 的 8 轮 runner
+1. 采集至少 `10000` 个 onboard 样本；如需正式 p9999 结论，再扩大到 `>=100000`
+2. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
+3. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
+4. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
+5. 从 PaiRec `:18080` 入口执行 `preload + warmup + pressure + replay` A/B，分别汇总 pressure 和 replay 的 p50/p95/p99/p9999/max
+6. 后续独立优化 fallback JSON 启动预加载，以及占 TRT 内部约 `91.5%` 的 8 轮 runner

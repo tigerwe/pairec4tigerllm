@@ -9,7 +9,7 @@ diff --git a/cpp/tensorrt_llm/batch_manager/kvCacheTransferManager.cpp b/cpp/ten
  #include <cstdint>
  
  #include "tensorrt_llm/batch_manager/kvCacheTransferManager.h"
-@@ -47,6 +48,11 @@ namespace tk = tensorrt_llm::kernels;
+@@ -47,6 +48,15 @@ namespace tk = tensorrt_llm::kernels;
  namespace tensorrt_llm::batch_manager::kv_cache_manager
  {
  
@@ -18,10 +18,14 @@ diff --git a/cpp/tensorrt_llm/batch_manager/kvCacheTransferManager.cpp b/cpp/ten
 +    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 +}
 +
++// All emitted metrics are host wall-clock durations. d2h_ms/h2d_ms wrap
++// BufferManager calls that use blocking cudaMemcpySanitized/cudaMemcpy; they
++// include transfer completion wait but are not CUDA-event device-only timings.
++
  static bool gpuToFilePosix(tr::ITensor::SharedPtr const& srcPtr, std::string const& filename)
  {
      int fd = ::open(filename.c_str(), O_CREAT | O_WRONLY, 0664);
-@@ -160,20 +166,28 @@ void KVCacheTransferManager::copyBlock(BlockPtr const& src, BlockPtr const& dst,
+@@ -160,20 +170,28 @@ void KVCacheTransferManager::copyBlock(BlockPtr const& src, BlockPtr const& dst,
              // If no partial tokens or if the dataType is not supported for partial copy, copy entire block.
              if (isOffload) {
                  /* 先create再set */
@@ -53,7 +57,7 @@ diff --git a/cpp/tensorrt_llm/batch_manager/kvCacheTransferManager.cpp b/cpp/ten
                  buffer->UnWLatch();
                  if (setRet.IsError()) {
                      TLLM_LOG_ERROR("[TensorRT-LLM][Datasystem] Set KvCache failed, detail : %s", setRet.ToString().c_str());
-@@ -180,6 +194,9 @@ void KVCacheTransferManager::copyBlock(BlockPtr const& src, BlockPtr const& dst,
+@@ -180,6 +198,9 @@ void KVCacheTransferManager::copyBlock(BlockPtr const& src, BlockPtr const& dst,
                      return;
                  }
 -                TLLM_LOG_DEBUG("[TensorRT-LLM][Datasystem] Set Key = %s success.", std::to_string(BlockKeyHasher::hash(src->getBlockKey())).c_str());
@@ -64,7 +68,7 @@ diff --git a/cpp/tensorrt_llm/batch_manager/kvCacheTransferManager.cpp b/cpp/ten
              } else {
                  /* 如果在HBM中，则直接使用，不需要查datasystem */
                  if (src->isPrimary()) {
-@@ -187,24 +204,27 @@ void KVCacheTransferManager::copyBlock(BlockPtr const& src, BlockPtr const& dst,
+@@ -187,24 +208,27 @@ void KVCacheTransferManager::copyBlock(BlockPtr const& src, BlockPtr const& dst,
                      mOnboardManager.copy(*srcPtr, *dstPtr);
                  } else {
                      /* 如果不在HBM中，前面已经判断了datasystem中有数据，直接get完成后通过cuda接口加载到HBM中 */
