@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-02 | 当前状态: F12 C++ DataSystem Get/Set 耗时 patch 和尾延迟统计已就绪 | 下一步: 在隔离 TRT-LLM 源码副本应用 patch，构建 DataSystem runtime 并远程采集 pressure / replay 指标
+> 最后更新: 2026-06-02 | 当前状态: F12 C++ DataSystem Set 时延已完成远程采集，Get 链路已打通但样本不足 | 下一步: 增加 DataSystem onboard/Get 样本，再采集 PaiRec E2E 指标
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/2** | **远程应用 C++ trace patch 并完成首轮 DataSystem 实测: offload 4181 次，Set p99=1.093ms；onboard/Get 已观测到 1 次，需继续增加读样本** |
 | **6/2** | **F12 C++ DataSystem 时延观测补齐: 新增 Create/D2H/Set、Get/H2D 结构化 trace patch；C++ 压测和 PaiRec E2E 汇总新增 p99/p9999/max** |
 | **6/1** | **端到端阶段性收口: `dev` 固化为可回退基线；后续从专用分支开展 TRT-LLM C++ DataSystem 与原生 pinned DRAM 的端到端 A/B** |
 | **6/1** | **开始 F12 推荐系统时延分析: 补齐 PaiRec 入口、GenerativeRecall、Python TRT 服务和 TRT runner 分阶段 trace；新增端到端压测汇总脚本** |
@@ -29,7 +30,7 @@
 - **C++ KV offload/onboard**: ✅ 闭环验证通过
 - **推理服务**: ✅ /recommend 可用
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
-- **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Get/Set trace patch 已就绪；🔄 待远程构建和 pinned DRAM A/B
+- **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set 首轮统计已完成；🔄 待增加 Get 样本和补充 pinned DRAM A/B
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 
@@ -163,13 +164,36 @@ PY
 # datasystem trace parser OK
 ```
 
+### 远程 DataSystem 首轮实测
+
+DataSystem runtime 已应用 trace patch 并完成首轮 pressure / replay：
+
+```text
+KV pool: primaryBlocks=32 secondaryBlocks=28
+offload count=4181
+  create_ms p50=0.680 p99=1.025 max=2.171
+  d2h_ms    p50=0.413 p99=0.691 max=0.732
+  set_ms    p50=0.759 p99=1.093 max=1.381
+  total_ms  p50=1.937 p99=2.553 max=4.006
+onboard count=1
+  get_ms=1.562 h2d_ms=0.345 total_ms=1.961
+```
+
+结论：
+
+- DataSystem C++ offload 写路径稳定，单个 3.5 MiB block 的 `Create + D2H + Set`
+  总耗时 p50 约 `1.94ms`，p99 约 `2.55ms`
+- onboard/Get 已出现 1 次，证明读路径打通；样本不足，暂不能评价 Get 分位数
+- 原压测 verdict 依赖 DEBUG 级 `KV cache block reuse is enabled`、`copyBlock entered`
+  和 `Set Key` 日志，在 INFO 级日志下会误报失败；脚本已改为优先使用结构化 trace 判定
+
 ## 下一步
 
 `dev` 已作为端到端阶段性基线保留。后续在专用分支开展 C++ DataSystem A/B：
 
-1. 在隔离 TensorRT-LLM 源码副本应用 `trtllm-datasystem-latency-trace.patch`，构建 DataSystem runtime
+1. 增加 replay/onboard 命中，采集足量 DataSystem `Get/H2D` 样本
 2. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
 3. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
-4. 基于同一份 engine 构建两套 runtime：原生 pinned DRAM baseline 与 DataSystem 版本
+4. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
 5. 从 PaiRec `:18080` 入口执行 `preload + warmup + pressure + replay` A/B，分别汇总 pressure 和 replay 的 p50/p95/p99/p9999/max
 6. 后续独立优化 fallback JSON 启动预加载，以及占 TRT 内部约 `91.5%` 的 8 轮 runner

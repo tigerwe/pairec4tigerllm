@@ -40,6 +40,8 @@ EVENT_PATTERNS: Dict[str, str] = {
     "set_key": r"Set Key",
     "get_key": r"Get Key",
     "datasystem_trace": r"\[Datasystem\]\[TRACE\]",
+    "datasystem_offload_trace": r"\[Datasystem\]\[TRACE\]\s+op=offload\b",
+    "datasystem_onboard_trace": r"\[Datasystem\]\[TRACE\]\s+op=onboard\b",
     "hbm_kv": r"Kvcache in HBM",
     "matched_full": r"Matched full block",
     "partial_reuse": r"Reused partially|Copied partially",
@@ -442,12 +444,13 @@ def print_log_report(before: Dict[str, int], after: Dict[str, int], log_text: st
     print(f"  new Create/Set Key:            {delta['create_key']}/{delta['set_key']}")
     print(f"  new Get/OnBoard Key:           {delta['get_key']}/{delta['onboard_copy']}")
     print(f"  new DataSystem trace lines:    {delta['datasystem_trace']}")
+    print(f"  new trace offload/onboard:     {delta['datasystem_offload_trace']}/{delta['datasystem_onboard_trace']}")
     print(f"  new HBM reuse lines:           {delta['hbm_kv']}")
     print(f"  new matched/reused lines:      {delta['matched_full'] + delta['partial_reuse']}")
     print(f"  new error-like lines:          {delta['errors']}")
 
     print("\n== Recent DataSystem onboard lines ==")
-    onboard_lines = latest_pattern_lines(run_log, r"Get Key|Get KvCache|OnBoard copy")
+    onboard_lines = latest_pattern_lines(run_log, r"Get Key|Get KvCache|OnBoard copy|\[Datasystem\]\[TRACE\]\s+op=onboard")
     if onboard_lines:
         for line in onboard_lines:
             print(f"  {line}")
@@ -468,16 +471,20 @@ def print_log_report(before: Dict[str, int], after: Dict[str, int], log_text: st
     if latest_scheduler != "MAX_UTILIZATION":
         print("\nFAIL: MAX_UTILIZATION scheduler was not confirmed in the log.")
         return 2
-    if run_counts["reuse_enabled"] == 0:
+    structured_offload_seen = delta["datasystem_offload_trace"] > 0
+    structured_onboard_seen = delta["datasystem_onboard_trace"] > 0
+    if run_counts["reuse_enabled"] == 0 and not structured_offload_seen:
         print("\nFAIL: KV cache block reuse was not confirmed in the log.")
         return 2
-    if delta["copy_block"] == 0 or (delta["offload_copy"] == 0 and delta["set_key"] == 0):
+    if run_counts["reuse_enabled"] == 0:
+        print("\nINFO: DEBUG reuse-enabled log is absent; structured offload trace proves the transfer path ran.")
+    if delta["copy_block"] == 0 and delta["offload_copy"] == 0 and delta["set_key"] == 0 and not structured_offload_seen:
         print("\nFAIL: pressure wave did not trigger C++ offload.")
         print("Hint: retry with --requests 180 --history-len 10 --concurrency 1, "
               "or lower max_tokens_in_paged_kv_cache.")
         return 3
 
-    onboard_seen = delta["get_key"] > 0 or delta["onboard_copy"] > 0
+    onboard_seen = delta["get_key"] > 0 or delta["onboard_copy"] > 0 or structured_onboard_seen
     if not onboard_seen:
         print("\nWARN: C++ KV offload was observed, but DataSystem onboard was not proven.")
         print("Observed HBM reuse/copy lines do not prove kvClient Get/onBoardCopy.")

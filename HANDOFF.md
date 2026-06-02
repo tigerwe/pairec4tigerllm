@@ -35,6 +35,29 @@ python -m py_compile scripts/benchmark_e2e_latency.py scripts/test_trt_cpp_kv_of
 下一步必须在隔离 TRT-LLM 源码副本应用 patch、构建 runtime，再到远程 L40S
 采集真实 `Set/Get` 与 E2E 指标。小样本 `p9999` 仅供观察，不应作为正式结论。
 
+### 6/2 DataSystem runtime 首轮实测
+
+远程已应用 C++ trace patch 并完成首轮采集：
+
+```text
+primaryBlocks=32 secondaryBlocks=28
+offload count=4181
+  create_ms p50=0.680 p99=1.025 max=2.171
+  d2h_ms    p50=0.413 p99=0.691 max=0.732
+  set_ms    p50=0.759 p99=1.093 max=1.381
+  total_ms  p50=1.937 p99=2.553 max=4.006
+onboard count=1
+  get_ms=1.562 h2d_ms=0.345 total_ms=1.961
+```
+
+首轮结论：
+
+- `Set` 路径样本充足，DataSystem C++ offload 写路径稳定
+- `Get` 路径已打通，但只有 1 个样本，必须增加 onboard 命中后再评价读延迟
+- 当前服务输出 INFO 日志，旧版验证脚本依赖的 DEBUG 日志不可见，因此会误报
+  `KV cache block reuse was not confirmed`；脚本已改为优先使用
+  `[Datasystem][TRACE] op=offload/onboard` 判定
+
 ### 6/1 阶段性收口
 
 当前端到端链路已经阶段性完善：
