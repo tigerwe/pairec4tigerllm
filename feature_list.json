@@ -118,9 +118,9 @@
       "status": "pending",
       "description": "拆解 PaiRec → Python/TRT 服务 → DataSystem/KV cache → 模型生成 → item 映射各阶段耗时, 输出 trace 和瓶颈分析",
       "files": ["inference/trt_llm/server.py", "scripts/test_trt_cpp_kv_offload.py"],
-      "validation_method": "一次端到端请求输出分阶段 trace, 压测报告包含 p50/p95/p99 和阶段占比",
-      "validation_evidence": "2026-06-01: fallback 用户 142、211 的 TRT miss trace 完整输出。首个 fallback 请求 PaiRec=3392ms，其中 history_ms=2573ms，对应首次加载 999447 用户 JSON；后续稳态冷请求 PaiRec=687ms、TRT=685.3ms。两次 TRT 平均 750.0ms，其中 8 轮 runner_generate 平均 686.2ms，占约 91.5%",
-      "next_step": "dev 已固化为端到端阶段性基线。后续在专用分支完成 TRT_RESULT_CACHE_ENABLED=0 和 TRT_PYTHON_KV_CACHE_ENABLED=0；基于同一 engine 构建原生 pinned DRAM 与 DataSystem 两套 C++ runtime；补齐 C++ offload/onboard、Create/Set/Get、D2H/H2D 耗时；从 PaiRec :18080 执行 preload + warmup + pressure + replay A/B 并分别汇总 pressure/replay p50/p95/p99"
+      "validation_method": "一次端到端请求输出分阶段 trace, 压测报告包含 p50/p95/p99/p9999/max 和阶段占比",
+      "validation_evidence": "2026-06-01: fallback 用户 142、211 的 TRT miss trace 完整输出。首个 fallback 请求 PaiRec=3392ms，其中 history_ms=2573ms，对应首次加载 999447 用户 JSON；后续稳态冷请求 PaiRec=687ms、TRT=685.3ms。两次 TRT 平均 750.0ms，其中 8 轮 runner_generate 平均 686.2ms，占约 91.5%。2026-06-02: 新增 TRT-LLM C++ DataSystem Create/D2H/Set、Get/H2D 结构化 trace patch；C++ 压测和 PaiRec E2E 统计新增 p99/p9999/max；本机 git apply --check、py_compile 和 synthetic parser assertions 通过",
+      "next_step": "在隔离 TRT-LLM 源码副本应用 trtllm-datasystem-latency-trace.patch 并构建 DataSystem runtime；完成 TRT_RESULT_CACHE_ENABLED=0 和 TRT_PYTHON_KV_CACHE_ENABLED=0；基于同一 engine 构建原生 pinned DRAM 与 DataSystem 两套 C++ runtime；从 PaiRec :18080 执行 preload + warmup + pressure + replay A/B 并分别汇总 pressure/replay p50/p95/p99/p9999/max"
     },
     {
       "id": "F13",

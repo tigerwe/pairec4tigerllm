@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import math
 import os
 import re
 import statistics
@@ -22,8 +23,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Tuple
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 EVENT_PATTERNS: Dict[str, str] = {
@@ -38,6 +39,7 @@ EVENT_PATTERNS: Dict[str, str] = {
     "create_key": r"Create Key",
     "set_key": r"Set Key",
     "get_key": r"Get Key",
+    "datasystem_trace": r"\[Datasystem\]\[TRACE\]",
     "hbm_kv": r"Kvcache in HBM",
     "matched_full": r"Matched full block",
     "partial_reuse": r"Reused partially|Copied partially",
@@ -46,6 +48,7 @@ EVENT_PATTERNS: Dict[str, str] = {
 
 TAIL_EVENT_RE = re.compile(
     r"copyBlock entered|OffLoad copy|OnBoard copy|Create Key|Set Key|Get Key|"
+    r"\[Datasystem\]\[TRACE\]|"
     r"Kvcache in HBM|Matched full block|Reused partially|Copied partially|"
     r"KV cache block reuse is enabled|Capacity Scheduler Policy|"
     r"KV cache reuse disabled|ERROR|Traceback|SIGSEGV",
@@ -57,6 +60,11 @@ RUN_MARKERS = (
     "[TensorRT-LLM] TensorRT LLM version",
     "Starting TensorRT LLM init",
 )
+
+DATASYSTEM_METRIC_FIELDS = {
+    "offload": ["create_ms", "d2h_ms", "set_ms", "total_ms"],
+    "onboard": ["get_ms", "h2d_ms", "total_ms"],
+}
 
 
 @dataclass
@@ -97,6 +105,8 @@ def parse_args() -> argparse.Namespace:
                         help="return non-zero if Get/OnBoard events are not observed")
     parser.add_argument("--no-fail-on-missing-log", action="store_true",
                         help="only fail on HTTP errors when the log file is absent")
+    parser.add_argument("--json-output", default="",
+                        help="optional path for the machine-readable latency report")
     return parser.parse_args()
 
 
@@ -131,6 +141,99 @@ def latest_run_segment(log_text: str) -> str:
     if start < 0:
         return log_text
     return log_text[start:]
+
+
+def appended_log(previous: str, current: str) -> str:
+    if current.startswith(previous):
+        return current[len(previous):]
+    return current
+
+
+def parse_key_values(line: str) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    for part in line.replace("\t", " ").split():
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        values[key] = value.rstrip(".,")
+    return values
+
+
+def percentile(values: List[float], quantile: float) -> float:
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * quantile
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return ordered[lower]
+    weight = rank - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def summarize(values: Iterable[float]) -> Optional[Dict[str, float]]:
+    numbers = list(values)
+    if not numbers:
+        return None
+    return {
+        "count": len(numbers),
+        "avg": statistics.mean(numbers),
+        "p50": percentile(numbers, 0.50),
+        "p95": percentile(numbers, 0.95),
+        "p99": percentile(numbers, 0.99),
+        "p9999": percentile(numbers, 0.9999),
+        "max": max(numbers),
+    }
+
+
+def datasystem_latency_metrics(log_text: str) -> Dict[str, Any]:
+    events = [
+        parse_key_values(line)
+        for line in log_text.splitlines()
+        if "[Datasystem][TRACE]" in line
+    ]
+    output: Dict[str, Any] = {}
+    for op, metric_fields in DATASYSTEM_METRIC_FIELDS.items():
+        op_events = [event for event in events if event.get("op") == op]
+        metrics: Dict[str, Dict[str, float]] = {}
+        for field in metric_fields:
+            values: List[float] = []
+            for event in op_events:
+                try:
+                    values.append(float(event[field]))
+                except (KeyError, ValueError):
+                    pass
+            summary = summarize(values)
+            if summary:
+                metrics[field] = summary
+        output[op] = {"count": len(op_events), "metrics": metrics}
+    return output
+
+
+def print_latency_summary(name: str, values: Dict[str, float], indent: str = "  ") -> None:
+    print(
+        f"{indent}{name:<14} count={int(values['count']):>5} "
+        f"avg={values['avg']:>9.3f}ms p50={values['p50']:>9.3f}ms "
+        f"p95={values['p95']:>9.3f}ms p99={values['p99']:>9.3f}ms "
+        f"p9999={values['p9999']:>9.3f}ms max={values['max']:>9.3f}ms"
+    )
+
+
+def print_datasystem_latency_report(phase_logs: Dict[str, str]) -> Dict[str, Any]:
+    report: Dict[str, Any] = {}
+    print("\n== DataSystem C++ latency by phase ==")
+    all_phases = {**phase_logs, "all measured phases": "".join(phase_logs.values())}
+    for phase, log_text in all_phases.items():
+        metrics = datasystem_latency_metrics(log_text)
+        report[phase] = metrics
+        print(f"\n  [{phase}]")
+        for op in ("offload", "onboard"):
+            op_metrics = metrics[op]
+            print(f"    {op}: count={op_metrics['count']}")
+            for name, values in op_metrics["metrics"].items():
+                print_latency_summary(name, values, indent="      ")
+    return report
 
 
 def post_json(url: str, payload: Dict[str, Any], timeout: float) -> Tuple[int, Dict[str, Any]]:
@@ -297,12 +400,14 @@ def print_summary(phase: str, results: List[RequestResult], elapsed_s: float) ->
     failed = [item for item in results if not item.ok]
     latencies = [item.latency_ms for item in ok]
     if latencies:
-        p50 = statistics.median(latencies)
-        p95 = sorted(latencies)[max(0, int(len(latencies) * 0.95) - 1)]
-        avg = statistics.mean(latencies)
+        summary = summarize(latencies)
+        assert summary is not None
         print(
             f"  {phase} summary: ok={len(ok)} fail={len(failed)} "
-            f"avg={avg:.0f}ms p50={p50:.0f}ms p95={p95:.0f}ms elapsed={elapsed_s:.1f}s"
+            f"avg={summary['avg']:.0f}ms p50={summary['p50']:.0f}ms "
+            f"p95={summary['p95']:.0f}ms p99={summary['p99']:.0f}ms "
+            f"p9999={summary['p9999']:.0f}ms max={summary['max']:.0f}ms "
+            f"elapsed={elapsed_s:.1f}s"
         )
     else:
         print(f"  {phase} summary: ok=0 fail={len(failed)} elapsed={elapsed_s:.1f}s")
@@ -336,6 +441,7 @@ def print_log_report(before: Dict[str, int], after: Dict[str, int], log_text: st
     print(f"  new OffLoad copy:              {delta['offload_copy']}")
     print(f"  new Create/Set Key:            {delta['create_key']}/{delta['set_key']}")
     print(f"  new Get/OnBoard Key:           {delta['get_key']}/{delta['onboard_copy']}")
+    print(f"  new DataSystem trace lines:    {delta['datasystem_trace']}")
     print(f"  new HBM reuse lines:           {delta['hbm_kv']}")
     print(f"  new matched/reused lines:      {delta['matched_full'] + delta['partial_reuse']}")
     print(f"  new error-like lines:          {delta['errors']}")
@@ -431,12 +537,25 @@ def main() -> int:
     ]
 
     all_results: List[RequestResult] = []
+    phase_results: Dict[str, List[RequestResult]] = {}
+    phase_logs: Dict[str, str] = {}
+    previous_log = before_log
+
+    def run_traced_phase(phase: str, jobs: Iterable[Tuple[str, List[List[int]]]]) -> None:
+        nonlocal previous_log
+        results = run_phase(phase, jobs, args)
+        phase_results[phase] = results
+        all_results.extend(results)
+        current_log = read_log(args.log)
+        phase_logs[phase] = appended_log(previous_log, current_log)
+        previous_log = current_log
+
     if warmup_jobs:
-        all_results.extend(run_phase("same-prefix warmup wave", warmup_jobs, args))
+        run_traced_phase("same-prefix warmup wave", warmup_jobs)
         time.sleep(0.5)
-    all_results.extend(run_phase("pressure wave", pressure_jobs, args))
+    run_traced_phase("pressure wave", pressure_jobs)
     time.sleep(0.5)
-    all_results.extend(run_phase("replay/onboard wave", replay_jobs, args))
+    run_traced_phase("replay/onboard wave", replay_jobs)
 
     failed = [item for item in all_results if not item.ok]
     if failed:
@@ -452,7 +571,26 @@ def main() -> int:
         return 2
 
     after_counts = count_events(after_log)
+    datasystem_report = print_datasystem_latency_report(phase_logs)
     verdict = print_log_report(before_counts, after_counts, after_log)
+    if args.json_output:
+        report = {
+            "config": vars(args),
+            "results": [asdict(item) for item in all_results],
+            "phase_http_metrics": {
+                phase: summarize(item.latency_ms for item in results if item.ok)
+                for phase, results in phase_results.items()
+            },
+            "datasystem_metrics": datasystem_report,
+            "event_delta": {
+                name: after_counts.get(name, 0) - before_counts.get(name, 0)
+                for name in after_counts
+            },
+            "verdict": verdict,
+        }
+        with open(args.json_output, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, ensure_ascii=False, indent=2)
+        print(f"\nWrote report: {args.json_output}")
     if verdict == 4 and not args.strict_onboard:
         return 0
     return verdict

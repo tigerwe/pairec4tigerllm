@@ -229,6 +229,7 @@ def summarize(values: Iterable[float]) -> Optional[Dict[str, float]]:
         "p50": percentile(numbers, 0.50),
         "p95": percentile(numbers, 0.95),
         "p99": percentile(numbers, 0.99),
+        "p9999": percentile(numbers, 0.9999),
         "max": max(numbers),
     }
 
@@ -260,12 +261,13 @@ def print_metric_table(title: str, metrics: Dict[str, Dict[str, float]]) -> None
     if not metrics:
         print("  (no correlated trace lines)")
         return
-    print("  metric                              count      avg      p50      p95      p99      max")
+    print("  metric                              count      avg      p50      p95      p99    p9999      max")
     for name, values in metrics.items():
         print(
             f"  {name:<35} {int(values['count']):>5} "
             f"{values['avg']:>8.1f} {values['p50']:>8.1f} "
-            f"{values['p95']:>8.1f} {values['p99']:>8.1f} {values['max']:>8.1f}"
+            f"{values['p95']:>8.1f} {values['p99']:>8.1f} "
+            f"{values['p9999']:>8.1f} {values['max']:>8.1f}"
         )
 
 
@@ -331,7 +333,10 @@ def main() -> int:
         print(
             f"  {source:<12} count={len(ids):>4} "
             f"total_p50={total.get('p50', 0):>8.1f}ms "
-            f"total_p95={total.get('p95', 0):>8.1f}ms"
+            f"total_p95={total.get('p95', 0):>8.1f}ms "
+            f"total_p99={total.get('p99', 0):>8.1f}ms "
+            f"total_p9999={total.get('p9999', 0):>8.1f}ms "
+            f"total_max={total.get('max', 0):>8.1f}ms"
         )
 
     report = {

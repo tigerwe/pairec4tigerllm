@@ -2,10 +2,38 @@
 
 > 供 Agent 跨 session 恢复上下文。只记录关键决策和当前任务。
 
-## 最近一次交接 (2026-06-01)
+## 最近一次交接 (2026-06-02)
 
 ### 当前任务
 F12 推荐系统各阶段时延分析 — `dev` 已固化为端到端阶段性基线。下一阶段在专用分支开展 TRT-LLM C++ DataSystem 与原生 pinned DRAM runtime 的端到端 A/B。
+
+### 6/2 C++ DataSystem 时延观测补充
+
+已新增 `trtllm-datasystem-latency-trace.patch`，不直接修改存在历史未提交变更的
+`/home/vivwimp/TensorRT-LLM` 源码树。patch 为
+`kvCacheTransferManager.cpp` 增加两类结构化日志：
+
+```text
+op=offload create_ms=... d2h_ms=... set_ms=... total_ms=...
+op=onboard get_ms=... h2d_ms=... total_ms=...
+```
+
+`scripts/test_trt_cpp_kv_offload.py` 已按 warmup / pressure / replay / overall 汇总
+DataSystem C++ trace，输出 `avg/p50/p95/p99/p9999/max` 并支持 `--json-output`。
+`scripts/benchmark_e2e_latency.py` 的 PaiRec E2E 与各阶段统计也已补 `p9999`；
+缓存分组补齐 `p99/p9999/max`。
+
+本机已通过：
+
+```text
+git -C /home/vivwimp/TensorRT-LLM apply --check \
+  /home/vivwimp/pairec4tigerllm/trtllm-datasystem-latency-trace.patch
+python -m py_compile scripts/benchmark_e2e_latency.py scripts/test_trt_cpp_kv_offload.py
+# synthetic DataSystem TRACE parser assertions: OK
+```
+
+下一步必须在隔离 TRT-LLM 源码副本应用 patch、构建 runtime，再到远程 L40S
+采集真实 `Set/Get` 与 E2E 指标。小样本 `p9999` 仅供观察，不应作为正式结论。
 
 ### 6/1 阶段性收口
 

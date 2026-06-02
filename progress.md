@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-01 | 当前状态: 端到端基线阶段性完成，F12 进入 C++ DataSystem A/B 专项 | 下一步: 在专用分支隔离 Python 缓存并构建 DRAM / DataSystem runtime 对照组
+> 最后更新: 2026-06-02 | 当前状态: F12 C++ DataSystem Get/Set 耗时 patch 和尾延迟统计已就绪 | 下一步: 在隔离 TRT-LLM 源码副本应用 patch，构建 DataSystem runtime 并远程采集 pressure / replay 指标
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/2** | **F12 C++ DataSystem 时延观测补齐: 新增 Create/D2H/Set、Get/H2D 结构化 trace patch；C++ 压测和 PaiRec E2E 汇总新增 p99/p9999/max** |
 | **6/1** | **端到端阶段性收口: `dev` 固化为可回退基线；后续从专用分支开展 TRT-LLM C++ DataSystem 与原生 pinned DRAM 的端到端 A/B** |
 | **6/1** | **开始 F12 推荐系统时延分析: 补齐 PaiRec 入口、GenerativeRecall、Python TRT 服务和 TRT runner 分阶段 trace；新增端到端压测汇总脚本** |
 | **6/1** | **F08 PaiRec 对接完成: 远程复验 Kafka 实时特征用户 `130`、`2184` 均单次触发 TRT 推理并返回完整映射结果** |
@@ -28,7 +29,7 @@
 - **C++ KV offload/onboard**: ✅ 闭环验证通过
 - **推理服务**: ✅ /recommend 可用
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
-- **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；🔄 待补 C++ DataSystem / pinned DRAM A/B
+- **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Get/Set trace patch 已就绪；🔄 待远程构建和 pinned DRAM A/B
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 
@@ -103,7 +104,7 @@ PaiRec 启动时会再次执行 `recall.Load()`。此前 `main.go` 手工注册 
 - GenerativeRecall：`history_ms`、`convert_ms`、`http_ms`、`items_ms`、`http_overhead_ms`
 - Python TRT 服务：`prepare_input_ms`、`kv_lookup_ms`、结果缓存查询和异步写入提交耗时
 - TRT 后端：`prompt_ms`、8 轮累计 `runner_generate_ms`、`parse_combo_ms`、`output_pad_ms`
-- 新增 `scripts/benchmark_e2e_latency.py`：从 PaiRec 入口发请求，用 `request_id` 关联 PaiRec 和 TRT 日志，汇总 p50/p95/p99，并按 `miss` / `hbm_hit` / `ds_hit` 分组
+- 新增 `scripts/benchmark_e2e_latency.py`：从 PaiRec 入口发请求，用 `request_id` 关联 PaiRec 和 TRT 日志，汇总 p50/p95/p99/p9999/max，并按 `miss` / `hbm_hit` / `ds_hit` 分组
 - 修正小样本 percentile 插值：2 个样本的 p50 使用中位数，不再错误取最小值
 - 修复 PaiRec trace 采集：`glog` 默认写独立文件，`scripts/start_pairec.sh` 现在默认传入 `--alsologtostderr=true`，保留文件日志并可由 `tee /tmp/pairec.log` 捕获结构化日志
 
@@ -129,13 +130,46 @@ python -c '<trace parser assertions>'
 # trace parser OK
 ```
 
+## 6/2 F12：C++ DataSystem Get/Set 时延与尾延迟指标
+
+已新增 `trtllm-datasystem-latency-trace.patch`，针对外部 TensorRT-LLM
+`cpp/tensorrt_llm/batch_manager/kvCacheTransferManager.cpp` 增加结构化日志：
+
+```text
+[TensorRT-LLM][Datasystem][TRACE] op=offload ... create_ms=... d2h_ms=... set_ms=... total_ms=...
+[TensorRT-LLM][Datasystem][TRACE] op=onboard ... get_ms=... h2d_ms=... total_ms=...
+```
+
+统计脚本同步增强：
+
+- `scripts/test_trt_cpp_kv_offload.py`：按 warmup / pressure / replay / overall 汇总 DataSystem C++ 指标，HTTP 和 C++ 指标均输出 `avg/p50/p95/p99/p9999/max`，支持 `--json-output`
+- `scripts/benchmark_e2e_latency.py`：PaiRec E2E、各阶段和 TRT 推荐结果缓存分组新增 `p9999`，缓存分组补齐 `p99/p9999/max`
+- `p9999` 使用线性插值；样本量不足时仅作方向性观察，正式结论需扩大请求量
+
+本机验证：
+
+```text
+git -C /home/vivwimp/TensorRT-LLM apply --check \
+  /home/vivwimp/pairec4tigerllm/trtllm-datasystem-latency-trace.patch
+# exit 0
+
+python -m py_compile \
+  scripts/benchmark_e2e_latency.py scripts/test_trt_cpp_kv_offload.py
+# exit 0
+
+python - <<'PY'
+# synthetic percentile + DataSystem TRACE parser assertions
+PY
+# datasystem trace parser OK
+```
+
 ## 下一步
 
 `dev` 已作为端到端阶段性基线保留。后续在专用分支开展 C++ DataSystem A/B：
 
-1. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
-2. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
-3. 基于同一份 engine 构建两套 runtime：原生 pinned DRAM baseline 与 DataSystem 版本
-4. 在 C++ 层增加 offload / onboard、DataSystem `Create/Set/Get` 和 D2H/H2D 耗时日志
-5. 从 PaiRec `:18080` 入口执行 `preload + warmup + pressure + replay` A/B，分别汇总 pressure 和 replay 的 p50/p95/p99
+1. 在隔离 TensorRT-LLM 源码副本应用 `trtllm-datasystem-latency-trace.patch`，构建 DataSystem runtime
+2. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
+3. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
+4. 基于同一份 engine 构建两套 runtime：原生 pinned DRAM baseline 与 DataSystem 版本
+5. 从 PaiRec `:18080` 入口执行 `preload + warmup + pressure + replay` A/B，分别汇总 pressure 和 replay 的 p50/p95/p99/p9999/max
 6. 后续独立优化 fallback JSON 启动预加载，以及占 TRT 内部约 `91.5%` 的 8 轮 runner
