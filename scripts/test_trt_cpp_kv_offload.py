@@ -100,6 +100,7 @@ class RequestResult:
     latency_ms: float
     kv_source: str
     backend: str
+    item_count: int
     error: str = ""
 
 
@@ -346,6 +347,7 @@ def request_one(
             latency_ms=latency_ms,
             kv_source=str(trace.get("kv_source", "")),
             backend=str(trace.get("backend", "")),
+            item_count=len(body.get("recommendations") or []),
             error=str(body.get("error", "")),
         )
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
@@ -359,6 +361,7 @@ def request_one(
             latency_ms=latency_ms,
             kv_source="",
             backend="",
+            item_count=0,
             error=str(exc),
         )
 
@@ -437,7 +440,7 @@ def run_phase(
             f"  aborting {phase}: {fail_count} failures reached "
             f"--max-phase-failures={args.max_phase_failures}"
         )
-    print_summary(phase, results, elapsed)
+    print_summary(phase, results, elapsed, args.topk)
     return sorted(results, key=lambda item: item.index)
 
 
@@ -445,12 +448,13 @@ def format_result(result: RequestResult) -> str:
     if result.ok:
         return (
             f"code={result.code} kv={result.kv_source or '-'} "
-            f"backend={result.backend or '-'} ms={result.latency_ms:.0f}"
+            f"backend={result.backend or '-'} items={result.item_count} "
+            f"ms={result.latency_ms:.0f}"
         )
     return f"FAIL status={result.status} code={result.code} err={result.error[:90]}"
 
 
-def print_summary(phase: str, results: List[RequestResult], elapsed_s: float) -> None:
+def print_summary(phase: str, results: List[RequestResult], elapsed_s: float, topk: int) -> None:
     ok = [item for item in results if item.ok]
     failed = [item for item in results if not item.ok]
     latencies = [item.latency_ms for item in ok]
@@ -463,6 +467,16 @@ def print_summary(phase: str, results: List[RequestResult], elapsed_s: float) ->
             f"p95={summary['p95']:.0f}ms p99={summary['p99']:.0f}ms "
             f"p9999={summary['p9999']:.0f}ms max={summary['max']:.0f}ms "
             f"elapsed={elapsed_s:.1f}s"
+        )
+        item_counts = [item.item_count for item in ok]
+        full_topk = sum(item.item_count >= topk for item in ok)
+        item_summary = summarize(item_counts)
+        assert item_summary is not None
+        print(
+            f"  {phase} items: full_topk={full_topk}/{len(ok)} "
+            f"min={min(item_counts)} "
+            f"p50={item_summary['p50']:.1f} p95={item_summary['p95']:.1f} "
+            f"max={int(item_summary['max'])}"
         )
     else:
         print(f"  {phase} summary: ok=0 fail={len(failed)} elapsed={elapsed_s:.1f}s")

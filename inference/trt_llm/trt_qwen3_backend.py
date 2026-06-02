@@ -2,7 +2,7 @@
 """TRT-LLM Qwen3 后端 — 用 ModelRunnerCpp + 后处理解析替代 generate() 约束解码."""
 
 import time
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -14,7 +14,8 @@ class TRTQwen3Backend:
                  vocab_size: int = 256, temperature: float = 0.7, top_k: int = 50,
                  max_tokens_in_paged_kv_cache: int = None,
                  scheduler_policy: str = "max_utilization",
-                 max_input_len: int = 64):
+                 max_input_len: int = 64,
+                 num_samples: int = 8):
         from tensorrt_llm.runtime import ModelRunnerCpp
         from tensorrt_llm.bindings.executor import SamplingConfig
 
@@ -79,18 +80,22 @@ class TRTQwen3Backend:
         self.eos_id = tokenizer.eos_token_id
         self.pad_id = tokenizer.pad_token_id
         self.max_input_len = max_input_len
+        if num_samples < 1:
+            raise ValueError("num_samples must be >= 1")
+        self.num_samples = num_samples
         self._seed = 42  # multi-sample: incremented per call
 
         print(f"[TRTQwen3Backend] Engine loaded, id_to_sem={len(self._id_to_sem)} tokens, "
-              f"max_input_len={self.max_input_len}")
+              f"max_input_len={self.max_input_len}, num_samples={self.num_samples}")
 
     def generate(self, input_ids: torch.Tensor, max_new_tokens: int = 32,
-                 num_samples: int = 8, return_trace: bool = False
+                 num_samples: Optional[int] = None, return_trace: bool = False
                  ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, float]]]:
         """TRT generate → 多轮采样 + 去重 → [batch, max_items, 4] 张量.
 
         TRT-LLM generate() 不支持 per-step 约束解码, 用多轮采样弥补命中率.
-        4090D 上每轮 ~10ms, 8轮 ≈ 80ms.
+        每轮都会完整调用一次 runner.generate()。实际耗时取决于 GPU、prompt
+        长度和生成 token 数，应通过 runner_avg_ms 观测。
 
         Args:
             input_ids: [batch, history_len, 4]
@@ -102,9 +107,15 @@ class TRTQwen3Backend:
             return_trace=True 时额外返回后端分阶段耗时.
         """
         backend_started = time.perf_counter()
+        num_samples = self.num_samples if num_samples is None else num_samples
+        if num_samples < 1:
+            raise ValueError("num_samples must be >= 1")
         trace = {
             "prompt_ms": 0.0,
             "runner_generate_ms": 0.0,
+            "runner_calls": 0,
+            "runner_avg_ms": 0.0,
+            "runner_max_ms": 0.0,
             "parse_combo_ms": 0.0,
             "output_pad_ms": 0.0,
             "backend_total_ms": 0.0,
@@ -188,9 +199,12 @@ class TRTQwen3Backend:
                     traceback.print_exc()
                     continue
                 finally:
-                    trace["runner_generate_ms"] += (
+                    runner_elapsed_ms = (
                         time.perf_counter() - runner_started
                     ) * 1000
+                    trace["runner_generate_ms"] += runner_elapsed_ms
+                    trace["runner_calls"] += 1
+                    trace["runner_max_ms"] = max(trace["runner_max_ms"], runner_elapsed_ms)
                 new_tokens = outputs[0][0][prompt_len:].tolist()
                 all_sampled_tokens.extend(new_tokens)
 
@@ -225,6 +239,8 @@ class TRTQwen3Backend:
                     padded[b, i] = torch.tensor(sem, device=device)
         trace["output_pad_ms"] = (time.perf_counter() - pad_started) * 1000
         trace["backend_total_ms"] = (time.perf_counter() - backend_started) * 1000
+        if trace["runner_calls"]:
+            trace["runner_avg_ms"] = trace["runner_generate_ms"] / trace["runner_calls"]
         if return_trace:
             return padded, trace
         return padded

@@ -168,6 +168,48 @@ onboard count=14208
 - 单 block onboard p50 `1.177ms`，相对 replay E2E p50 `694ms` 较小；主耗时
   仍在 8 轮 TRT runner
 
+### 6/2 TRT runner 耗时根因与减轮数 A/B
+
+当前每个 TRT miss 请求串行执行 `8` 次 `ModelRunnerCpp.generate()`，每轮最多
+生成 `32` 个 token。基线 `runner_ms=675.2ms`，即单轮约 `84.4ms`。8 轮是
+提高无约束解码候选覆盖率的策略，不是引擎硬限制。
+
+已增加：
+
+- `--trt_num_samples` / `TRT_NUM_SAMPLES`，默认 `8`
+- trace：`runner_calls`、`runner_avg_ms`、`runner_max_ms`
+- `scripts/test_trt_cpp_kv_offload.py` 输出 `full_topk` 和 item 数分位值
+
+远程按 `TRT_NUM_SAMPLES=1/2/4/8` 分别重启 TRT 服务。示例：
+
+```text
+export TRT_NUM_SAMPLES=4
+pkill -f "inference.trt_llm.server" || true
+python -m inference.trt_llm.server \
+  --model_path ./checkpoints/decoder_qwen3/decoder_epoch_20.pt \
+  --qwen3_model_path ./models/Qwen3-0.6B \
+  --trt_engine_dir ./trt_engines/qwen3_rec_v4 \
+  --port 18000 --device cuda \
+  --datasystem_host 127.0.0.1 --datasystem_port 31501 \
+  2>&1 | tee /tmp/server_samples4.log
+```
+
+另一个终端执行：
+
+```text
+python scripts/test_trt_cpp_kv_offload.py \
+  --log /tmp/server_samples4.log \
+  --warmup-requests 0 --requests 60 --repeat-requests 0 \
+  --topk 5 --json-output /tmp/runner-samples4.json
+```
+
+比较各轮数的 HTTP p50/p99 和 `full_topk` 比例。脚本默认使用带时间戳的唯一
+`user_id` 前缀，可避免重复运行命中 Python 结果缓存。默认轮数暂不修改。
+
+批量提交多个相同 prompt 是后续可实验方向，但当前 `ModelRunnerCpp.generate()`
+对整批默认共用 sampling config，现有逻辑依赖每轮不同 seed；需要先验证候选
+多样性再替换串行循环。
+
 ### 6/1 阶段性收口
 
 当前端到端链路已经阶段性完善：
@@ -356,7 +398,8 @@ curl -X POST http://localhost:18000/recommend \
   -d '{"user_id":"test_1","history":[[92,230,20,0]],"topk":10}'
 ```
 
-期望看到 `[TRT parse] merged 8 rounds, layer_counts=[?,?,?,?]` 日志。
+默认期望看到 `[TRT parse] merged 8 rounds, layer_counts=[?,?,?,?]` 日志；
+设置 `TRT_NUM_SAMPLES=N` 做 A/B 时应显示 `merged N rounds`。
 
 ### 运行时环境
 

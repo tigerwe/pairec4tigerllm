@@ -60,6 +60,9 @@ TRT_TRACE_FIELDS = [
     "result_cache_ds_lookup_ms",
     "prompt_ms",
     "runner_ms",
+    "runner_calls",
+    "runner_avg_ms",
+    "runner_max_ms",
     "parse_ms",
     "map_ms",
 ]

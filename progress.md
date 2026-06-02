@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-02 | 当前状态: F12 C++ DataSystem Set/Get 已完成阶段性采集，继续扩大 onboard 样本并区分 host/device 指标 | 下一步: 采集至少 10000 个 onboard 样本，再决定是否扩大到 100000 个样本
+> 最后更新: 2026-06-02 | 当前状态: F12 DataSystem onboard 已采集 14208 个样本，runner 串行 8 轮为当前主耗时 | 下一步: 执行 TRT_NUM_SAMPLES=1/2/4/8 质量-时延 A/B
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/2** | **TRT runner 优化准备: 定位每个 miss 请求串行执行 8 次 `runner.generate()`；增加 `TRT_NUM_SAMPLES` 参数和单轮 trace，支持 1/2/4/8 轮质量-时延 A/B** |
 | **6/2** | **DataSystem onboard 专项扩样准备: 报告明确区分 host DataSystem API、host 计时同步 D2H/H2D 和总 wall-clock；新增 `--min-onboard-samples` 门槛** |
 | **6/2** | **远程 replay 修正验证通过: offload 8237 次，onboard 177 次；Get p50=0.725ms、p99=1.709ms，Get+H2D p50=1.258ms、p99=2.291ms** |
 | **6/2** | **远程应用 C++ trace patch 并完成首轮 DataSystem 实测: offload 4181 次，Set p99=1.093ms；onboard/Get 已观测到 1 次，需继续增加读样本** |
@@ -303,13 +304,62 @@ onboard count=14208
   DataSystem 单块读回不是当前推荐请求的主耗时，主耗时仍在 8 轮 TRT runner
 - offload 已有 `166089` 个样本，写路径 p9999 具备更好的统计支撑
 
+### TRT runner 耗时根因与减轮数 A/B
+
+当前每个 TRT miss 请求会串行调用 `8` 次 `ModelRunnerCpp.generate()`，每轮最多
+生成 `32` 个 token，再合并 token 池做语义四元组组合。端到端基线中：
+
+```text
+runner_generate_ms avg=675.2ms
+runner calls per request=8
+single runner.generate avg≈84.4ms
+```
+
+8 轮不是模型推理的硬要求，而是当前无约束解码下为提高候选覆盖率采用的召回
+策略。减少轮数预计近似线性降低 runner 耗时，但可能使可映射 item 数下降。
+
+已增加：
+
+- 服务参数 `--trt_num_samples`，环境变量 `TRT_NUM_SAMPLES`，默认 `8`
+- TRT trace：`runner_calls`、`runner_avg_ms`、`runner_max_ms`
+- `scripts/benchmark_e2e_latency.py` 汇总上述字段
+- `scripts/test_trt_cpp_kv_offload.py` 输出每个 phase 的 `full_topk`、item 数
+  p50/p95/min/max，便于直连 TRT 做质量-时延 A/B
+
+粗略预估，固定开销按约 `23ms` 计算：
+
+```text
+8 rounds: runner≈675ms, request≈698ms  当前基线
+4 rounds: runner≈338ms, request≈361ms  待实测
+2 rounds: runner≈169ms, request≈192ms  待实测
+1 round:  runner≈ 84ms, request≈107ms  待实测
+```
+
+远程按 `TRT_NUM_SAMPLES=1/2/4/8` 分别重启服务，再执行相同直连请求序列：
+
+```text
+python scripts/test_trt_cpp_kv_offload.py \
+  --log /tmp/server_samplesN.log \
+  --warmup-requests 0 --requests 60 --repeat-requests 0 \
+  --topk 5 --json-output /tmp/runner-samplesN.json
+```
+
+脚本默认使用带时间戳的唯一 `user_id` 前缀，避免重复运行命中 Python 结果缓存。
+优先比较 `full_topk` 比例和 HTTP p50/p99。默认值暂不下调，需根据远程 A/B
+结果选择。
+
+后续可实验将多轮 prompt 批量提交给 `ModelRunnerCpp.generate()`。当前本地
+TensorRT-LLM API 对整批默认共用一个 sampling config，而现有逻辑依赖每轮不同
+seed；批量化需要先验证候选多样性，不能直接替换串行循环。
+
 ## 下一步
 
 `dev` 已作为端到端阶段性基线保留。后续在专用分支开展 C++ DataSystem A/B：
 
-1. 如需稳定的正式 onboard p9999 结论，再扩大到 `>=100000` 个 onboard 样本
-2. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
-3. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
-4. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
-5. 从 PaiRec `:18080` 入口执行 `preload + warmup + pressure + replay` A/B，分别汇总 pressure 和 replay 的 p50/p95/p99/p9999/max
-6. 后续独立优化 fallback JSON 启动预加载，以及占 TRT 内部约 `91.5%` 的 8 轮 runner
+1. 远程执行 `TRT_NUM_SAMPLES=1/2/4/8` 质量-时延 A/B，选择满足 `full_topk` 的最低轮数
+2. 如需稳定的正式 onboard p9999 结论，再扩大到 `>=100000` 个 onboard 样本
+3. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
+4. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
+5. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
+6. 从 PaiRec `:18080` 入口执行 `preload + warmup + pressure + replay` A/B，分别汇总 pressure 和 replay 的 p50/p95/p99/p9999/max
+7. 后续独立优化 fallback JSON 启动预加载

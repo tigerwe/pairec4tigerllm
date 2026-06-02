@@ -52,6 +52,7 @@ class InferenceConfig:
     trt_max_kv_tokens: int = 2048  # TRT-LLM paged KV cache pressure knob
     trt_scheduler_policy: str = 'max_utilization'
     trt_max_input_len: int = 64   # TRT engine max_input_len (match trtllm-build --max_input_len)
+    trt_num_samples: int = 8      # Serial runner.generate calls used to build the candidate pool
 
 
 class TensorRTLLMInference:
@@ -342,6 +343,7 @@ class GenerativeInferenceService:
             max_tokens_in_paged_kv_cache=self.config.trt_max_kv_tokens,
             scheduler_policy=self.config.trt_scheduler_policy,
             max_input_len=self.config.trt_max_input_len,
+            num_samples=self.config.trt_num_samples,
         )
 
         if '_id_to_sem' in checkpoint:
@@ -498,6 +500,9 @@ class GenerativeInferenceService:
             'model_forward_ms': 0.0,
             'prompt_ms': 0.0,
             'runner_generate_ms': 0.0,
+            'runner_calls': 0,
+            'runner_avg_ms': 0.0,
+            'runner_max_ms': 0.0,
             'parse_combo_ms': 0.0,
             'output_pad_ms': 0.0,
             'backend_total_ms': 0.0,
@@ -608,7 +613,7 @@ class GenerativeInferenceService:
 
                 # 3. 全部 miss → TRT-LLM 引擎推理
                 # 引擎max_new_tokens硬上限32 (96-64), 超了C++层卡死不报错
-                # 8轮合并后token池=8×32=256, 配合组合+填充足够覆盖
+                # 多轮采样合并 token 池；轮数由 TRT_NUM_SAMPLES 控制，默认 8。
                 max_new_tokens = max(32, topk * 3)
                 tokens, backend_trace = self._trt_backend.generate(
                     input_ids, max_new_tokens=max_new_tokens, return_trace=True
@@ -1022,6 +1027,7 @@ class HTTPServer:
                 'kv_cache_hits': self.service.kv_cache_hits,
                 'kv_cache_misses': self.service.kv_cache_misses,
                 'version': '1.0.0',
+                'trt_num_samples': self.service.config.trt_num_samples,
             })
 
         @app.route('/recommend', methods=['POST'])
@@ -1051,6 +1057,8 @@ class HTTPServer:
                       f"result_cache_lookup_ms={trace.get('result_cache_lookup_ms',0):.1f} "
                       f"result_cache_ds_lookup_ms={trace.get('result_cache_ds_lookup_ms',0):.1f} "
                       f"prompt_ms={trace.get('prompt_ms',0):.1f} runner_ms={trace.get('runner_generate_ms',0):.1f} "
+                      f"runner_calls={trace.get('runner_calls',0)} runner_avg_ms={trace.get('runner_avg_ms',0):.1f} "
+                      f"runner_max_ms={trace.get('runner_max_ms',0):.1f} "
                       f"parse_ms={trace.get('parse_combo_ms',0):.1f} map_ms={trace.get('map_item_ms',0):.1f} "
                       f"items={len(result['recommendations'])}")
 
@@ -1111,6 +1119,10 @@ def main():
                         default=int(os.environ.get('TRT_MAX_INPUT_LEN', '64')),
                         help='TRT engine max input length '
                              '(env: TRT_MAX_INPUT_LEN, default: 64)')
+    parser.add_argument('--trt_num_samples', type=int,
+                        default=int(os.environ.get('TRT_NUM_SAMPLES', '8')),
+                        help='Number of serial TRT runner.generate samples per request '
+                             '(env: TRT_NUM_SAMPLES, default: 8)')
 
     args = parser.parse_args()
 
@@ -1128,6 +1140,7 @@ def main():
         trt_max_kv_tokens=args.trt_max_kv_tokens,
         trt_scheduler_policy=args.trt_scheduler_policy,
         trt_max_input_len=args.trt_max_input_len,
+        trt_num_samples=args.trt_num_samples,
     )
 
     # 创建推理服务
