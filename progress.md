@@ -211,13 +211,33 @@ onboard count=0
   `--replay-tail-offset`，默认循环最近一小组 pressure 历史；历史生成器改为
   可逆 32 位混合，避免每 `256` 个 seed 重复，可构造十万级不同请求
 
+### 远程 DataSystem 第三轮实测：Get/onboard 样本补齐
+
+使用近期 pressure 历史循环 replay 后，结构化 trace 判定通过：
+
+```text
+PASS: C++ KV offload and DataSystem onboard were both observed.
+
+KV pool: primaryBlocks=32 secondaryBlocks=28
+offload count=8237
+  set_ms    p50=0.780 p99=1.202 p9999=10.793 max=10.848
+  total_ms  p50=2.101 p99=2.760 p9999=12.028 max=12.173
+onboard count=177
+  get_ms    p50=0.725 p95=1.520 p99=1.709 p9999=1.960 max=1.963
+  h2d_ms    p50=0.492 p95=0.607 p99=0.618 p9999=0.624 max=0.624
+  total_ms  p50=1.258 p95=2.027 p99=2.291 p9999=2.471 max=2.471
+```
+
+其中 replay/onboard wave 单独贡献 `174` 次 onboard，说明新的 replay 策略可以
+稳定进入 DataSystem `Get + H2D` 读路径。`Get` 的 p50/p95/p99 已具备阶段性参考
+价值；读路径只有 `177` 个样本，p9999 仍接近 max，仅作为观察值。
+
 ## 下一步
 
 `dev` 已作为端到端阶段性基线保留。后续在专用分支开展 C++ DataSystem A/B：
 
-1. 增加 replay/onboard 命中，采集足量 DataSystem `Get/H2D` 样本
-2. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
-3. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
-4. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
-5. 从 PaiRec `:18080` 入口执行 `preload + warmup + pressure + replay` A/B，分别汇总 pressure 和 replay 的 p50/p95/p99/p9999/max
-6. 后续独立优化 fallback JSON 启动预加载，以及占 TRT 内部约 `91.5%` 的 8 轮 runner
+1. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
+2. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
+3. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
+4. 从 PaiRec `:18080` 入口执行 `preload + warmup + pressure + replay` A/B，分别汇总 pressure 和 replay 的 p50/p95/p99/p9999/max
+5. 后续独立优化 fallback JSON 启动预加载，以及占 TRT 内部约 `91.5%` 的 8 轮 runner

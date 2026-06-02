@@ -83,12 +83,32 @@ pressure 历史，在 `secondaryBlocks=28` 时增大 pressure 反而会使前缀
 远程下一轮先执行：
 
 ```text
-python scripts/test_trt_cpp_kv_offload.py \
+ python scripts/test_trt_cpp_kv_offload.py \
   --log /tmp/server_v4.log \
   --requests 360 --repeat-requests 128 \
   --replay-source-count 4 --replay-tail-offset 1 \
   --strict-onboard --json-output /tmp/cppkv-datasystem.json
 ```
+
+### 6/2 DataSystem runtime 第三轮实测：Get/onboard 样本补齐
+
+新的 replay 策略已在远程验证通过：
+
+```text
+PASS: C++ KV offload and DataSystem onboard were both observed.
+
+offload count=8237
+  set_ms    p50=0.780 p99=1.202 p9999=10.793 max=10.848
+  total_ms  p50=2.101 p99=2.760 p9999=12.028 max=12.173
+onboard count=177
+  get_ms    p50=0.725 p95=1.520 p99=1.709 p9999=1.960 max=1.963
+  h2d_ms    p50=0.492 p95=0.607 p99=0.618 p9999=0.624 max=0.624
+  total_ms  p50=1.258 p95=2.027 p99=2.291 p9999=2.471 max=2.471
+```
+
+replay/onboard wave 单独贡献 `174` 次 onboard。C++ DataSystem `Create/D2H/Set`
+和 `Get/H2D` 两条路径的结构化耗时均已采集。读路径只有 `177` 个样本，p9999
+接近 max，仅作观察；下一步转入 runtime A/B，不再继续调 replay 脚本。
 
 ### 6/1 阶段性收口
 
@@ -112,7 +132,6 @@ PaiRec :18080
 尚未完成：
 - Python 结果缓存会掩盖 TRT-LLM C++ KV 路径，需要实验开关彻底绕过
 - TensorRT-LLM C++ DataSystem 与原生 pinned DRAM runtime 尚未做严格 A/B
-- C++ 层缺少 `Create/Set/Get`、D2H/H2D、offload/onboard 的结构化耗时
 
 下一阶段原则：
 - 不重建 `rank0.engine`，两组加载同一 engine
