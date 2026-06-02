@@ -187,6 +187,30 @@ onboard count=1
 - 原压测 verdict 依赖 DEBUG 级 `KV cache block reuse is enabled`、`copyBlock entered`
   和 `Set Key` 日志，在 INFO 级日志下会误报失败；脚本已改为优先使用结构化 trace 判定
 
+### 远程 DataSystem 第二轮实测与 replay 修正
+
+扩大 pressure 后采集到：
+
+```text
+KV pool: primaryBlocks=32 secondaryBlocks=28
+offload count=10440
+  create_ms p50=0.765 p99=1.117 p9999=1.783 max=2.311
+  d2h_ms    p50=0.493 p99=0.700 p9999=1.475 max=2.087
+  set_ms    p50=0.839 p99=1.120 p9999=1.481 max=10.906
+  total_ms  p50=2.200 p99=2.796 p9999=4.198 max=12.334
+onboard count=0
+```
+
+结论：
+
+- `Set` 路径已有 `10440` 个样本，p99 仍约 `1.12ms`；出现一次
+  `set_ms=10.906ms` 尾部尖峰，后续 A/B 需保留 max 和原始 JSON
+- 原 replay 固定重放最早的 pressure 历史；secondary pool 只有 `28` 个 block，
+  增大 pressure 反而会使这些前缀更早被回收，无法稳定触发 `Get`
+- `scripts/test_trt_cpp_kv_offload.py` 新增 `--replay-source-count` 和
+  `--replay-tail-offset`，默认循环最近一小组 pressure 历史；历史生成器改为
+  可逆 32 位混合，避免每 `256` 个 seed 重复，可构造十万级不同请求
+
 ## 下一步
 
 `dev` 已作为端到端阶段性基线保留。后续在专用分支开展 C++ DataSystem A/B：

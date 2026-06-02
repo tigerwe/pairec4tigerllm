@@ -8,6 +8,8 @@ prefixes, then checks the TRT-LLM log for C++ KV transfer events.
 Typical use:
   python scripts/test_trt_cpp_kv_offload.py --log /tmp/server_v4.log
   python scripts/test_trt_cpp_kv_offload.py --requests 160 --concurrency 1
+  python scripts/test_trt_cpp_kv_offload.py --requests 360 --repeat-requests 128 \
+      --replay-source-count 4 --replay-tail-offset 1 --strict-onboard
 """
 
 from __future__ import annotations
@@ -93,6 +95,10 @@ def parse_args() -> argparse.Namespace:
                         help="pressure wave request count")
     parser.add_argument("--repeat-requests", type=int, default=32,
                         help="replay/onboard wave request count")
+    parser.add_argument("--replay-source-count", type=int, default=4,
+                        help="number of recent pressure histories cycled during replay")
+    parser.add_argument("--replay-tail-offset", type=int, default=0,
+                        help="skip this many newest pressure histories when selecting replay sources")
     parser.add_argument("--warmup-requests", type=int, default=4,
                         help="small same-prefix warmup count; 0 disables warmup")
     parser.add_argument("--history-len", type=int, default=8)
@@ -258,13 +264,17 @@ def get_json(url: str, timeout: float) -> Tuple[int, Dict[str, Any]]:
 
 
 def make_history(seed: int, length: int) -> List[List[int]]:
+    # Multiplication by an odd number is reversible modulo 2^32. Unlike the
+    # previous seed % 256 pattern, this keeps 100k+ generated histories distinct.
+    mixed_seed = (seed * 2654435761) & 0xFFFFFFFF
+    seed_bytes = [(mixed_seed >> shift) & 0xFF for shift in (0, 8, 16, 24)]
     history: List[List[int]] = []
     for j in range(length):
         # Keep IDs inside the semantic-id codebook range and avoid all-zero rows.
-        s0 = (seed * 17 + j * 13 + 7) % 256
-        s1 = (seed * 29 + j * 19 + 11) % 256
-        s2 = (seed * 37 + j * 23 + 3) % 256
-        s3 = (seed * 43 + j * 31 + 5) % 256
+        s0 = (seed_bytes[0] + j * 13 + 7) % 256
+        s1 = (seed_bytes[1] + j * 19 + 11) % 256
+        s2 = (seed_bytes[2] + j * 23 + 3) % 256
+        s3 = (seed_bytes[3] + j * 31 + 5) % 256
         history.append([s0, s1, s2, s3])
     return history
 
@@ -500,11 +510,18 @@ def main() -> int:
     if args.concurrency < 1:
         print("FAIL: --concurrency must be >= 1")
         return 2
+    if args.replay_source_count < 1:
+        print("FAIL: --replay-source-count must be >= 1")
+        return 2
+    if args.replay_tail_offset < 0:
+        print("FAIL: --replay-tail-offset must be >= 0")
+        return 2
 
     print("TRT-LLM C++ KV offload/onboard stress test")
     print(f"  url={args.url}")
     print(f"  log={args.log}")
     print(f"  requests={args.requests} repeat_requests={args.repeat_requests}")
+    print(f"  replay_source_count={args.replay_source_count} replay_tail_offset={args.replay_tail_offset}")
     print(f"  history_len={args.history_len} concurrency={args.concurrency} topk={args.topk}")
 
     try:
@@ -537,11 +554,20 @@ def main() -> int:
         for i, history in enumerate(pressure_histories)
     ]
 
-    replay_count = min(args.repeat_requests, len(pressure_histories))
+    replay_end = max(0, len(pressure_histories) - args.replay_tail_offset)
+    replay_start = max(0, replay_end - args.replay_source_count)
+    replay_sources = pressure_histories[replay_start:replay_end]
     replay_jobs = [
-        (f"{args.prefix}_replay_{i}", pressure_histories[i])
-        for i in range(replay_count)
-    ]
+        (f"{args.prefix}_replay_{i}", replay_sources[i % len(replay_sources)])
+        for i in range(args.repeat_requests)
+    ] if replay_sources else []
+    if replay_sources:
+        print(
+            f"\nReplay sources: pressure indexes [{replay_start}, {replay_end}), "
+            f"cycled across {len(replay_jobs)} requests"
+        )
+    elif args.repeat_requests:
+        print("\nWARN: replay wave is empty; reduce --replay-tail-offset or increase --requests")
 
     all_results: List[RequestResult] = []
     phase_results: Dict[str, List[RequestResult]] = {}

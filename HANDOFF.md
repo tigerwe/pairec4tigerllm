@@ -58,6 +58,38 @@ onboard count=1
   `KV cache block reuse was not confirmed`；脚本已改为优先使用
   `[Datasystem][TRACE] op=offload/onboard` 判定
 
+### 6/2 DataSystem runtime 第二轮实测与 replay 修正
+
+扩大 pressure 后采集到 `offload=10440`，其中单个 3.5 MiB block：
+
+```text
+create_ms p50=0.765 p99=1.117 p9999=1.783 max=2.311
+d2h_ms    p50=0.493 p99=0.700 p9999=1.475 max=2.087
+set_ms    p50=0.839 p99=1.120 p9999=1.481 max=10.906
+total_ms  p50=2.200 p99=2.796 p9999=4.198 max=12.334
+onboard count=0
+```
+
+`Set` p99 仍稳定，但出现一次 `10.906ms` 尾部尖峰。原 replay 固定取最早的
+pressure 历史，在 `secondaryBlocks=28` 时增大 pressure 反而会使前缀更早被回收。
+
+`scripts/test_trt_cpp_kv_offload.py` 已调整：
+
+- `--replay-source-count`：循环重放多少个 pressure 历史，默认 `4`
+- `--replay-tail-offset`：从 pressure 尾部跳过多少个最新历史，默认 `0`
+- 历史生成器使用可逆 32 位混合，避免旧实现每 `256` 个 seed 重复，可构造
+  十万级不同请求
+
+远程下一轮先执行：
+
+```text
+python scripts/test_trt_cpp_kv_offload.py \
+  --log /tmp/server_v4.log \
+  --requests 360 --repeat-requests 128 \
+  --replay-source-count 4 --replay-tail-offset 1 \
+  --strict-onboard --json-output /tmp/cppkv-datasystem.json
+```
+
 ### 6/1 阶段性收口
 
 当前端到端链路已经阶段性完善：
