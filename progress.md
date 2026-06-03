@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-02 | 当前状态: runner 4 轮初测推断 p50=354ms、full_topk=60/60，待 runner_calls 确认 | 下一步: 核验 4 轮配置并执行 TRT_NUM_SAMPLES=2/1/8 质量-时延 A/B
+> 最后更新: 2026-06-03 | 当前状态: 已新增 runner 轮数 A/B 编排脚本，4 轮初测待 runner_calls 确认 | 下一步: 远程执行 TRT_NUM_SAMPLES=1/2/4/8 自动 A/B
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/3** | **新增 `scripts/benchmark_trt_runner_samples.py`，自动核验 `/health` 的 `trt_num_samples`、运行直连压测、解析 `runner_calls` 并输出 JSON/CSV 对比** |
 | **6/2** | **TRT runner 优化准备: 定位每个 miss 请求串行执行 8 次 `runner.generate()`；增加 `TRT_NUM_SAMPLES` 参数和单轮 trace，支持 1/2/4/8 轮质量-时延 A/B** |
 | **6/2** | **DataSystem onboard 专项扩样准备: 报告明确区分 host DataSystem API、host 计时同步 D2H/H2D 和总 wall-clock；新增 `--min-onboard-samples` 门槛** |
 | **6/2** | **远程 replay 修正验证通过: offload 8237 次，onboard 177 次；Get p50=0.725ms、p99=1.709ms，Get+H2D p50=1.258ms、p99=2.291ms** |
@@ -362,6 +363,21 @@ python scripts/test_trt_cpp_kv_offload.py \
 优先比较 `full_topk` 比例和 HTTP p50/p99。默认值暂不下调，需根据远程 A/B
 结果选择。
 
+已补充自动编排脚本，推荐后续直接使用：
+
+```text
+python scripts/benchmark_trt_runner_samples.py \
+  --samples 1,2,4,8 \
+  --server-cmd 'python -m inference.trt_llm.server ...' \
+  --stop-command 'pkill -f "inference.trt_llm.server" || true' \
+  --requests 60 --repeat-requests 0 --topk 5
+```
+
+脚本会逐轮注入 `TRT_NUM_SAMPLES`，等待 `/health` 返回匹配的
+`trt_num_samples`，运行 `scripts/test_trt_cpp_kv_offload.py`，解析服务 TRACE
+中的 `runner_calls/runner_avg_ms/runner_max_ms`，最后输出
+`/tmp/trt_runner_samples_ab.json` 和 `/tmp/trt_runner_samples_ab.csv`。
+
 后续可实验将多轮 prompt 批量提交给 `ModelRunnerCpp.generate()`。当前本地
 TensorRT-LLM API 对整批默认共用一个 sampling config，而现有逻辑依赖每轮不同
 seed；批量化需要先验证候选多样性，不能直接替换串行循环。
@@ -370,7 +386,7 @@ seed；批量化需要先验证候选多样性，不能直接替换串行循环�
 
 `dev` 已作为端到端阶段性基线保留。后续在专用分支开展 C++ DataSystem A/B：
 
-1. 远程执行 `TRT_NUM_SAMPLES=1/2/4/8` 质量-时延 A/B，选择满足 `full_topk` 的最低轮数
+1. 远程执行 `scripts/benchmark_trt_runner_samples.py --samples 1,2,4,8 ...`，选择满足 `full_topk` 的最低轮数
 2. 如需稳定的正式 onboard p9999 结论，再扩大到 `>=100000` 个 onboard 样本
 3. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
 4. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数

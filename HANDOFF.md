@@ -179,6 +179,8 @@ onboard count=14208
 - `--trt_num_samples` / `TRT_NUM_SAMPLES`，默认 `8`
 - trace：`runner_calls`、`runner_avg_ms`、`runner_max_ms`
 - `scripts/test_trt_cpp_kv_offload.py` 输出 `full_topk` 和 item 数分位值
+- `scripts/benchmark_trt_runner_samples.py` 自动编排 `1/2/4/8` 轮 A/B，核验
+  `/health` 的 `trt_num_samples`，解析 `runner_calls`，输出 JSON/CSV 汇总
 
 远程按 `TRT_NUM_SAMPLES=1/2/4/8` 分别重启 TRT 服务。示例：
 
@@ -205,6 +207,23 @@ python scripts/test_trt_cpp_kv_offload.py \
 
 比较各轮数的 HTTP p50/p99 和 `full_topk` 比例。脚本默认使用带时间戳的唯一
 `user_id` 前缀，可避免重复运行命中 Python 结果缓存。默认轮数暂不修改。
+
+也可以直接用自动编排脚本：
+
+```text
+python scripts/benchmark_trt_runner_samples.py \
+  --samples 1,2,4,8 \
+  --server-cmd 'python -m inference.trt_llm.server ...' \
+  --stop-command 'pkill -f "inference.trt_llm.server" || true' \
+  --requests 60 --repeat-requests 0 --topk 5
+```
+
+输出：
+
+```text
+/tmp/trt_runner_samples_ab.json
+/tmp/trt_runner_samples_ab.csv
+```
 
 首轮减轮数远程结果已回传。根据请求 p50 接近预测值，推断为 `TRT_NUM_SAMPLES=4`；
 仍需通过 `/health` 的 `trt_num_samples` 或服务 TRACE 的 `runner_calls=4` 确认：
