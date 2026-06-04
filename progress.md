@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-03 | 当前状态: 已新增 runner 轮数 A/B 编排脚本，4 轮初测待 runner_calls 确认 | 下一步: 远程执行 TRT_NUM_SAMPLES=1/2/4/8 自动 A/B
+> 最后更新: 2026-06-04 | 当前状态: 修复 runner A/B 脚本 `--stop-command pkill -f` 误杀自身问题 | 下一步: 远程不带 `--stop-command` 执行 TRT_NUM_SAMPLES=1/2/4/8 自动 A/B
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/4** | **修复 `scripts/benchmark_trt_runner_samples.py` 使用 `--stop-command 'pkill -f ...'` 时会匹配自身 `--server-cmd` 并被 `Terminated` 的问题；文档改为脚本外手动清理旧服务** |
 | **6/3** | **新增 `scripts/benchmark_trt_runner_samples.py`，自动核验 `/health` 的 `trt_num_samples`、运行直连压测、解析 `runner_calls` 并输出 JSON/CSV 对比** |
 | **6/2** | **TRT runner 优化准备: 定位每个 miss 请求串行执行 8 次 `runner.generate()`；增加 `TRT_NUM_SAMPLES` 参数和单轮 trace，支持 1/2/4/8 轮质量-时延 A/B** |
 | **6/2** | **DataSystem onboard 专项扩样准备: 报告明确区分 host DataSystem API、host 计时同步 D2H/H2D 和总 wall-clock；新增 `--min-onboard-samples` 门槛** |
@@ -369,9 +370,13 @@ python scripts/test_trt_cpp_kv_offload.py \
 python scripts/benchmark_trt_runner_samples.py \
   --samples 1,2,4,8 \
   --server-cmd 'python -m inference.trt_llm.server ...' \
-  --stop-command 'pkill -f "inference.trt_llm.server" || true' \
   --requests 60 --repeat-requests 0 --topk 5
 ```
+
+如果需要清理旧服务，先在脚本外单独执行 `pkill -f "inference.trt_llm.server" || true`。
+不要把这条 `pkill -f` 放进 `--stop-command`：benchmark 进程自己的
+`--server-cmd` 参数也包含 `inference.trt_llm.server`，会被误杀并显示
+`Terminated`。
 
 脚本会逐轮注入 `TRT_NUM_SAMPLES`，等待 `/health` 返回匹配的
 `trt_num_samples`，运行 `scripts/test_trt_cpp_kv_offload.py`，解析服务 TRACE

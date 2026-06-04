@@ -12,6 +12,10 @@ Managed multi-sample example:
   python scripts/benchmark_trt_runner_samples.py \
       --samples 1,2,4,8 \
       --server-cmd 'python -m inference.trt_llm.server --model_path ...'
+
+If an old service is running, stop it before invoking this script. Do not pass
+pkill -f 'inference.trt_llm.server' as --stop-command: it can also match this
+script's own --server-cmd argument and terminate the benchmark process.
 """
 
 from __future__ import annotations
@@ -74,7 +78,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server-cmd", default="",
                         help="optional TRT server command; TRT_NUM_SAMPLES is injected per run")
     parser.add_argument("--stop-command", default="",
-                        help="optional command run before each managed server start")
+                        help="optional command run before each managed server start; "
+                             "avoid pkill -f patterns that can match --server-cmd")
     parser.add_argument("--startup-timeout", type=float, default=180.0)
     parser.add_argument("--log-template", default="/tmp/server_samples{sample}.log")
     parser.add_argument("--json-dir", default="/tmp")
@@ -149,6 +154,22 @@ def run_command(command: str) -> int:
         return 0
     completed = subprocess.run(command, shell=True)
     return completed.returncode
+
+
+def dangerous_stop_command(args: argparse.Namespace) -> Optional[str]:
+    if not args.stop_command:
+        return None
+    normalized = " ".join(args.stop_command.split())
+    if "pkill" not in normalized or "-f" not in normalized:
+        return None
+    server_tokens = [
+        token for token in re.split(r"\s+", args.server_cmd)
+        if token and len(token) >= 8 and not token.startswith("-")
+    ]
+    matched = [token for token in server_tokens if token in normalized]
+    if matched:
+        return matched[0]
+    return None
 
 
 def start_server(command: str, sample: int, log_path: str) -> Tuple[subprocess.Popen[str], Any]:
@@ -374,6 +395,17 @@ def main() -> int:
         return 2
     if managed and args.keep_server and len(samples) != 1:
         print("FAIL: --keep-server is only valid for a single managed sample.")
+        return 2
+    dangerous_token = dangerous_stop_command(args)
+    if dangerous_token:
+        print(
+            "FAIL: --stop-command uses pkill -f with a pattern that also appears "
+            f"in --server-cmd ({dangerous_token!r})."
+        )
+        print(
+            "Run the cleanup command once before this script, then omit "
+            "--stop-command."
+        )
         return 2
     if args.requests < 1 or args.concurrency < 1:
         print("FAIL: --requests and --concurrency must be >= 1")

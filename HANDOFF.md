@@ -214,9 +214,13 @@ python scripts/test_trt_cpp_kv_offload.py \
 python scripts/benchmark_trt_runner_samples.py \
   --samples 1,2,4,8 \
   --server-cmd 'python -m inference.trt_llm.server ...' \
-  --stop-command 'pkill -f "inference.trt_llm.server" || true' \
   --requests 60 --repeat-requests 0 --topk 5
 ```
+
+如果需要清理旧服务，先在脚本外单独执行 `pkill -f "inference.trt_llm.server" || true`。
+不要把这条 `pkill -f` 放进 `--stop-command`：benchmark 进程自己的
+`--server-cmd` 参数也包含 `inference.trt_llm.server`，会被误杀并显示
+`Terminated`。
 
 输出：
 
