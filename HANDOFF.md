@@ -501,7 +501,7 @@ export LD_PRELOAD="\
 
 ### 下一步
 
-1. 远程拉取最新分支，使用 `TRT_NUM_SAMPLES=1 TRT_RESULT_CACHE_ENABLED=0 TRT_MAX_KV_TOKENS=1024` 重启 TRT 服务
-2. `/health` 确认 `trt_num_samples=1`、`trt_result_cache_enabled=false`、`datasystem=connected`
-3. 用 `scripts/benchmark_e2e_latency.py --uid-file ... --requests 1000 --repeat-requests 10000 --replay-source-count 4` 跑端到端 pressure/replay
-4. 生成最终 Markdown 报告：请求级 E2E 阶段 + `[pressure] offload.set_ms` + `[replay/onboard] onboard.get_ms`
+1. 最终 E2E DataSystem Set/Get 报告已生成：`docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md`
+2. 当前基线：client p50=92.8ms、p99=103.2ms；C++ Set p50=0.746ms、p99=1.015ms；C++ Get p50=0.623ms、p99=0.818ms
+3. 下一步做 DataSystem vs pinned DRAM A/B，保持 `TRT_NUM_SAMPLES=1`、`TRT_RESULT_CACHE_ENABLED=0`、相同 pressure/replay 参数
+4. 如需稳定发布 onboard p9999，再把 replay 扩到 `>=100000` onboard events
