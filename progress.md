@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-04 | 当前状态: 最终 E2E DataSystem Set/Get 报告已生成 | 下一步: 做 DataSystem vs pinned DRAM A/B 或继续扩到 >=100000 onboard events 稳定 p9999
+> 最后更新: 2026-06-04 | 当前状态: 最终 E2E DataSystem Set/Get 报告已生成并补充原始 benchmark 输出附录 | 下一步: 做 DataSystem vs pinned DRAM A/B 或继续扩到 >=100000 onboard events 稳定 p9999
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/4** | **`docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md` 补充原始 benchmark stdout 附录，保留 pressure/replay、请求级阶段和 C++ DataSystem block 指标的原始输出，便于复核摘要表** |
 | **6/4** | **最终 E2E DataSystem Set/Get 压测完成并生成 `docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md`：12000 请求成功 11853，client p50=92.8ms、p99=103.2ms；C++ offload=29330，Set p50=0.746ms、p99=1.015ms、p9999=1.689ms；C++ onboard=13421，Get p50=0.623ms、p99=0.818ms、p9999=1.094ms** |
 | **6/4** | **新增 `TRT_RESULT_CACHE_ENABLED=0`，可关闭 Python TRT 推荐结果缓存；`scripts/benchmark_e2e_latency.py` 新增 `--uid-file`、pressure/replay 两段流量和按阶段 DataSystem C++ 指标，支持在端到端报告里同时观察 request stages 与 C++ `offload.set_ms` / `onboard.get_ms`** |
 | **6/4** | **输出 `docs/E2E_LATENCY_REPORT_2026-06-04.md`，汇总 TRT_NUM_SAMPLES=1 的 PaiRec E2E、缓存分组、当前 E2E 中 DS trace 缺失原因与下一轮充分测 DS Set/Get 的要求** |

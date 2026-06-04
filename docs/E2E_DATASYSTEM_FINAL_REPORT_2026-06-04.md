@@ -169,3 +169,132 @@ code=299 error=items size not enough
 - `Set/Get` max 均出现 `10ms+` 尾部尖峰，正式汇报应保留 `p9999/max`。
 
 下一步若要做系统级优化，优先级仍应放在 TRT runner；若要做 DataSystem 存储路径 A/B，则应继续用同一 pressure/replay 脚本对比 DataSystem 与 pinned DRAM，并保持 `TRT_RESULT_CACHE_ENABLED=0`。
+
+## 附录 A. 原始 Benchmark 输出
+
+以下为远程 `scripts/benchmark_e2e_latency.py` 输出原始摘录，保留 pressure/replay、请求级阶段和 C++ DataSystem block 指标，便于复核上文汇总表。
+
+```text
+== pressure wave: 2000 requests, concurrency=1 ==
+  ok=1976 fail=24 elapsed=189.0s
+  client_ms avg=94.5 p50=94.4 p95=96.3 p99=97.6 p9999=118.0 max=120.5
+  items full_size=1976/1976 expected=3 min=3 p50=3.0 p95=3.0 max=3
+  failed[25] uid=26 code=299 error=items size not enough
+  failed[148] uid=149 code=299 error=items size not enough
+  failed[169] uid=170 code=299 error=items size not enough
+  failed[237] uid=238 code=299 error=items size not enough
+  failed[241] uid=242 code=299 error=items size not enough
+
+  replay_uids=986,987,988,989,990,991,992,993,994,995,996,997,998,999,1000,1001
+
+== replay/onboard wave: 10000 requests, concurrency=1 ==
+  ok=9877 fail=123 elapsed=930.5s
+  client_ms avg=93.0 p50=92.2 p95=96.7 p99=104.3 p9999=117.6 max=125.2
+  items full_size=9877/9877 expected=3 min=3 p50=3.0 p95=3.0 max=3
+  failed[131] uid=989 code=299 error=items size not enough
+  failed[155] uid=997 code=299 error=items size not enough
+  failed[267] uid=997 code=299 error=items size not enough
+  failed[324] uid=990 code=299 error=items size not enough
+  failed[390] uid=992 code=299 error=items size not enough
+
+== Client (all measured phases) ==
+  metric                              count      avg      p50      p95      p99    p9999      max
+  client_e2e_ms                       11853     93.3     92.8     96.6    103.2    119.9    125.2
+
+== Response items ==
+  full_size=11853/11853 expected=3 min=3 p50=3.0 p95=3.0 max=3
+
+== PaiRec recommend stages ==
+  metric                              count      avg      p50      p95      p99    p9999      max
+  total_ms                            11853     92.3     92.0     96.0    102.0    115.8    116.0
+  user_feature_ms                     11853      0.0      0.0      0.0      0.0      0.0      0.0
+  recall_ms                           11853     92.2     92.0     96.0    102.0    115.8    116.0
+  filter_ms                           11853      0.0      0.0      0.0      0.0      0.0      0.0
+  general_rank_ms                     11853      0.0      0.0      0.0      0.0      0.0      0.0
+  feature_ms                          11853      0.0      0.0      0.0      0.0      0.0      0.0
+  rank_ms                             11853      0.0      0.0      0.0      0.0      0.0      0.0
+  pipeline_wait_ms                    11853      0.0      0.0      0.0      0.0      0.0      0.0
+  merge_ms                            11853      0.0      0.0      0.0      0.0      0.0      0.0
+  sort_ms                             11853      0.0      0.0      0.0      0.0      0.0      0.0
+
+== GenerativeRecall stages ==
+  metric                              count      avg      p50      p95      p99    p9999      max
+  cost                                11853     92.2     92.0     95.0    102.0    115.8    116.0
+  cache_ms                            11853      0.0      0.0      0.0      0.0      0.0      0.0
+  history_ms                          11853      0.0      0.0      0.0      0.0      0.0      0.0
+  convert_ms                          11853      0.0      0.0      0.0      0.0      0.0      0.0
+  http_ms                             11853     92.1     92.0     95.0    102.0    115.8    116.0
+  items_ms                            11853      0.0      0.0      0.0      0.0      0.0      0.0
+  tr_total_ms                         11853     91.2     90.7     94.5    101.0    114.6    114.7
+  tr_prepare_ms                       11853      0.4      0.4      0.5      0.5      1.2      9.1
+  tr_infer_ms                         11853     89.4     88.8     92.6     99.0    111.9    112.7
+  tr_prompt_ms                        11853      2.5      2.7      2.9      3.0      5.4      5.6
+  tr_runner_ms                        11853     85.9     84.9     88.8     95.4    107.6    109.1
+  tr_parse_ms                         11853      0.0      0.0      0.1      0.2      0.2      0.2
+  tr_pad_ms                           11853      0.7      0.6      1.7      2.1      3.0      3.3
+  tr_map_ms                           11853      0.1      0.1      0.2      0.2      0.8      0.8
+  tr_kv_lookup_ms                     11853      1.3      1.3      1.6      1.7      2.4      2.4
+  tr_kv_write_ms                      11853      0.0      0.0      0.0      0.0      0.0      0.0
+  tr_result_cache_lookup_ms           11853      0.0      0.0      0.0      0.0      0.0      0.0
+  tr_result_cache_ds_lookup_ms        11853      0.0      0.0      0.0      0.0      0.0      0.0
+  tr_result_cache_write_submit_ms     11853      0.0      0.0      0.0      0.0      0.0      0.0
+  http_overhead_ms                    11853      1.3      1.0      2.0      2.0      3.8      4.0
+
+== TRT service stages ==
+  metric                              count      avg      p50      p95      p99    p9999      max
+  total_ms                            11804     91.2     90.7     94.5    101.0    114.6    114.7
+  prepare_ms                          11804      0.4      0.4      0.5      0.5      1.2      9.1
+  kv_lookup_ms                        11804      1.3      1.3      1.6      1.7      2.4      2.4
+  result_cache_lookup_ms              11804      0.0      0.0      0.0      0.0      0.0      0.0
+  result_cache_ds_lookup_ms           11804      0.0      0.0      0.0      0.0      0.0      0.0
+  prompt_ms                           11804      2.5      2.7      2.9      3.0      5.4      5.6
+  runner_ms                           11804     85.9     84.9     88.8     95.5    107.6    109.1
+  runner_calls                        11804      1.0      1.0      1.0      1.0      1.0      1.0
+  runner_avg_ms                       11804     85.9     84.9     88.8     95.5    107.6    109.1
+  runner_max_ms                       11804     85.9     84.9     88.8     95.5    107.6    109.1
+  parse_ms                            11804      0.0      0.0      0.1      0.2      0.2      0.2
+  map_ms                              11804      0.1      0.1      0.2      0.2      0.8      0.8
+
+== TRT result cache groups (trt_log) ==
+  disabled     count=11804 total_p50=    90.7ms total_p95=    94.5ms total_p99=   101.0ms total_p9999=   114.6ms total_max=   114.7ms
+  unknown      count=  49 total_p50=     0.0ms total_p95=     0.0ms total_p99=     0.0ms total_p9999=     0.0ms total_max=     0.0ms
+
+== DataSystem C++ KV block stages (all measured phases) ==
+  scope: per KV block, from TRT-LLM C++ [Datasystem][TRACE], host wall-clock
+  metric                              count      avg      p50      p95      p99    p9999      max
+  offload: events=29330
+  offload.create_ms                   29330    0.607    0.605    0.758    0.833    1.578    2.758
+  offload.d2h_ms                      29330    0.488    0.468    0.727    0.751    1.173    1.259
+  offload.set_ms                      29330    0.757    0.746    0.910    1.015    1.689   10.769
+  offload.total_ms                    29330    1.887    1.870    2.256    2.388    3.445   11.648
+  onboard: events=13421
+  onboard.get_ms                      13421    0.632    0.623    0.747    0.818    1.094   10.691
+  onboard.h2d_ms                      13421    0.343    0.336    0.434    0.515    1.382    1.416
+  onboard.total_ms                    13421    1.009    0.992    1.178    1.293    2.116   11.078
+
+== DataSystem C++ KV block stages [pressure] ==
+  scope: per KV block, from TRT-LLM C++ [Datasystem][TRACE], host wall-clock
+  metric                              count      avg      p50      p95      p99    p9999      max
+  offload: events=5996
+  offload.create_ms                    5996    0.661    0.661    0.787    0.869    1.413    1.574
+  offload.d2h_ms                       5996    0.607    0.692    0.744    0.765    1.234    1.259
+  offload.set_ms                       5996    0.779    0.767    0.915    1.018    1.792    1.811
+  offload.total_ms                     5996    2.082    2.089    2.341    2.499    3.338    3.390
+  onboard: events=87
+  onboard.get_ms                         87    0.731    0.712    0.866    0.909    0.972    0.973
+  onboard.h2d_ms                         87    0.471    0.509    0.530    0.531    0.534    0.534
+  onboard.total_ms                       87    1.242    1.244    1.416    1.484    1.552    1.553
+
+== DataSystem C++ KV block stages [replay/onboard] ==
+  scope: per KV block, from TRT-LLM C++ [Datasystem][TRACE], host wall-clock
+  metric                              count      avg      p50      p95      p99    p9999      max
+  offload: events=23334
+  offload.create_ms                   23334    0.593    0.591    0.741    0.817    1.524    2.758
+  offload.d2h_ms                      23334    0.458    0.464    0.547    0.739    1.107    1.164
+  offload.set_ms                      23334    0.751    0.739    0.908    1.013    1.434   10.769
+  offload.total_ms                    23334    1.837    1.829    2.163    2.345    3.689   11.648
+  onboard: events=13334
+  onboard.get_ms                      13334    0.631    0.623    0.745    0.816    1.095   10.691
+  onboard.h2d_ms                      13334    0.342    0.336    0.420    0.510    1.382    1.416
+  onboard.total_ms                    13334    1.008    0.992    1.171    1.282    2.116   11.078
+```
