@@ -94,6 +94,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=90.0)
     parser.add_argument("--keep-server", action="store_true",
                         help="leave managed server running after the last sample")
+    parser.add_argument("--fail-on-kv-verdict", action="store_true",
+                        help="fail if the underlying C++ KV/DataSystem verifier returns non-zero")
     return parser.parse_args()
 
 
@@ -314,7 +316,7 @@ def fmt(value: Any) -> str:
 def print_summary(reports: Iterable[SampleReport]) -> None:
     print("\n== TRT_NUM_SAMPLES A/B summary ==")
     print(
-        "sample health exit calls ok/topk http_p50 http_p99 "
+        "sample health kv_exit calls ok/topk http_p50 http_p99 "
         "runner_avg runner_max json"
     )
     for item in reports:
@@ -416,17 +418,25 @@ def main() -> int:
         reports.append(run_sample(args, sample, managed))
 
     print_summary(reports)
+    kv_verdict_failures = [item for item in reports if item.test_exit not in (0, 4)]
+    if kv_verdict_failures:
+        print(
+            "\nINFO: one or more underlying C++ KV/DataSystem verifier runs returned "
+            "non-zero. Runner A/B validity is based on health, HTTP success, "
+            "full_topk and runner_calls; kv_exit is kept as a diagnostic."
+        )
     write_outputs(reports, args.summary_json, args.summary_csv)
 
     bad = [
         item for item in reports
         if not item.health_ok
-        or item.test_exit not in (0, 4)
         or item.fail_count
         or item.full_topk < item.ok_count
         or item.runner_calls_min != item.sample
         or item.runner_calls_max != item.sample
     ]
+    if args.fail_on_kv_verdict:
+        bad.extend(kv_verdict_failures)
     return 1 if bad else 0
 
 

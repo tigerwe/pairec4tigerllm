@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-04 | 当前状态: 修复 runner A/B 脚本 `--stop-command pkill -f` 误杀自身问题 | 下一步: 远程不带 `--stop-command` 执行 TRT_NUM_SAMPLES=1/2/4/8 自动 A/B
+> 最后更新: 2026-06-04 | 当前状态: runner 1/2/4/8 A/B 完成，1 轮 p50=91.8ms 且 full_topk=60/60 | 下一步: 以 TRT_NUM_SAMPLES=1 做 PaiRec E2E 验证，并单独恢复 DataSystem C++ KV verifier
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/4** | **远程 runner 轮数 A/B 完成: 1/2/4/8 轮均 `full_topk=60/60`；HTTP p50 分别为 91.8/180.1/350.2/701.7ms；确认 runner 耗时近似线性缩放** |
 | **6/4** | **修复 `scripts/benchmark_trt_runner_samples.py` 使用 `--stop-command 'pkill -f ...'` 时会匹配自身 `--server-cmd` 并被 `Terminated` 的问题；文档改为脚本外手动清理旧服务** |
 | **6/3** | **新增 `scripts/benchmark_trt_runner_samples.py`，自动核验 `/health` 的 `trt_num_samples`、运行直连压测、解析 `runner_calls` 并输出 JSON/CSV 对比** |
 | **6/2** | **TRT runner 优化准备: 定位每个 miss 请求串行执行 8 次 `runner.generate()`；增加 `TRT_NUM_SAMPLES` 参数和单轮 trace，支持 1/2/4/8 轮质量-时延 A/B** |
@@ -337,19 +338,23 @@ single runner.generate avg≈84.4ms
 1 round:  runner≈ 84ms, request≈107ms  待实测
 ```
 
-首轮减轮数远程结果已回传。根据请求 p50 接近预测值，推断为 `TRT_NUM_SAMPLES=4`；
-仍需通过 `/health` 的 `trt_num_samples` 或服务 TRACE 的 `runner_calls=4` 确认：
+远程完整 A/B 已回传，`/health` 与服务 TRACE 均确认轮数生效：
 
 ```text
-pressure requests=60 concurrency=1
-HTTP: avg=360ms p50=354ms p95=375ms p99=430ms max=495ms
-items: full_topk=60/60 min=5 p50=5 p95=5 max=5
-DataSystem offload blocks=508 total p50=2.079ms p99=3.041ms max=3.413ms
+sample health kv_exit calls ok/topk http_p50 http_p99 runner_avg runner_max
+1      True   2       1     60/60  91.8     150.7    85.8       177.7
+2      True   2       2     60/60  180.1    247.7    85.4       178.6
+4      True   2       4     60/60  350.2    423.0    84.8       178.4
+8      True   2       8     60/60  701.7    795.6    83.9       178.8
 ```
 
-相对 8 轮请求约 `698ms` 基线，4 轮请求 p50 约下降 `49%`，并且这 60 个请求
-没有出现 top-k 返回不足。该轮只有 `60` 个 HTTP 请求和 `508` 个 offload block，
-只能用于轮数 A/B；其 p9999 不作为正式尾延迟结论。
+结论：
+
+- 对当前直连 TRT、`topk=5`、60 请求样本，1/2/4/8 轮均没有出现 top-k 返回不足
+- 1 轮相对 8 轮 HTTP p50 从 `701.7ms` 降到 `91.8ms`，下降约 `87%`
+- 单次 `runner.generate()` 平均稳定在 `83.9-85.8ms`，说明主耗时几乎完全随轮数线性缩放
+- `kv_exit=2` 来自底层 C++ KV/DataSystem verifier 未通过；该组结果只作为 runner
+  轮数 A/B，不作为 DataSystem offload/onboard 结论
 
 远程按 `TRT_NUM_SAMPLES=1/2/4/8` 分别重启服务，再执行相同直连请求序列：
 
@@ -382,6 +387,9 @@ python scripts/benchmark_trt_runner_samples.py \
 `trt_num_samples`，运行 `scripts/test_trt_cpp_kv_offload.py`，解析服务 TRACE
 中的 `runner_calls/runner_avg_ms/runner_max_ms`，最后输出
 `/tmp/trt_runner_samples_ab.json` 和 `/tmp/trt_runner_samples_ab.csv`。
+默认情况下，runner A/B 脚本不会因为底层 C++ KV/DataSystem verifier 返回非零而
+失败；`kv_exit` 会保留在汇总中作为诊断字段。若需要严格验证 C++ KV/DataSystem，
+显式加 `--fail-on-kv-verdict`。
 
 后续可实验将多轮 prompt 批量提交给 `ModelRunnerCpp.generate()`。当前本地
 TensorRT-LLM API 对整批默认共用一个 sampling config，而现有逻辑依赖每轮不同
@@ -391,10 +399,10 @@ seed；批量化需要先验证候选多样性，不能直接替换串行循环�
 
 `dev` 已作为端到端阶段性基线保留。后续在专用分支开展 C++ DataSystem A/B：
 
-1. 远程执行 `scripts/benchmark_trt_runner_samples.py --samples 1,2,4,8 ...`，选择满足 `full_topk` 的最低轮数
-2. 如需稳定的正式 onboard p9999 结论，再扩大到 `>=100000` 个 onboard 样本
-3. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
-4. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
-5. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
-6. 从 PaiRec `:18080` 入口执行 `preload + warmup + pressure + replay` A/B，分别汇总 pressure 和 replay 的 p50/p95/p99/p9999/max
+1. 使用 `TRT_NUM_SAMPLES=1` 重启服务，从 PaiRec `:18080` 入口执行 E2E 压测，确认端到端 p50/p99 和 `items` 完整率
+2. 单独恢复 DataSystem C++ KV verifier：当前 runner A/B 中 `kv_exit=2`，不能作为 DataSystem 结论
+3. 如需稳定的正式 onboard p9999 结论，再扩大到 `>=100000` 个 onboard 样本
+4. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner
+5. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
+6. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
 7. 后续独立优化 fallback JSON 启动预加载

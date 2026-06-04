@@ -208,6 +208,21 @@ python scripts/test_trt_cpp_kv_offload.py \
 比较各轮数的 HTTP p50/p99 和 `full_topk` 比例。脚本默认使用带时间戳的唯一
 `user_id` 前缀，可避免重复运行命中 Python 结果缓存。默认轮数暂不修改。
 
+完整 runner A/B 已回传，`/health` 与 `runner_calls` 均确认轮数生效：
+
+```text
+sample health kv_exit calls ok/topk http_p50 http_p99 runner_avg runner_max
+1      True   2       1     60/60  91.8     150.7    85.8       177.7
+2      True   2       2     60/60  180.1    247.7    85.4       178.6
+4      True   2       4     60/60  350.2    423.0    84.8       178.4
+8      True   2       8     60/60  701.7    795.6    83.9       178.8
+```
+
+结论：当前直连 TRT、`topk=5`、60 请求样本下，1 轮已经 `full_topk=60/60`。
+1 轮相对 8 轮 HTTP p50 从 `701.7ms` 降到 `91.8ms`，可作为下一轮 PaiRec
+E2E 验证候选。`kv_exit=2` 来自 C++ KV/DataSystem verifier 未通过，不能作为
+DataSystem offload/onboard 结论。
+
 也可以直接用自动编排脚本：
 
 ```text
@@ -228,6 +243,10 @@ python scripts/benchmark_trt_runner_samples.py \
 /tmp/trt_runner_samples_ab.json
 /tmp/trt_runner_samples_ab.csv
 ```
+
+默认情况下，runner A/B 脚本不会因为底层 C++ KV/DataSystem verifier 返回非零而
+失败；`kv_exit` 会保留在汇总中作为诊断字段。若需要严格验证 C++ KV/DataSystem，
+显式加 `--fail-on-kv-verdict`。
 
 首轮减轮数远程结果已回传。根据请求 p50 接近预测值，推断为 `TRT_NUM_SAMPLES=4`；
 仍需通过 `/health` 的 `trt_num_samples` 或服务 TRACE 的 `runner_calls=4` 确认：
