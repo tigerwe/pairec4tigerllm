@@ -80,6 +80,7 @@ class RequestResult:
     ok: bool
     code: Any
     latency_ms: float
+    phase: str = "benchmark"
     request_id: str = ""
     item_count: int = 0
     error: str = ""
@@ -92,7 +93,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--url", default="http://localhost:18080/api/recommend")
     parser.add_argument("--uids", default="130,2184,7494",
                         help="comma-separated realtime or fallback user IDs")
+    parser.add_argument("--uid-file", default="",
+                        help="JSON file containing user IDs; dict keys are treated as UIDs")
+    parser.add_argument("--uid-offset", type=int, default=0,
+                        help="skip this many UIDs from --uid-file/--uids")
+    parser.add_argument("--uid-limit", type=int, default=0,
+                        help="limit UID pool size after --uid-offset; 0 means no limit")
     parser.add_argument("--requests", type=int, default=30)
+    parser.add_argument("--repeat-requests", type=int, default=0,
+                        help="replay/onboard requests after pressure; 0 disables replay")
+    parser.add_argument("--replay-source-count", type=int, default=4,
+                        help="number of recent pressure UIDs to cycle during replay")
+    parser.add_argument("--replay-tail-offset", type=int, default=0,
+                        help="skip this many pressure requests from the tail before replay selection")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--size", type=int, default=5)
@@ -116,7 +129,71 @@ def post_json(url: str, payload: Dict[str, Any], timeout: float) -> Dict[str, An
         return json.loads(response.read().decode("utf-8", errors="replace"))
 
 
-def request_one(index: int, uid: str, args: argparse.Namespace) -> RequestResult:
+def load_uid_pool(args: argparse.Namespace) -> List[str]:
+    if args.uid_file:
+        with open(args.uid_file, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            uids = [str(uid) for uid in data.keys()]
+        elif isinstance(data, list):
+            uids = []
+            for item in data:
+                if isinstance(item, dict):
+                    uid = item.get("uid") or item.get("user_id") or item.get("userId")
+                    if uid is not None:
+                        uids.append(str(uid))
+                elif item is not None:
+                    uids.append(str(item))
+        else:
+            raise SystemExit("--uid-file must contain a JSON object or array")
+    else:
+        uids = [uid.strip() for uid in args.uids.split(",") if uid.strip()]
+
+    uids = [uid for uid in uids if uid]
+    if args.uid_offset < 0 or args.uid_limit < 0:
+        raise SystemExit("--uid-offset and --uid-limit must be non-negative")
+    if args.uid_offset:
+        uids = uids[args.uid_offset:]
+    if args.uid_limit:
+        uids = uids[:args.uid_limit]
+    return uids
+
+
+def uid_sequence(count: int, uids: List[str]) -> List[str]:
+    return [uids[index % len(uids)] for index in range(count)]
+
+
+def select_replay_uids(
+    pressure_uids: List[str], replay_source_count: int, replay_tail_offset: int
+) -> List[str]:
+    if not pressure_uids:
+        return []
+    end = len(pressure_uids) - replay_tail_offset
+    if end <= 0:
+        end = len(pressure_uids)
+    start = max(0, end - replay_source_count)
+
+    selected: List[str] = []
+    seen = set()
+    for uid in pressure_uids[start:end]:
+        if uid not in seen:
+            selected.append(uid)
+            seen.add(uid)
+    if selected:
+        return selected
+
+    for uid in reversed(pressure_uids):
+        if uid not in seen:
+            selected.append(uid)
+            seen.add(uid)
+        if len(selected) >= replay_source_count:
+            break
+    return list(reversed(selected))
+
+
+def request_one(
+    index: int, uid: str, args: argparse.Namespace, phase: str
+) -> RequestResult:
     started = time.perf_counter()
     try:
         body = post_json(
@@ -131,6 +208,7 @@ def request_one(index: int, uid: str, args: argparse.Namespace) -> RequestResult
             ok=body.get("code") == 200,
             code=body.get("code"),
             latency_ms=latency_ms,
+            phase=phase,
             request_id=str(body.get("request_id", "")),
             item_count=len(body.get("items") or []),
             error=str(body.get("msg", "")) if body.get("code") != 200 else "",
@@ -142,19 +220,21 @@ def request_one(index: int, uid: str, args: argparse.Namespace) -> RequestResult
             ok=False,
             code="ERR",
             latency_ms=(time.perf_counter() - started) * 1000,
+            phase=phase,
             error=str(exc),
         )
 
 
 def run_requests(
-    count: int, uids: List[str], args: argparse.Namespace
+    count: int, uids: List[str], args: argparse.Namespace, phase: str
 ) -> List[RequestResult]:
     jobs = [(index, uids[index % len(uids)]) for index in range(count)]
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=args.concurrency
     ) as executor:
         futures = [
-            executor.submit(request_one, index, uid, args) for index, uid in jobs
+            executor.submit(request_one, index, uid, args, phase)
+            for index, uid in jobs
         ]
         return sorted((future.result() for future in futures), key=lambda item: item.index)
 
@@ -306,8 +386,10 @@ def print_metric_table(title: str, metrics: Dict[str, Dict[str, float]]) -> None
         )
 
 
-def print_datasystem_cpp_table(report: Dict[str, Any]) -> None:
-    print("\n== DataSystem C++ KV block stages ==")
+def print_datasystem_cpp_table(
+    report: Dict[str, Any], title: str = "DataSystem C++ KV block stages"
+) -> None:
+    print(f"\n== {title} ==")
     print("  scope: per KV block, from TRT-LLM C++ [Datasystem][TRACE], host wall-clock")
     if not report or all(report[op]["count"] == 0 for op in ("offload", "onboard")):
         print("  (no DataSystem C++ TRACE lines in the benchmark log slice)")
@@ -351,37 +433,135 @@ def print_item_summary(results: List[RequestResult], expected_size: int) -> Dict
     }
 
 
+def print_phase_summary(
+    title: str, results: List[RequestResult], elapsed_s: float, expected_size: int
+) -> Dict[str, Any]:
+    ok = [item for item in results if item.ok]
+    failed = [item for item in results if not item.ok]
+    latency = summarize(item.latency_ms for item in ok)
+    item_counts = [item.item_count for item in ok]
+    item_summary = summarize(item_counts)
+    full_size = sum(count >= expected_size for count in item_counts)
+
+    print(f"\n== {title} ==")
+    print(f"  ok={len(ok)} fail={len(failed)} elapsed={elapsed_s:.1f}s")
+    if latency:
+        print(
+            f"  client_ms avg={latency['avg']:.1f} p50={latency['p50']:.1f} "
+            f"p95={latency['p95']:.1f} p99={latency['p99']:.1f} "
+            f"p9999={latency['p9999']:.1f} max={latency['max']:.1f}"
+        )
+    if item_summary:
+        print(
+            f"  items full_size={full_size}/{len(item_counts)} expected={expected_size} "
+            f"min={min(item_counts)} p50={item_summary['p50']:.1f} "
+            f"p95={item_summary['p95']:.1f} max={int(item_summary['max'])}"
+        )
+    for item in failed[:5]:
+        print(f"  failed[{item.index}] uid={item.uid} code={item.code} error={item.error}")
+
+    return {
+        "ok": len(ok),
+        "fail": len(failed),
+        "elapsed_s": elapsed_s,
+        "client_metrics": latency or {},
+        "item_metrics": item_summary or {},
+        "full_size": full_size,
+        "expected_size": expected_size,
+    }
+
+
+def run_measured_phase(
+    phase: str, count: int, uids: List[str], args: argparse.Namespace
+) -> Tuple[List[RequestResult], float, Dict[str, str]]:
+    pairec_offset = file_offset(args.pairec_log)
+    trt_offset = file_offset(args.trt_log)
+    started = time.perf_counter()
+    results = run_requests(count, uids, args, phase)
+    elapsed_s = time.perf_counter() - started
+    logs = {
+        "pairec": read_appended(args.pairec_log, pairec_offset),
+        "trt": read_appended(args.trt_log, trt_offset),
+    }
+    return results, elapsed_s, logs
+
+
 def main() -> int:
     args = parse_args()
-    uids = [uid.strip() for uid in args.uids.split(",") if uid.strip()]
-    if not uids or args.requests < 1 or args.concurrency < 1:
-        raise SystemExit("--uids, --requests and --concurrency must be non-empty and positive")
+    uids = load_uid_pool(args)
+    if (
+        not uids
+        or args.requests < 1
+        or args.repeat_requests < 0
+        or args.concurrency < 1
+        or args.warmup < 0
+        or args.replay_source_count < 1
+        or args.replay_tail_offset < 0
+    ):
+        raise SystemExit(
+            "UID pool must be non-empty; --requests/--concurrency/"
+            "--replay-source-count must be positive; repeat/warmup/offsets non-negative"
+        )
 
     print("PaiRec end-to-end latency benchmark")
     print(f"  url={args.url}")
-    print(f"  uids={','.join(uids)} requests={args.requests} warmup={args.warmup}")
+    if args.uid_file:
+        print(f"  uid_file={args.uid_file} uid_pool={len(uids)} "
+              f"offset={args.uid_offset} limit={args.uid_limit or 'all'}")
+    else:
+        print(f"  uids={','.join(uids)}")
+    print(f"  requests={args.requests} repeat_requests={args.repeat_requests} warmup={args.warmup}")
+    print(f"  replay_source_count={args.replay_source_count} replay_tail_offset={args.replay_tail_offset}")
     print(f"  concurrency={args.concurrency} size={args.size} scene={args.scene_id}")
 
     if args.warmup:
         print("\n== Warmup ==")
-        warmup = run_requests(args.warmup, uids, args)
+        warmup = run_requests(args.warmup, uids, args, "warmup")
         print(f"  ok={sum(item.ok for item in warmup)}/{len(warmup)}")
 
-    pairec_offset = file_offset(args.pairec_log)
-    trt_offset = file_offset(args.trt_log)
+    pressure_pool = uids[:max(1, min(len(uids), args.requests))]
+    pressure_uids = uid_sequence(args.requests, pressure_pool)
+    if len(set(pressure_uids)) < args.requests:
+        print("\nWARN: pressure UID sequence contains repeats; cold/miss coverage is limited by UID pool size.")
 
-    print("\n== Benchmark ==")
-    started = time.perf_counter()
-    results = run_requests(args.requests, uids, args)
-    elapsed_s = time.perf_counter() - started
+    phase_summaries: Dict[str, Any] = {}
+    phase_logs: Dict[str, Dict[str, str]] = {}
+    results: List[RequestResult] = []
+
+    pressure_results, pressure_elapsed, pressure_logs = run_measured_phase(
+        "pressure", args.requests, pressure_pool, args
+    )
+    results.extend(pressure_results)
+    phase_logs["pressure"] = pressure_logs
+    phase_summaries["pressure"] = print_phase_summary(
+        f"pressure wave: {args.requests} requests, concurrency={args.concurrency}",
+        pressure_results,
+        pressure_elapsed,
+        args.size,
+    )
+
+    if args.repeat_requests:
+        replay_pool = select_replay_uids(
+            pressure_uids, args.replay_source_count, args.replay_tail_offset
+        )
+        print(f"\n  replay_uids={','.join(replay_pool)}")
+        replay_results, replay_elapsed, replay_logs = run_measured_phase(
+            "replay/onboard", args.repeat_requests, replay_pool, args
+        )
+        results.extend(replay_results)
+        phase_logs["replay/onboard"] = replay_logs
+        phase_summaries["replay/onboard"] = print_phase_summary(
+            f"replay/onboard wave: {args.repeat_requests} requests, concurrency={args.concurrency}",
+            replay_results,
+            replay_elapsed,
+            args.size,
+        )
+
+    elapsed_s = sum(summary["elapsed_s"] for summary in phase_summaries.values())
     ok = [item for item in results if item.ok]
     failed = [item for item in results if not item.ok]
-    print(f"  ok={len(ok)} fail={len(failed)} elapsed={elapsed_s:.1f}s")
-    for item in failed[:5]:
-        print(f"  failed[{item.index}] uid={item.uid} code={item.code} error={item.error}")
-
-    pairec_log = read_appended(args.pairec_log, pairec_offset)
-    trt_log = read_appended(args.trt_log, trt_offset)
+    pairec_log = "".join(logs["pairec"] for logs in phase_logs.values())
+    trt_log = "".join(logs["trt"] for logs in phase_logs.values())
     recommend_traces, recall_traces, trt_traces = parse_trace_logs(pairec_log, trt_log)
     request_ids = [item.request_id for item in ok if item.request_id]
 
@@ -392,7 +572,7 @@ def main() -> int:
     trt_metrics = numeric_fields(trt_traces, request_ids, TRT_TRACE_FIELDS)
     datasystem_metrics = datasystem_cpp_metrics(trt_log)
 
-    print_metric_table("Client", client_metrics)
+    print_metric_table("Client (all measured phases)", client_metrics)
     item_metrics = print_item_summary(ok, args.size)
     print_metric_table("PaiRec recommend stages", recommend_metrics)
     print_metric_table("GenerativeRecall stages", recall_metrics)
@@ -440,11 +620,23 @@ def main() -> int:
             f"total_max={total.get('max', 0):>8.1f}ms"
         )
 
-    print_datasystem_cpp_table(datasystem_metrics)
+    print_datasystem_cpp_table(
+        datasystem_metrics, "DataSystem C++ KV block stages (all measured phases)"
+    )
+    phase_datasystem_metrics = {
+        phase: datasystem_cpp_metrics(logs["trt"])
+        for phase, logs in phase_logs.items()
+    }
+    if len(phase_datasystem_metrics) > 1:
+        for phase, metrics in phase_datasystem_metrics.items():
+            print_datasystem_cpp_table(
+                metrics, f"DataSystem C++ KV block stages [{phase}]"
+            )
 
     report = {
         "config": vars(args),
         "elapsed_s": elapsed_s,
+        "phase_summaries": phase_summaries,
         "results": [asdict(item) for item in results],
         "client_metrics": client_metrics,
         "item_metrics": item_metrics,
@@ -452,6 +644,7 @@ def main() -> int:
         "recall_metrics": recall_metrics,
         "trt_metrics": trt_metrics,
         "datasystem_cpp_metrics": datasystem_metrics,
+        "phase_datasystem_cpp_metrics": phase_datasystem_metrics,
         "cache_group_source": group_trace_source,
         "cache_groups": {source: len(ids) for source, ids in grouped.items()},
     }

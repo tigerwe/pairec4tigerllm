@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-04 | 当前状态: E2E 报告已合并 DataSystem C++ KV block Get/Set 指标 | 下一步: 重跑 TRT_NUM_SAMPLES=1 E2E，分离纯 miss 与缓存命中并同时观察 C++ Get/Set
+> 最后更新: 2026-06-04 | 当前状态: 已补齐关闭 Python 结果缓存后的 E2E pressure/replay 测试链路 | 下一步: 远程用 `TRT_RESULT_CACHE_ENABLED=0` 跑充分样本并生成最终 E2E DS Set/Get 报告
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/4** | **新增 `TRT_RESULT_CACHE_ENABLED=0`，可关闭 Python TRT 推荐结果缓存；`scripts/benchmark_e2e_latency.py` 新增 `--uid-file`、pressure/replay 两段流量和按阶段 DataSystem C++ 指标，支持在端到端报告里同时观察 request stages 与 C++ `offload.set_ms` / `onboard.get_ms`** |
 | **6/4** | **输出 `docs/E2E_LATENCY_REPORT_2026-06-04.md`，汇总 TRT_NUM_SAMPLES=1 的 PaiRec E2E、缓存分组、当前 E2E 中 DS trace 缺失原因与下一轮充分测 DS Set/Get 的要求** |
 | **6/4** | **`scripts/benchmark_e2e_latency.py` 合并 DataSystem C++ KV block 统计：同一份 E2E 报告同时输出请求级阶段耗时和 `offload.set_ms` / `onboard.get_ms` 等 per-block 指标** |
 | **6/4** | **TRT_NUM_SAMPLES=1 PaiRec E2E 完成: 60 请求全成功，client p50=3.5ms、p95=90.5ms、p99=92.8ms；报告混入结果缓存命中，冷 miss 对应 p95/p99 尾部约 90ms** |
@@ -39,7 +40,7 @@
 - **C++ KV offload/onboard**: ✅ 闭环验证通过
 - **推理服务**: ✅ /recommend 可用
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
-- **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set/Get 阶段性统计已完成；🔄 待扩大 onboard 样本和补充 pinned DRAM A/B
+- **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set/Get 阶段性统计已完成；🔄 待远程运行关闭结果缓存后的 E2E pressure/replay 并补充 pinned DRAM A/B
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 

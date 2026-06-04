@@ -203,6 +203,55 @@ replay 阶段：重放近期 prefix → C++ onboard → DataSystem Get
 
 当前仓库中的 `scripts/benchmark_e2e_latency.py` 已能解析并输出 C++ DataSystem block 指标；缺口在于实验流量需要绕开结果缓存并制造足够 KV 压力。
 
+本次后续改动已补齐上述实验能力：
+
+- TRT 服务新增 `TRT_RESULT_CACHE_ENABLED=0` / `--trt_result_cache_enabled 0`，用于关闭 Python TRT 推荐结果缓存，避免 replay 被 `hbm_hit` 短路。
+- E2E 脚本新增 `--uid-file`、`--repeat-requests`、`--replay-source-count`、`--replay-tail-offset`，可在同一次端到端 benchmark 中构造 pressure/replay 两段流量。
+- E2E 输出新增按阶段 DataSystem C++ 指标：`[pressure]` 主要观察 `offload.set_ms`，`[replay/onboard]` 主要观察 `onboard.get_ms`。
+
+建议下一轮远程启动 TRT 服务时使用：
+
+```bash
+TRT_NUM_SAMPLES=1 TRT_RESULT_CACHE_ENABLED=0 TRT_MAX_KV_TOKENS=1024 \
+python -m inference.trt_llm.server \
+  --model_path "$MODEL_PATH" \
+  --qwen3_model_path "$QWEN3_PATH" \
+  --trt_engine_dir "$ENGINE_DIR" \
+  --port 18000 --device cuda \
+  --datasystem_host 127.0.0.1 --datasystem_port 31501 \
+  2>&1 | tee /tmp/server_e2e_ds.log
+```
+
+启动后先确认：
+
+```bash
+curl http://127.0.0.1:18000/health
+# 需要看到: "trt_num_samples":1, "trt_result_cache_enabled":false, "datasystem":"connected"
+```
+
+端到端充分测试建议先跑中等规模，确认 `onboard.count > 0` 后再扩大：
+
+```bash
+python scripts/benchmark_e2e_latency.py \
+  --url http://127.0.0.1:18080/api/recommend \
+  --uid-file /home/workspace/zcx/pairec4tigerllm/data/user_features.json \
+  --uid-offset 0 \
+  --uid-limit 2000 \
+  --warmup 0 \
+  --requests 1000 \
+  --repeat-requests 10000 \
+  --replay-source-count 4 \
+  --replay-tail-offset 1 \
+  --concurrency 1 \
+  --size 5 \
+  --timeout 10 \
+  --pairec-log /tmp/pairec_e2e_ds.log \
+  --trt-log /tmp/server_e2e_ds.log \
+  --json-output /tmp/e2e_ds_pressure_replay.json
+```
+
+如果这轮 `onboard` 样本仍不足，再提高 `--repeat-requests`；如果需要正式 p9999 结论，`onboard` 样本量建议至少 `10000`，更稳妥是 `>=100000`。
+
 ## 9. 报告结论
 
 当前可确认：

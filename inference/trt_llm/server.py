@@ -53,6 +53,7 @@ class InferenceConfig:
     trt_scheduler_policy: str = 'max_utilization'
     trt_max_input_len: int = 64   # TRT engine max_input_len (match trtllm-build --max_input_len)
     trt_num_samples: int = 8      # Serial runner.generate calls used to build the candidate pool
+    trt_result_cache_enabled: bool = True  # Python-side TRT recommendation result cache
 
 
 class TensorRTLLMInference:
@@ -201,6 +202,8 @@ class GenerativeInferenceService:
         self._result_cache: OrderedDict[str, Dict] = OrderedDict()
         self._result_cache_max = 50  # LRU 容量
         self._result_ds_prefix = "pairec4tigerllm:result"  # DataSystem key 前缀 (与 KV 分离)
+        if not config.trt_result_cache_enabled:
+            print("[ResultCache] disabled by config")
 
         # 根据 backbone 选择加载方式
         backbone = model_config.get('backbone', config.backbone)
@@ -516,6 +519,8 @@ class GenerativeInferenceService:
             'result_cache_write_submit_ms': 0.0,
             'backend': 'unknown',
         }
+        if not self.config.trt_result_cache_enabled:
+            trace['result_cache_source'] = 'disabled'
 
         # 1. 输入准备
         prepare_started = time.perf_counter()
@@ -549,67 +554,67 @@ class GenerativeInferenceService:
                 # ── TRT-LLM 结果缓存 (HBM + DataSystem onboard) ─
                 cache_key = f"{user_id}:{history_hash}"
 
-                # 1. 查 HBM 内存缓存
-                result_cache_started = time.perf_counter()
-                if cache_key in self._result_cache:
-                    self._result_cache.move_to_end(cache_key)
-                    result = self._result_cache[cache_key]
+                if self.config.trt_result_cache_enabled:
+                    # 1. 查 HBM 内存缓存
+                    result_cache_started = time.perf_counter()
+                    if cache_key in self._result_cache:
+                        self._result_cache.move_to_end(cache_key)
+                        result = self._result_cache[cache_key]
+                        trace['result_cache_lookup_ms'] = (
+                            time.perf_counter() - result_cache_started
+                        ) * 1000
+                        trace['result_cache_source'] = 'hbm_hit'
+                        trace['backend'] = 'trt-qwen3'
+                        total_ms = (time.perf_counter() - t0) * 1000
+                        trace['total_ms'] = total_ms
+                        self.kv_cache_hits += 1
+                        print(f"[ResultCache] hbm_hit: user={user_id}, total_ms={total_ms:.0f}")
+                        return {
+                            'recommendations': result['recommendations'],
+                            'inference_time_ms': total_ms,
+                            'trace': trace,
+                        }
                     trace['result_cache_lookup_ms'] = (
                         time.perf_counter() - result_cache_started
                     ) * 1000
-                    trace['result_cache_source'] = 'hbm_hit'
-                    trace['backend'] = 'trt-qwen3'
-                    total_ms = (time.perf_counter() - t0) * 1000
-                    trace['total_ms'] = total_ms
-                    self.kv_cache_hits += 1
-                    print(f"[ResultCache] hbm_hit: user={user_id}, total_ms={total_ms:.0f}")
-                    return {
-                        'recommendations': result['recommendations'],
-                        'inference_time_ms': total_ms,
-                        'trace': trace,
-                    }
-                trace['result_cache_lookup_ms'] = (
-                    time.perf_counter() - result_cache_started
-                ) * 1000
 
-                # 2. DataSystem onboard (内存 miss 时回读)
-                onboard_result = None
-                if self.kv_manager is not None and self.kv_manager.ds is not None:
-                    t_ds = time.perf_counter()
-                    try:
-                        ds_key = f"{self._result_ds_prefix}:{cache_key}"
-                        raw = self.kv_manager.ds.kv().get([ds_key], convert_to_str=False)
-                        trace['result_cache_ds_lookup_ms'] = (
-                            time.perf_counter() - t_ds
-                        ) * 1000
-                        if raw and raw[0] is not None:
-                            onboard_result = json.loads(
-                                raw[0] if isinstance(raw[0], bytes) else raw[0]
-                            )
-                            ds_lookup_ms = (time.perf_counter() - t_ds) * 1000
-                            print(f"[ResultCache] ds_hit: user={user_id}, "
-                                  f"ds_lookup_ms={ds_lookup_ms:.0f}")
-                            # 回填 HBM
-                            self._result_cache[cache_key] = onboard_result
-                            self._result_cache.move_to_end(cache_key)
-                            trace['result_cache_source'] = 'ds_hit'
-                            self.kv_cache_hits += 1
-                            total_ms = (time.perf_counter() - t0) * 1000
-                            trace['total_ms'] = total_ms
-                            trace['backend'] = 'trt-qwen3'
-                            return {
-                                'recommendations': onboard_result['recommendations'],
-                                'trace': trace,
-                                'inference_time_ms': total_ms,
-                            }
-                    except Exception as e:
-                        trace['result_cache_ds_lookup_ms'] = (
-                            time.perf_counter() - t_ds
-                        ) * 1000
-                        # "Key not found" 是首次请求的正常 miss, 不打印
-                        msg = str(e)
-                        if "Key not found" not in msg and "not found" not in msg.lower():
-                            print(f"[ResultCache] DataSystem onboard error: {e}")
+                    # 2. DataSystem onboard (内存 miss 时回读)
+                    if self.kv_manager is not None and self.kv_manager.ds is not None:
+                        t_ds = time.perf_counter()
+                        try:
+                            ds_key = f"{self._result_ds_prefix}:{cache_key}"
+                            raw = self.kv_manager.ds.kv().get([ds_key], convert_to_str=False)
+                            trace['result_cache_ds_lookup_ms'] = (
+                                time.perf_counter() - t_ds
+                            ) * 1000
+                            if raw and raw[0] is not None:
+                                onboard_result = json.loads(
+                                    raw[0] if isinstance(raw[0], bytes) else raw[0]
+                                )
+                                ds_lookup_ms = (time.perf_counter() - t_ds) * 1000
+                                print(f"[ResultCache] ds_hit: user={user_id}, "
+                                      f"ds_lookup_ms={ds_lookup_ms:.0f}")
+                                # 回填 HBM
+                                self._result_cache[cache_key] = onboard_result
+                                self._result_cache.move_to_end(cache_key)
+                                trace['result_cache_source'] = 'ds_hit'
+                                self.kv_cache_hits += 1
+                                total_ms = (time.perf_counter() - t0) * 1000
+                                trace['total_ms'] = total_ms
+                                trace['backend'] = 'trt-qwen3'
+                                return {
+                                    'recommendations': onboard_result['recommendations'],
+                                    'trace': trace,
+                                    'inference_time_ms': total_ms,
+                                }
+                        except Exception as e:
+                            trace['result_cache_ds_lookup_ms'] = (
+                                time.perf_counter() - t_ds
+                            ) * 1000
+                            # "Key not found" 是首次请求的正常 miss, 不打印
+                            msg = str(e)
+                            if "Key not found" not in msg and "not found" not in msg.lower():
+                                print(f"[ResultCache] DataSystem onboard error: {e}")
 
                 # 3. 全部 miss → TRT-LLM 引擎推理
                 # 引擎max_new_tokens硬上限32 (96-64), 超了C++层卡死不报错
@@ -720,7 +725,7 @@ class GenerativeInferenceService:
             self.kv_cache_misses += 1
 
         # 7. TRT-LLM 结果缓存存储
-        if self._trt_backend is not None:
+        if self._trt_backend is not None and self.config.trt_result_cache_enabled:
             result_cache_write_started = time.perf_counter()
             cache_key = f"{user_id}:{history_hash}"
             while len(self._result_cache) >= self._result_cache_max:
@@ -1028,6 +1033,7 @@ class HTTPServer:
                 'kv_cache_misses': self.service.kv_cache_misses,
                 'version': '1.0.0',
                 'trt_num_samples': self.service.config.trt_num_samples,
+                'trt_result_cache_enabled': self.service.config.trt_result_cache_enabled,
             })
 
         @app.route('/recommend', methods=['POST'])
@@ -1083,6 +1089,13 @@ class HTTPServer:
         app.run(host='0.0.0.0', port=self.port, threaded=True)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ('0', 'false', 'no', 'off')
+
+
 def main():
     """命令行入口."""
     parser = argparse.ArgumentParser(description='Start inference service')
@@ -1123,6 +1136,10 @@ def main():
                         default=int(os.environ.get('TRT_NUM_SAMPLES', '8')),
                         help='Number of serial TRT runner.generate samples per request '
                              '(env: TRT_NUM_SAMPLES, default: 8)')
+    parser.add_argument('--trt_result_cache_enabled', type=int, choices=(0, 1),
+                        default=1 if _env_bool('TRT_RESULT_CACHE_ENABLED', True) else 0,
+                        help='Enable Python-side TRT recommendation result cache '
+                             '(env: TRT_RESULT_CACHE_ENABLED, default: 1)')
 
     args = parser.parse_args()
 
@@ -1141,6 +1158,7 @@ def main():
         trt_scheduler_policy=args.trt_scheduler_policy,
         trt_max_input_len=args.trt_max_input_len,
         trt_num_samples=args.trt_num_samples,
+        trt_result_cache_enabled=bool(args.trt_result_cache_enabled),
     )
 
     # 创建推理服务

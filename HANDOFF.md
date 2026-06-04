@@ -417,9 +417,12 @@ PaiRec :18080
 新增 `scripts/benchmark_e2e_latency.py`：
 - 从 PaiRec `/api/recommend` 入口发请求
 - 用 PaiRec `request_id` 关联 Go 和 Python TRT 日志
-- 汇总各阶段 p50/p95/p99
+- 汇总各阶段 p50/p95/p99/p9999/max
 - 按结果缓存来源 `miss` / `hbm_hit` / `ds_hit` 分组
 - percentile 使用线性插值，2 个样本的 p50 为中位数
+- 可通过 `--uid-file` 构造大量不同 UID 的 pressure 流量
+- 可通过 `--repeat-requests` + `--replay-source-count` 循环近期 pressure UID，端到端观察 C++ DataSystem onboard/Get
+- 可按 `[pressure]` 和 `[replay/onboard]` 分别输出 C++ `[Datasystem][TRACE]` 的 `offload.set_ms` / `onboard.get_ms`
 - PaiRec 的结构化日志使用 `glog`；启动脚本默认传入 `--alsologtostderr=true`，保留文件日志并确保 `tee /tmp/pairec.log` 能捕获 trace
 
 远程冷请求分解已确认：
@@ -498,7 +501,7 @@ export LD_PRELOAD="\
 
 ### 下一步
 
-1. 远程拉取 F12 埋点并重启 TRT 服务和 PaiRec
-2. 运行 `scripts/benchmark_e2e_latency.py`
-3. 分别采集 `miss`、`hbm_hit`、`ds_hit` 的 p50/p95/p99
-4. 根据阶段占比确定下一轮优化目标
+1. 远程拉取最新分支，使用 `TRT_NUM_SAMPLES=1 TRT_RESULT_CACHE_ENABLED=0 TRT_MAX_KV_TOKENS=1024` 重启 TRT 服务
+2. `/health` 确认 `trt_num_samples=1`、`trt_result_cache_enabled=false`、`datasystem=connected`
+3. 用 `scripts/benchmark_e2e_latency.py --uid-file ... --requests 1000 --repeat-requests 10000 --replay-source-count 4` 跑端到端 pressure/replay
+4. 生成最终 Markdown 报告：请求级 E2E 阶段 + `[pressure] offload.set_ms` + `[replay/onboard] onboard.get_ms`
