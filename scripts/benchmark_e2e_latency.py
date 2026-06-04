@@ -67,6 +67,11 @@ TRT_TRACE_FIELDS = [
     "map_ms",
 ]
 
+DATASYSTEM_METRIC_FIELDS = {
+    "offload": ["create_ms", "d2h_ms", "set_ms", "total_ms"],
+    "onboard": ["get_ms", "h2d_ms", "total_ms"],
+}
+
 
 @dataclass
 class RequestResult:
@@ -259,6 +264,33 @@ def numeric_fields(
     return output
 
 
+def datasystem_cpp_metrics(trt_log: str) -> Dict[str, Any]:
+    events = [
+        parse_key_values(line)
+        for line in trt_log.splitlines()
+        if "[Datasystem][TRACE]" in line
+    ]
+    report: Dict[str, Any] = {}
+    for op, fields in DATASYSTEM_METRIC_FIELDS.items():
+        op_events = [event for event in events if event.get("op") == op]
+        metrics: Dict[str, Dict[str, float]] = {}
+        for field in fields:
+            values: List[float] = []
+            for event in op_events:
+                try:
+                    values.append(float(str(event[field]).rstrip(",.")))
+                except (KeyError, ValueError):
+                    pass
+            summary = summarize(values)
+            if summary:
+                metrics[field] = summary
+        report[op] = {
+            "count": len(op_events),
+            "metrics": metrics,
+        }
+    return report
+
+
 def print_metric_table(title: str, metrics: Dict[str, Dict[str, float]]) -> None:
     print(f"\n== {title} ==")
     if not metrics:
@@ -272,6 +304,51 @@ def print_metric_table(title: str, metrics: Dict[str, Dict[str, float]]) -> None
             f"{values['p95']:>8.1f} {values['p99']:>8.1f} "
             f"{values['p9999']:>8.1f} {values['max']:>8.1f}"
         )
+
+
+def print_datasystem_cpp_table(report: Dict[str, Any]) -> None:
+    print("\n== DataSystem C++ KV block stages ==")
+    print("  scope: per KV block, from TRT-LLM C++ [Datasystem][TRACE], host wall-clock")
+    if not report or all(report[op]["count"] == 0 for op in ("offload", "onboard")):
+        print("  (no DataSystem C++ TRACE lines in the benchmark log slice)")
+        return
+    print("  metric                              count      avg      p50      p95      p99    p9999      max")
+    for op in ("offload", "onboard"):
+        op_report = report[op]
+        print(f"  {op}: events={op_report['count']}")
+        for name, values in op_report["metrics"].items():
+            metric_name = f"{op}.{name}"
+            print(
+                f"  {metric_name:<35} {int(values['count']):>5} "
+                f"{values['avg']:>8.3f} {values['p50']:>8.3f} "
+                f"{values['p95']:>8.3f} {values['p99']:>8.3f} "
+                f"{values['p9999']:>8.3f} {values['max']:>8.3f}"
+            )
+
+
+def print_item_summary(results: List[RequestResult], expected_size: int) -> Dict[str, Any]:
+    item_counts = [item.item_count for item in results if item.ok]
+    full_size = sum(count >= expected_size for count in item_counts)
+    summary = summarize(item_counts)
+    print("\n== Response items ==")
+    if not summary:
+        print("  (no successful responses)")
+        return {
+            "expected_size": expected_size,
+            "full_size": 0,
+            "count": 0,
+        }
+    print(
+        f"  full_size={full_size}/{len(item_counts)} expected={expected_size} "
+        f"min={min(item_counts)} p50={summary['p50']:.1f} "
+        f"p95={summary['p95']:.1f} max={int(summary['max'])}"
+    )
+    return {
+        "expected_size": expected_size,
+        "full_size": full_size,
+        "count": len(item_counts),
+        "metrics": summary,
+    }
 
 
 def main() -> int:
@@ -313,26 +390,47 @@ def main() -> int:
     recommend_metrics = numeric_fields(recommend_traces, request_ids, RECOMMEND_TRACE_FIELDS)
     recall_metrics = numeric_fields(recall_traces, request_ids, RECALL_TRACE_FIELDS)
     trt_metrics = numeric_fields(trt_traces, request_ids, TRT_TRACE_FIELDS)
+    datasystem_metrics = datasystem_cpp_metrics(trt_log)
 
     print_metric_table("Client", client_metrics)
+    item_metrics = print_item_summary(ok, args.size)
     print_metric_table("PaiRec recommend stages", recommend_metrics)
     print_metric_table("GenerativeRecall stages", recall_metrics)
     print_metric_table("TRT service stages", trt_metrics)
+    if not trt_metrics and recall_metrics:
+        print("\nINFO: TRT service log lines were not correlated by request_id.")
+        print("  Use the GenerativeRecall tr_* fields above as the TRT response trace.")
     if not recommend_traces or not recall_traces:
         print("\nWARN: PaiRec structured trace lines were not found.")
         print("  Restart PaiRec with scripts/start_pairec.sh and capture stderr:")
         print("  CONFIG_PATH=./configs/pairec_config.kafka.json bash scripts/start_pairec.sh 2>&1 | tee /tmp/pairec.log")
 
     grouped: Dict[str, List[str]] = {}
-    for request_id in request_ids:
-        source = trt_traces.get(request_id, {}).get("cache", "unknown")
-        grouped.setdefault(source, []).append(request_id)
-    print("\n== TRT result cache groups ==")
+    group_trace_source = "trt_log"
+    if trt_traces:
+        for request_id in request_ids:
+            source = trt_traces.get(request_id, {}).get("cache", "unknown")
+            grouped.setdefault(source, []).append(request_id)
+        group_traces = trt_traces
+        group_fields = ["total_ms", "runner_ms"]
+        total_field = "total_ms"
+    else:
+        group_trace_source = "generative_recall"
+        for request_id in request_ids:
+            source = recall_traces.get(request_id, {}).get(
+                "tr_result_cache_source", "unknown"
+            )
+            grouped.setdefault(source, []).append(request_id)
+        group_traces = recall_traces
+        group_fields = ["tr_total_ms", "tr_runner_ms"]
+        total_field = "tr_total_ms"
+
+    print(f"\n== TRT result cache groups ({group_trace_source}) ==")
     if not grouped:
         print("  (no correlated TRT trace lines)")
     for source, ids in sorted(grouped.items()):
-        metrics = numeric_fields(trt_traces, ids, ["total_ms", "runner_ms"])
-        total = metrics.get("total_ms", {})
+        metrics = numeric_fields(group_traces, ids, group_fields)
+        total = metrics.get(total_field, {})
         print(
             f"  {source:<12} count={len(ids):>4} "
             f"total_p50={total.get('p50', 0):>8.1f}ms "
@@ -342,14 +440,19 @@ def main() -> int:
             f"total_max={total.get('max', 0):>8.1f}ms"
         )
 
+    print_datasystem_cpp_table(datasystem_metrics)
+
     report = {
         "config": vars(args),
         "elapsed_s": elapsed_s,
         "results": [asdict(item) for item in results],
         "client_metrics": client_metrics,
+        "item_metrics": item_metrics,
         "recommend_metrics": recommend_metrics,
         "recall_metrics": recall_metrics,
         "trt_metrics": trt_metrics,
+        "datasystem_cpp_metrics": datasystem_metrics,
+        "cache_group_source": group_trace_source,
         "cache_groups": {source: len(ids) for source, ids in grouped.items()},
     }
     if args.json_output:

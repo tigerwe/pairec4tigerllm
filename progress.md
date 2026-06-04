@@ -1,11 +1,13 @@
 # 工作进度
 
-> 最后更新: 2026-06-04 | 当前状态: runner 1/2/4/8 A/B 完成，1 轮 p50=91.8ms 且 full_topk=60/60 | 下一步: 以 TRT_NUM_SAMPLES=1 做 PaiRec E2E 验证，并单独恢复 DataSystem C++ KV verifier
+> 最后更新: 2026-06-04 | 当前状态: E2E 报告已合并 DataSystem C++ KV block Get/Set 指标 | 下一步: 重跑 TRT_NUM_SAMPLES=1 E2E，分离纯 miss 与缓存命中并同时观察 C++ Get/Set
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/4** | **`scripts/benchmark_e2e_latency.py` 合并 DataSystem C++ KV block 统计：同一份 E2E 报告同时输出请求级阶段耗时和 `offload.set_ms` / `onboard.get_ms` 等 per-block 指标** |
+| **6/4** | **TRT_NUM_SAMPLES=1 PaiRec E2E 完成: 60 请求全成功，client p50=3.5ms、p95=90.5ms、p99=92.8ms；报告混入结果缓存命中，冷 miss 对应 p95/p99 尾部约 90ms** |
 | **6/4** | **远程 runner 轮数 A/B 完成: 1/2/4/8 轮均 `full_topk=60/60`；HTTP p50 分别为 91.8/180.1/350.2/701.7ms；确认 runner 耗时近似线性缩放** |
 | **6/4** | **修复 `scripts/benchmark_trt_runner_samples.py` 使用 `--stop-command 'pkill -f ...'` 时会匹配自身 `--server-cmd` 并被 `Terminated` 的问题；文档改为脚本外手动清理旧服务** |
 | **6/3** | **新增 `scripts/benchmark_trt_runner_samples.py`，自动核验 `/health` 的 `trt_num_samples`、运行直连压测、解析 `runner_calls` 并输出 JSON/CSV 对比** |
@@ -391,6 +393,37 @@ python scripts/benchmark_trt_runner_samples.py \
 失败；`kv_exit` 会保留在汇总中作为诊断字段。若需要严格验证 C++ KV/DataSystem，
 显式加 `--fail-on-kv-verdict`。
 
+### TRT_NUM_SAMPLES=1 PaiRec E2E 实测
+
+从 PaiRec `:18080` 入口使用 `TRT_NUM_SAMPLES=1`、`size=5`、60 个请求完成
+端到端压测：
+
+```text
+Client: avg=9.4ms p50=3.5ms p95=90.5ms p99=92.8ms max=94.6ms
+PaiRec total: avg=8.4ms p50=3.0ms p95=89.0ms p99=91.6ms max=94.0ms
+GenerativeRecall http_ms: avg=8.1ms p50=2.0ms p95=89.0ms p99=91.2ms
+TRT trace tr_total_ms: avg=7.5ms p50=1.6ms p95=88.2ms p99=90.4ms
+TRT trace tr_runner_ms: avg=5.4ms p50=0.0ms p95=80.0ms p99=81.6ms
+ok=60 fail=0
+```
+
+该报告混合了推荐结果缓存命中和少量冷 miss。p50 主要代表缓存命中路径；p95/p99
+代表仍需进入 TRT runner 的冷 miss，符合 1 轮 runner 约 `84ms` 的预期。由于 TRT
+服务日志未按 `request_id` 关联上，`scripts/benchmark_e2e_latency.py` 已补充
+item 完整率和基于 GenerativeRecall `tr_result_cache_source` 的缓存分组 fallback。
+
+后续重跑同一个 E2E 脚本时，会追加：
+
+```text
+== DataSystem C++ KV block stages ==
+  scope: per KV block, from TRT-LLM C++ [Datasystem][TRACE], host wall-clock
+  offload.create_ms / offload.d2h_ms / offload.set_ms / offload.total_ms
+  onboard.get_ms / onboard.h2d_ms / onboard.total_ms
+```
+
+该部分是 per-block C++ KV 传输指标，不是 per-request 请求指标；需要与上面的
+请求级 E2E 阶段并排解读。
+
 后续可实验将多轮 prompt 批量提交给 `ModelRunnerCpp.generate()`。当前本地
 TensorRT-LLM API 对整批默认共用一个 sampling config，而现有逻辑依赖每轮不同
 seed；批量化需要先验证候选多样性，不能直接替换串行循环。
@@ -399,7 +432,7 @@ seed；批量化需要先验证候选多样性，不能直接替换串行循环�
 
 `dev` 已作为端到端阶段性基线保留。后续在专用分支开展 C++ DataSystem A/B：
 
-1. 使用 `TRT_NUM_SAMPLES=1` 重启服务，从 PaiRec `:18080` 入口执行 E2E 压测，确认端到端 p50/p99 和 `items` 完整率
+1. 分开采集 `TRT_NUM_SAMPLES=1` 的纯 cold/miss E2E 与缓存命中 E2E，避免一个报告里 p50/p99 语义混杂
 2. 单独恢复 DataSystem C++ KV verifier：当前 runner A/B 中 `kv_exit=2`，不能作为 DataSystem 结论
 3. 如需稳定的正式 onboard p9999 结论，再扩大到 `>=100000` 个 onboard 样本
 4. 推理服务增加实验开关，关闭 TRT Python 结果缓存和无效的 Python KV Cache 查询，确保请求进入 C++ runner

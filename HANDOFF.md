@@ -248,6 +248,36 @@ python scripts/benchmark_trt_runner_samples.py \
 失败；`kv_exit` 会保留在汇总中作为诊断字段。若需要严格验证 C++ KV/DataSystem，
 显式加 `--fail-on-kv-verdict`。
 
+### 6/4 TRT_NUM_SAMPLES=1 PaiRec E2E
+
+从 PaiRec `:18080` 入口完成 `TRT_NUM_SAMPLES=1` 端到端压测，60 请求全成功：
+
+```text
+Client: avg=9.4ms p50=3.5ms p95=90.5ms p99=92.8ms max=94.6ms
+PaiRec total: avg=8.4ms p50=3.0ms p95=89.0ms p99=91.6ms max=94.0ms
+GenerativeRecall http_ms: avg=8.1ms p50=2.0ms p95=89.0ms p99=91.2ms
+TRT trace tr_total_ms: avg=7.5ms p50=1.6ms p95=88.2ms p99=90.4ms
+TRT trace tr_runner_ms: avg=5.4ms p50=0.0ms p95=80.0ms p99=81.6ms
+ok=60 fail=0
+```
+
+注意：这组报告混入推荐结果缓存命中，p50 主要是缓存路径；p95/p99 是少量冷 miss
+进入 1 轮 TRT runner 的路径。`scripts/benchmark_e2e_latency.py` 已补充 item 完整率
+和基于 GenerativeRecall `tr_result_cache_source` 的缓存分组 fallback，后续重跑可更清楚
+区分 `miss/hbm_hit/ds_hit`。
+
+`scripts/benchmark_e2e_latency.py` 也已合并 DataSystem C++ KV block 统计。重跑 E2E
+时同一份报告会追加：
+
+```text
+== DataSystem C++ KV block stages ==
+  offload.create_ms / offload.d2h_ms / offload.set_ms / offload.total_ms
+  onboard.get_ms / onboard.h2d_ms / onboard.total_ms
+```
+
+该部分来自 TRT-LLM C++ `[Datasystem][TRACE]`，是 per-block host wall-clock，不是
+per-request 指标。
+
 首轮减轮数远程结果已回传。根据请求 p50 接近预测值，推断为 `TRT_NUM_SAMPLES=4`；
 仍需通过 `/health` 的 `trt_num_samples` 或服务 TRACE 的 `runner_calls=4` 确认：
 
