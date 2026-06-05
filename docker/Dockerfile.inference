@@ -34,7 +34,7 @@ RUN chmod +x /app/entrypoint.sh
 
 ENV MODEL_PATH=/app/checkpoints/decoder/decoder_best.pt
 ENV DEVICE=cuda
-ENV PORT=8000
+ENV PORT=18000
 ENV MAX_BATCH_SIZE=32
 ENV MAX_SEQ_LEN=2048
 ENV BACKBONE=qwen3
@@ -42,8 +42,8 @@ ENV QWEN3_MODEL_PATH=/app/models/Qwen3-0.6B
 ENV USE_TRT_LLM=false
 ENV PYTHONPATH=/app
 
-EXPOSE 8000
+EXPOSE 18000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 \
-    CMD curl -fsS http://localhost:8000/health || exit 1
+    CMD curl -fsS http://localhost:18000/health || exit 1
 
 ENTRYPOINT ["/app/entrypoint.sh"]

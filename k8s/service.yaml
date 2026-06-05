@@ -12,8 +12,8 @@ spec:
   selector:
     app: inference
   ports:
-    - port: 8000
-      targetPort: 8000
+    - port: 18000
+      targetPort: 18000
       name: http
   type: ClusterIP
 
@@ -29,7 +29,7 @@ spec:
   selector:
     app: pairec
   ports:
-    - port: 8080
-      targetPort: 8080
+    - port: 18080
+      targetPort: 18080
       name: http
   type: LoadBalancer

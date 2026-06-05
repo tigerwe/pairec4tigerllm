@@ -9,7 +9,9 @@ metadata:
   labels:
     app: inference
 spec:
-  replicas: 1  # GPU 服务通常单副本，或根据 GPU 数量调整
+  replicas: 1  # GPU 服务先单副本跑通，后续按 GPU 数量扩展
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: inference
@@ -22,35 +24,87 @@ spec:
         accelerator: nvidia-gpu  # 调度到 GPU 节点
       containers:
         - name: inference
-          image: registry.example.com/pairec-inference:latest
-          imagePullPolicy: Always
+          image: registry.example.com/pairec-inference:trt-datasystem
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8000
+            - containerPort: 18000
               name: http
           env:
             - name: MODEL_PATH
-              value: "/app/checkpoints/decoder/decoder_best.pt"
+              value: "/app/checkpoints/decoder_qwen3/decoder_epoch_20.pt"
+            - name: QWEN3_MODEL_PATH
+              value: "/app/models/Qwen3-0.6B"
+            - name: TRT_ENGINE_DIR
+              value: "/app/trt_engines/qwen3_rec_v4"
             - name: PORT
-              value: "8000"
+              value: "18000"
             - name: DEVICE
               value: "cuda"
             - name: MAX_BATCH_SIZE
-              value: "64"
+              value: "32"
             - name: MAX_SEQ_LEN
               value: "512"
+            - name: BACKBONE
+              value: "qwen3"
             - name: USE_TRT_LLM
               value: "true"
+            - name: DATASYSTEM_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: pairec-config
+                  key: datasystem_host
+            - name: DATASYSTEM_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: pairec-config
+                  key: datasystem_port
+            - name: TRT_MAX_KV_TOKENS
+              valueFrom:
+                configMapKeyRef:
+                  name: pairec-config
+                  key: trt_max_kv_tokens
+            - name: TRT_SCHEDULER_POLICY
+              valueFrom:
+                configMapKeyRef:
+                  name: pairec-config
+                  key: trt_scheduler_policy
+            - name: TRT_MAX_INPUT_LEN
+              valueFrom:
+                configMapKeyRef:
+                  name: pairec-config
+                  key: trt_max_input_len
+            - name: TRT_NUM_SAMPLES
+              valueFrom:
+                configMapKeyRef:
+                  name: pairec-config
+                  key: trt_num_samples
+            - name: TRT_RESULT_CACHE_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: pairec-config
+                  key: trt_result_cache_enabled
+            - name: LD_PRELOAD
+              value: "/usr/local/lib/python3.11/site-packages/yr/datasystem/lib/libabseil_dll.so.2407.0.0"
           resources:
             limits:
               nvidia.com/gpu: 1   # 申请 1 块 GPU
-              memory: "8Gi"
+              memory: "24Gi"
               cpu: "4"
             requests:
-              memory: "4Gi"
+              memory: "12Gi"
               cpu: "2"
           volumeMounts:
             - name: model-volume
+              mountPath: /app/models
+              subPath: models
+              readOnly: true
+            - name: model-volume
               mountPath: /app/checkpoints
+              subPath: checkpoints
+              readOnly: true
+            - name: model-volume
+              mountPath: /app/trt_engines
+              subPath: trt_engines
               readOnly: true
             - name: data-volume
               mountPath: /app/data
@@ -58,19 +112,19 @@ spec:
           livenessProbe:
             httpGet:
               path: /health
-              port: 8000
-            initialDelaySeconds: 60
+              port: 18000
+            initialDelaySeconds: 180
             periodSeconds: 15
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /health
-              port: 8000
-            initialDelaySeconds: 30
+              port: 18000
+            initialDelaySeconds: 120
             periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+            timeoutSeconds: 10
+            failureThreshold: 6
       volumes:
         - name: model-volume
           persistentVolumeClaim:

@@ -11,7 +11,7 @@ metadata:
   labels:
     app: pairec
 spec:
-  replicas: 3  # Go 服务可水平扩容
+  replicas: 1  # 最小闭环先单副本，验证后再启用 HPA
   selector:
     matchLabels:
       app: pairec
@@ -22,25 +22,29 @@ spec:
     spec:
       containers:
         - name: pairec
-          image: registry.example.com/pairec-server:latest
-          imagePullPolicy: Always
+          image: registry.example.com/pairec-server:k8s
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            - containerPort: 18080
               name: http
           env:
             - name: CONFIG_PATH
               value: "/app/configs/pairec_config.json"
-            - name: PORT
-              value: "8080"
-            - name: INFERENCE_URL
-              value: "http://inference:8000"
+            - name: INFERENCE_HOST
+              value: "inference"
+            - name: INFERENCE_PORT
+              value: "18000"
+            - name: PAIREC_PORT
+              value: "18080"
+            - name: PAIREC_ALSO_LOG_TO_STDERR
+              value: "true"
           resources:
             limits:
-              memory: "512Mi"
+              memory: "1Gi"
               cpu: "1000m"
             requests:
-              memory: "128Mi"
-              cpu: "100m"
+              memory: "256Mi"
+              cpu: "200m"
           volumeMounts:
             - name: config-volume
               mountPath: /app/configs
@@ -50,16 +54,16 @@ spec:
               readOnly: true
           livenessProbe:
             httpGet:
-              path: /health
-              port: 8080
+              path: /ping
+              port: 18080
             initialDelaySeconds: 10
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
-              port: 8080
+              path: /ping
+              port: 18080
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5

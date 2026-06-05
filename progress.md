@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-05 | 当前状态: E2E DataSystem 报告已补充远端 DS Get 到本地测试 | 下一步: remote H2D 暂列遗留；后续做 DataSystem vs pinned DRAM A/B 或扩样稳定 p9999
+> 最后更新: 2026-06-05 | 当前状态: K8s 最小闭环部署配置已对齐当前 TRT/DataSystem/PaiRec 链路 | 下一步: 远程 K8s 集群构建镜像、准备 PVC 并验证 Pod Ready 与端到端推荐
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/5** | **F13 K8s 最小闭环部署配置已成型：修正 inference `:18000`、PaiRec `:18080`、PaiRec `/ping` 探针、`http://inference:18000` 服务发现、TRT engine/Qwen3/checkpoint/DataSystem/LD_PRELOAD 环境变量、GPU 单副本 `Recreate` 策略；新增 `k8s/README.md` 执行步骤；PaiRec Dockerfile 改为 `-mod=vendor` 离线构建并本机验证 `go build -mod=vendor` 通过** |
 | **6/5** | **远端 DataSystem Get 到本地测试完成并补充到 `docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md`：DS host=`141.61.91.188:18581`，client p50=1050.3ms、p99=1689.2ms；C++ onboard=1346，Get p50=315.572ms、p99=317.038ms；H2D p50=0.405ms，确认当前路径是远端 DS Get 到本机 host 后再本机 H2D，remote H2D 暂未测试** |
 | **6/4** | **`docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md` 补充原始 benchmark stdout 附录，保留 pressure/replay、请求级阶段和 C++ DataSystem block 指标的原始输出，便于复核摘要表** |
 | **6/4** | **最终 E2E DataSystem Set/Get 压测完成并生成 `docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md`：12000 请求成功 11853，client p50=92.8ms、p99=103.2ms；C++ offload=29330，Set p50=0.746ms、p99=1.015ms、p9999=1.689ms；C++ onboard=13421，Get p50=0.623ms、p99=0.818ms、p9999=1.094ms** |
@@ -44,6 +45,7 @@
 - **推理服务**: ✅ /recommend 可用
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
 - **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set/Get 阶段性统计已完成；✅ 关闭结果缓存后的 E2E pressure/replay 最终报告已生成；✅ 远端 DS Get 到本地中等样本已完成；🔄 remote H2D 与 pinned DRAM A/B 待补充
+- **K8s 部署**: 🔄 最小闭环 manifests 与 entrypoint 已对齐当前链路；待远程集群验证镜像、PVC、GPU 调度、DataSystem 连通与 `/api/recommend`
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 

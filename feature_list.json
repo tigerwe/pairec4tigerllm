@@ -127,9 +127,10 @@
       "name": "K8s 部署",
       "status": "pending",
       "description": "将 TRT-LLM 推理服务、DataSystem 依赖和 PaiRec 联调链路整理为可部署的 Kubernetes manifests/Helm 配置",
-      "files": ["k8s/", "docker/", "scripts/start_trt_server.sh"],
+      "files": ["k8s/", "docker/entrypoint-inference.sh", "docker/entrypoint-pairec.sh", "docker/Dockerfile.pairec", "docker/Dockerfile.inference"],
       "validation_method": "K8s 环境中 Pod Ready, /health 返回 healthy, PaiRec 端到端推荐请求成功",
-      "next_step": "梳理镜像、GPU 资源、LD_PRELOAD、DataSystem 地址、模型/engine 挂载和探针配置"
+      "validation_evidence": "2026-06-05: 最小闭环 manifests/entrypoint 已对齐当前链路：inference :18000 + GPU 单副本 Recreate + TRT engine/Qwen3/checkpoint/DataSystem/LD_PRELOAD env；PaiRec :18080 + /ping 探针 + http://inference:18000；ConfigMap 内嵌 PaiRec JSON 解析通过；entrypoint shell 语法通过；go build -mod=vendor 生成 PaiRec 二进制通过",
+      "next_step": "远程 K8s 集群准备已验证的 TensorRT-LLM/DataSystem inference 镜像、PaiRec 镜像和 PVC 目录，按 k8s/README.md apply 后验证 inference /health、PaiRec /ping 与 /api/recommend"
     },
     {
       "id": "F14",

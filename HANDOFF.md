@@ -501,8 +501,9 @@ export LD_PRELOAD="\
 
 ### 下一步
 
-1. 最终 E2E DataSystem Set/Get 报告已生成：`docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md`
-2. 本地 DS 基线：client p50=92.8ms、p99=103.2ms；C++ Set p50=0.746ms、p99=1.015ms；C++ Get p50=0.623ms、p99=0.818ms
-3. 远端 DS Get 到本地测试已补充：DS host=`141.61.91.188:18581`；client p50=1050.3ms、p99=1689.2ms；C++ Get p50=315.572ms、p99=317.038ms；H2D p50=0.405ms
-4. 当前远端路径是 `remote DS Get -> local host buffer -> local GPU H2D`；remote H2D 暂未测试，需后续改 C++ ConnectOptions 和 onboard 路径
-5. 后续做 DataSystem vs pinned DRAM A/B，保持 `TRT_NUM_SAMPLES=1`、`TRT_RESULT_CACHE_ENABLED=0`、相同 pressure/replay 参数；如需稳定发布 p9999，再扩到 `>=100000` onboard events
+1. F13 K8s 最小闭环配置已成型：`k8s/deployment-inference.yaml`、`k8s/deployment-pairec.yaml`、`k8s/configmap.yaml`、`k8s/service.yaml`、`docker/entrypoint-inference.sh`、`docker/entrypoint-pairec.sh` 已对齐当前 TRT/DataSystem/PaiRec 链路；执行步骤见 `k8s/README.md`
+2. 推理 Pod：端口 `18000`，单 GPU，`Recreate`，挂载 `models/`、`checkpoints/`、`trt_engines/`、`data/`，传 `TRT_ENGINE_DIR`、`DATASYSTEM_HOST/PORT`、`TRT_NUM_SAMPLES`、`TRT_RESULT_CACHE_ENABLED`、`LD_PRELOAD`
+3. PaiRec Pod：端口 `18080`，ConfigMap 注入真实 `pairec_config.json`，服务发现地址为 `http://inference:18000`，探针用框架实际存在的 `/ping`；Dockerfile 已改为 `go build -mod=vendor`
+4. 本机验证已完成：entrypoint shell 语法 OK，K8s YAML 与内嵌 PaiRec JSON 解析 OK，`git diff --check -- docker k8s` OK，`go build -mod=vendor -ldflags "-s -w" -o /tmp/pairec-server-k8s ./services/main.go` OK
+5. 远程 K8s 下一步：基于已验证 TensorRT-LLM/DataSystem runtime 准备 `registry.example.com/pairec-inference:trt-datasystem` 镜像，构建 `pairec-server:k8s`，准备 PVC 目录后按 `k8s/README.md` 顺序 `kubectl apply`，验证 inference `/health` 与 PaiRec `/api/recommend`
+6. F12 后续仍保留：DataSystem vs pinned DRAM A/B；remote H2D 暂列遗留，需后续改 C++ ConnectOptions 和 onboard 路径；如需稳定发布 p9999，再扩到 `>=100000` onboard events

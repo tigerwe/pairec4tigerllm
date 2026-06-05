@@ -1,5 +1,5 @@
 #!/bin/sh
-# 推理服务启动脚本 (Qwen3 + GPT2 双 backbone)
+# 推理服务启动脚本 (Qwen3 + TensorRT-LLM + DataSystem)
 
 set -e
 
@@ -11,6 +11,14 @@ MAX_SEQ_LEN="${MAX_SEQ_LEN:-2048}"
 BACKBONE="${BACKBONE:-qwen3}"
 QWEN3_MODEL_PATH="${QWEN3_MODEL_PATH:-/app/models/Qwen3-0.6B}"
 USE_TRT_LLM="${USE_TRT_LLM:-false}"
+TRT_ENGINE_DIR="${TRT_ENGINE_DIR:-}"
+DATASYSTEM_HOST="${DATASYSTEM_HOST:-}"
+DATASYSTEM_PORT="${DATASYSTEM_PORT:-31501}"
+TRT_MAX_KV_TOKENS="${TRT_MAX_KV_TOKENS:-2048}"
+TRT_SCHEDULER_POLICY="${TRT_SCHEDULER_POLICY:-max_utilization}"
+TRT_MAX_INPUT_LEN="${TRT_MAX_INPUT_LEN:-64}"
+TRT_NUM_SAMPLES="${TRT_NUM_SAMPLES:-8}"
+TRT_RESULT_CACHE_ENABLED="${TRT_RESULT_CACHE_ENABLED:-1}"
 
 echo "========================================="
 echo "PaiRec4TigerLLM Inference Service"
@@ -23,6 +31,12 @@ echo "Device:          $DEVICE"
 echo "Max batch size:  $MAX_BATCH_SIZE"
 echo "Max seq len:     $MAX_SEQ_LEN"
 echo "Use TRT-LLM:     $USE_TRT_LLM"
+echo "TRT engine dir:  ${TRT_ENGINE_DIR:-<disabled>}"
+echo "DataSystem:      ${DATASYSTEM_HOST:-<disabled>}:${DATASYSTEM_PORT}"
+echo "TRT KV tokens:   $TRT_MAX_KV_TOKENS"
+echo "TRT samples:     $TRT_NUM_SAMPLES"
+echo "Result cache:    $TRT_RESULT_CACHE_ENABLED"
+echo "LD_PRELOAD:      ${LD_PRELOAD:-<unset>}"
 echo ""
 
 # 等待模型文件就绪
@@ -64,6 +78,24 @@ if [ "$USE_TRT_LLM" = "true" ]; then
     echo "TensorRT-LLM enabled"
 fi
 
+if [ -n "$TRT_ENGINE_DIR" ]; then
+    if [ ! -d "$TRT_ENGINE_DIR" ]; then
+        echo "ERROR: TRT engine dir not found at $TRT_ENGINE_DIR"
+        exit 1
+    fi
+    ARGS="$ARGS --trt_engine_dir $TRT_ENGINE_DIR"
+fi
+
+if [ -n "$DATASYSTEM_HOST" ]; then
+    ARGS="$ARGS --datasystem_host $DATASYSTEM_HOST --datasystem_port $DATASYSTEM_PORT"
+fi
+
+ARGS="$ARGS --trt_max_kv_tokens $TRT_MAX_KV_TOKENS"
+ARGS="$ARGS --trt_scheduler_policy $TRT_SCHEDULER_POLICY"
+ARGS="$ARGS --trt_max_input_len $TRT_MAX_INPUT_LEN"
+ARGS="$ARGS --trt_num_samples $TRT_NUM_SAMPLES"
+ARGS="$ARGS --trt_result_cache_enabled $TRT_RESULT_CACHE_ENABLED"
+
 echo ""
 echo "Starting inference server..."
-exec python /app/inference/trt_llm/server.py $ARGS
+exec python -m inference.trt_llm.server $ARGS

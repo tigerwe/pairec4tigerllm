@@ -16,21 +16,22 @@
 # ---------- 阶段 1: Builder ----------
 FROM golang:1.24-alpine AS builder
 
-ENV GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=off
+ENV GOSUMDB=off
 ENV GO111MODULE=on
 ENV CGO_ENABLED=0
 
 WORKDIR /build
 
-# 复制 go.mod/go.sum（项目根目录）
+# 复制 go.mod/go.sum 与 vendored 依赖，保持离线构建
 COPY go.mod go.sum ./
-RUN go mod download
+COPY vendor/ ./vendor/
 
 # 复制 services 源码
 COPY services/ ./services/
 
 # 编译静态二进制
-RUN go build -ldflags="-s -w" -o pairec-server ./services/main.go
+RUN go build -mod=vendor -ldflags="-s -w" -o pairec-server ./services/main.go
 
 # ---------- 阶段 2: Runtime ----------
 FROM alpine:3.19
@@ -56,6 +57,6 @@ ENV PAIREC_PORT=18080
 EXPOSE 18080
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://localhost:18080/health || exit 1
+    CMD curl -fsS http://localhost:18080/ping || exit 1
 
 ENTRYPOINT ["/app/entrypoint.sh"]
