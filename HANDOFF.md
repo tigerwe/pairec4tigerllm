@@ -502,6 +502,7 @@ export LD_PRELOAD="\
 ### 下一步
 
 1. 最终 E2E DataSystem Set/Get 报告已生成：`docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md`
-2. 当前基线：client p50=92.8ms、p99=103.2ms；C++ Set p50=0.746ms、p99=1.015ms；C++ Get p50=0.623ms、p99=0.818ms
-3. 下一步做 DataSystem vs pinned DRAM A/B，保持 `TRT_NUM_SAMPLES=1`、`TRT_RESULT_CACHE_ENABLED=0`、相同 pressure/replay 参数
-4. 如需稳定发布 onboard p9999，再把 replay 扩到 `>=100000` onboard events
+2. 本地 DS 基线：client p50=92.8ms、p99=103.2ms；C++ Set p50=0.746ms、p99=1.015ms；C++ Get p50=0.623ms、p99=0.818ms
+3. 远端 DS Get 到本地测试已补充：DS host=`141.61.91.188:18581`；client p50=1050.3ms、p99=1689.2ms；C++ Get p50=315.572ms、p99=317.038ms；H2D p50=0.405ms
+4. 当前远端路径是 `remote DS Get -> local host buffer -> local GPU H2D`；remote H2D 暂未测试，需后续改 C++ ConnectOptions 和 onboard 路径
+5. 后续做 DataSystem vs pinned DRAM A/B，保持 `TRT_NUM_SAMPLES=1`、`TRT_RESULT_CACHE_ENABLED=0`、相同 pressure/replay 参数；如需稳定发布 p9999，再扩到 `>=100000` onboard events

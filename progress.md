@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-04 | 当前状态: 最终 E2E DataSystem Set/Get 报告已生成并补充原始 benchmark 输出附录 | 下一步: 做 DataSystem vs pinned DRAM A/B 或继续扩到 >=100000 onboard events 稳定 p9999
+> 最后更新: 2026-06-05 | 当前状态: E2E DataSystem 报告已补充远端 DS Get 到本地测试 | 下一步: remote H2D 暂列遗留；后续做 DataSystem vs pinned DRAM A/B 或扩样稳定 p9999
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/5** | **远端 DataSystem Get 到本地测试完成并补充到 `docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md`：DS host=`141.61.91.188:18581`，client p50=1050.3ms、p99=1689.2ms；C++ onboard=1346，Get p50=315.572ms、p99=317.038ms；H2D p50=0.405ms，确认当前路径是远端 DS Get 到本机 host 后再本机 H2D，remote H2D 暂未测试** |
 | **6/4** | **`docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md` 补充原始 benchmark stdout 附录，保留 pressure/replay、请求级阶段和 C++ DataSystem block 指标的原始输出，便于复核摘要表** |
 | **6/4** | **最终 E2E DataSystem Set/Get 压测完成并生成 `docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md`：12000 请求成功 11853，client p50=92.8ms、p99=103.2ms；C++ offload=29330，Set p50=0.746ms、p99=1.015ms、p9999=1.689ms；C++ onboard=13421，Get p50=0.623ms、p99=0.818ms、p9999=1.094ms** |
 | **6/4** | **新增 `TRT_RESULT_CACHE_ENABLED=0`，可关闭 Python TRT 推荐结果缓存；`scripts/benchmark_e2e_latency.py` 新增 `--uid-file`、pressure/replay 两段流量和按阶段 DataSystem C++ 指标，支持在端到端报告里同时观察 request stages 与 C++ `offload.set_ms` / `onboard.get_ms`** |
@@ -42,7 +43,7 @@
 - **C++ KV offload/onboard**: ✅ 闭环验证通过
 - **推理服务**: ✅ /recommend 可用
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
-- **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set/Get 阶段性统计已完成；✅ 关闭结果缓存后的 E2E pressure/replay 最终报告已生成；🔄 待补充 pinned DRAM A/B
+- **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set/Get 阶段性统计已完成；✅ 关闭结果缓存后的 E2E pressure/replay 最终报告已生成；✅ 远端 DS Get 到本地中等样本已完成；🔄 remote H2D 与 pinned DRAM A/B 待补充
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 

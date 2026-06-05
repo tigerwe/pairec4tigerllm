@@ -170,6 +170,121 @@ code=299 error=items size not enough
 
 下一步若要做系统级优化，优先级仍应放在 TRT runner；若要做 DataSystem 存储路径 A/B，则应继续用同一 pressure/replay 脚本对比 DataSystem 与 pinned DRAM，并保持 `TRT_RESULT_CACHE_ENABLED=0`。
 
+## 8. 远端 DataSystem Get 到本地测试
+
+> 补充日期：2026-06-05
+> 远端 DataSystem：`141.61.91.188:18581`
+> 测试目标：将 DataSystem worker 放到远端，测量 TensorRT-LLM C++ KV onboard 时从远端 DataSystem `Get` 到本机 host buffer，再 H2D 到本机 GPU 的耗时。
+
+### 8.1 测试配置与路径
+
+远端启动日志确认两个 C++ DataSystem client 都连接到远端：
+
+```text
+[TensorRT-LLM][Datasystem] Init KvCache Manager DataSystem. host = 141.61.91.188, ip = 18581.
+[TensorRT-LLM][Datasystem] Init KvCache TMP Manager DataSystem. host = 141.61.91.188, ip = 18581.
+```
+
+当前代码路径仍是：
+
+```text
+远端 DataSystem Get -> 本机 host buffer -> 本机 GPU H2D
+```
+
+不是 remote H2D。原因是当前 C++ 配置仍为：
+
+```cpp
+conn_opts.enableCrossNodeConnection = false;
+conn_opts.enableRemoteH2D = false;
+```
+
+并且 onboard 路径仍显式执行：
+
+```cpp
+kvClient1->Get(key, buffer, 0);
+mOnboardManager.onBoardCopy(*dstPtr, buffer->MutableData(), buffer->GetSize());
+```
+
+因此 `onboard.get_ms` 表示远端 DataSystem Get 到本机 host buffer 的耗时，`onboard.h2d_ms` 表示之后本机 host 到本机 GPU 的普通 H2D。
+
+### 8.2 远端 DS 测试结论
+
+本轮远端 DS 为中等样本规模：
+
+| phase | total | ok | fail | success rate |
+|---|---:|---:|---:|---:|
+| pressure | 300 | 295 | 5 | `98.33%` |
+| replay/onboard | 1000 | 995 | 5 | `99.50%` |
+| all | 1300 | 1290 | 10 | `99.23%` |
+
+请求级耗时显著上升：
+
+| metric | count | p50 | p95 | p99 | p9999 | max |
+|---|---:|---:|---:|---:|---:|---:|
+| `client_e2e_ms` | 1290 | `1050.3ms` | `1687.2ms` | `1689.2ms` | `1690.9ms` | `1691.0ms` |
+| `tr_total_ms` | 1290 | `1048.0ms` | `1684.7ms` | `1686.6ms` | `1688.6ms` | `1688.6ms` |
+| `tr_runner_ms` | 1290 | `1034.2ms` | `1670.6ms` | `1671.9ms` | `1672.8ms` | `1672.8ms` |
+| `tr_kv_lookup_ms` | 1290 | `9.7ms` | `10.3ms` | `10.5ms` | `10.6ms` | `10.6ms` |
+
+远端 DataSystem C++ KV block 耗时：
+
+| metric | count | avg | p50 | p95 | p99 | p9999 | max |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `offload.set_ms` | 3202 | `314.491` | `314.149` | `315.288` | `315.610` | `325.289` | `328.397` |
+| `offload.total_ms` | 3202 | `316.721` | `316.451` | `317.597` | `317.915` | `327.545` | `330.647` |
+| `onboard.get_ms` | 1346 | `315.930` | `315.572` | `316.862` | `317.038` | `321.050` | `321.650` |
+| `onboard.h2d_ms` | 1346 | `0.405` | `0.405` | `0.421` | `0.429` | `0.487` | `0.494` |
+| `onboard.total_ms` | 1346 | `316.370` | `316.010` | `317.307` | `317.480` | `321.488` | `322.087` |
+
+关键结论：
+
+- 远端 DataSystem `Get` 到本机 host buffer 的 p50 为 `315.572ms`，p99 为 `317.038ms`。
+- `onboard.h2d_ms` p50 仅 `0.405ms`，与本地 H2D 同量级，说明远端开销主要集中在 `onboard.get_ms`，不是本机 H2D。
+- 请求级 p50 从本地 DS 的约 `92.8ms` 上升到远端 DS 的约 `1050.3ms`，主要原因是 runner 过程中触发大量远端 KV block `Set/Get`。
+- 当前 `onboard=1346` 足够判断 p50/p95/p99 趋势；如需正式发布远端 DS p9999，建议扩到 `>=10000` onboard events，稳定 p9999 则建议 `>=100000` onboard events。
+
+### 8.3 本地 DS vs 远端 DS 对比
+
+| 指标 | 本地 DS p50 | 远端 DS p50 | 放大倍数 |
+|---|---:|---:|---:|
+| `client_e2e_ms` | `92.8ms` | `1050.3ms` | `~11.3x` |
+| `tr_runner_ms` | `84.9ms` | `1034.2ms` | `~12.2x` |
+| `offload.set_ms` | `0.746ms` | `314.149ms` | `~421x` |
+| `onboard.get_ms` | `0.623ms` | `315.572ms` | `~507x` |
+| `onboard.h2d_ms` | `0.336ms` | `0.405ms` | `~1.2x` |
+| `onboard.total_ms` | `0.992ms` | `316.010ms` | `~319x` |
+
+远端 DS 的 `Set/Get` 都稳定在 `315ms` 左右，这表明远端访问/网络/远端 DS 路径是主要新增开销。
+
+### 8.4 遗留事项
+
+1. remote H2D 暂未测试。
+
+当前测到的是：
+
+```text
+远端 DS Get -> 本机 host buffer -> 本机 GPU H2D
+```
+
+如需测试 remote H2D，需要改造 TensorRT-LLM C++ DataSystem 接入：
+
+```cpp
+conn_opts.enableCrossNodeConnection = true;
+conn_opts.enableRemoteH2D = true;
+```
+
+同时 onboard 路径不能继续只走 `Get -> buffer->MutableData() -> onBoardCopy`，需要确认并使用 DataSystem 直接写 GPU device pointer 的 API，新增类似 `remote_h2d_ms` 的 trace。
+
+2. PaiRec timeout 需要随远端 DS 场景调大。
+
+远端 DS 下请求级 p95/p99 已到 `1.68s` 左右。如果 PaiRec TRT HTTP client timeout 仍为 `1000ms`，会出现：
+
+```text
+context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+```
+
+远端 DS 测试建议将 `timeout_ms` 调到 `5000ms`，并保持 `max_retries=1`，避免重试放大 GPU/DS 压力。
+
 ## 附录 A. 原始 Benchmark 输出
 
 以下为远程 `scripts/benchmark_e2e_latency.py` 输出原始摘录，保留 pressure/replay、请求级阶段和 C++ DataSystem block 指标，便于复核上文汇总表。
@@ -297,4 +412,112 @@ code=299 error=items size not enough
   onboard.get_ms                      13334    0.631    0.623    0.745    0.816    1.095   10.691
   onboard.h2d_ms                      13334    0.342    0.336    0.420    0.510    1.382    1.416
   onboard.total_ms                    13334    1.008    0.992    1.171    1.282    2.116   11.078
+```
+
+## 附录 B. 远端 DataSystem Benchmark 原始输出
+
+以下为 2026-06-05 远端 DataSystem worker 测试的原始输出摘录，DataSystem host 为 `141.61.91.188:18581`。
+
+```text
+== pressure wave: 300 requests, concurrency=1 ==
+  ok=295 fail=5 elapsed=310.1s
+  client_ms avg=1033.2 p50=1048.2 p95=1153.6 p99=1369.1 p9999=1370.8 max=1370.8
+  items full_size=295/295 expected=3 min=3 p50=3.0 p95=3.0 max=3
+  failed[84] uid=85 code=299 error=items size not enough
+  failed[171] uid=172 code=299 error=items size not enough
+  failed[172] uid=173 code=299 error=items size not enough
+  failed[219] uid=220 code=299 error=items size not enough
+  failed[247] uid=248 code=299 error=items size not enough
+
+  replay_uids=285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300
+
+== replay/onboard wave: 1000 requests, concurrency=1 ==
+  ok=995 fail=5 elapsed=1258.4s
+  client_ms avg=1258.8 p50=1050.6 p95=1687.7 p99=1689.3 p9999=1690.9 max=1691.0
+  items full_size=995/995 expected=3 min=3 p50=3.0 p95=3.0 max=3
+  failed[231] uid=292 code=299 error=items size not enough
+  failed[318] uid=299 code=299 error=items size not enough
+  failed[340] uid=289 code=299 error=items size not enough
+  failed[411] uid=296 code=299 error=items size not enough
+  failed[825] uid=294 code=299 error=items size not enough
+
+== Client (all measured phases) ==
+  metric                              count      avg      p50      p95      p99    p9999      max
+  client_e2e_ms                        1290   1207.2   1050.3   1687.2   1689.2   1690.9   1691.0
+
+== PaiRec recommend stages ==
+  metric                              count      avg      p50      p95      p99    p9999      max
+  total_ms                             1290   1206.1   1049.0   1686.0   1688.0   1690.0   1690.0
+  recall_ms                            1290   1206.0   1049.0   1686.0   1688.0   1690.0   1690.0
+
+== GenerativeRecall stages ==
+  metric                              count      avg      p50      p95      p99    p9999      max
+  cost                                 1290   1206.0   1049.0   1686.0   1688.0   1690.0   1690.0
+  http_ms                              1290   1205.8   1049.0   1686.0   1688.0   1690.0   1690.0
+  tr_total_ms                          1290   1204.8   1048.0   1684.7   1686.6   1688.6   1688.6
+  tr_prepare_ms                        1290      0.4      0.4      0.5      0.6      8.2      9.3
+  tr_infer_ms                          1290   1196.6   1038.1   1674.7   1676.2   1677.9   1677.9
+  tr_prompt_ms                         1290      2.7      2.9      3.1      3.3      3.9      3.9
+  tr_runner_ms                         1290   1192.9   1034.2   1670.6   1671.9   1672.8   1672.8
+  tr_parse_ms                          1290      0.1      0.1      0.1      0.2      0.6      0.6
+  tr_pad_ms                            1290      0.8      0.7      1.8      2.3      2.8      2.8
+  tr_map_ms                            1290      0.1      0.1      0.2      0.2      0.3      0.3
+  tr_kv_lookup_ms                      1290      7.6      9.7     10.3     10.5     10.6     10.6
+  http_overhead_ms                     1290      1.5      2.0      2.0      3.0      3.9      4.0
+
+== TRT service stages ==
+  metric                              count      avg      p50      p95      p99    p9999      max
+  total_ms                             1220   1203.0   1048.0   1684.6   1686.6   1688.6   1688.6
+  prepare_ms                           1220      0.4      0.4      0.5      0.6      8.3      9.3
+  kv_lookup_ms                         1220      7.6      9.7     10.3     10.5     10.6     10.6
+  prompt_ms                            1220      2.7      2.9      3.1      3.3      3.6      3.6
+  runner_ms                            1220   1191.1   1034.2   1670.5   1671.9   1672.8   1672.8
+  runner_calls                         1220      1.0      1.0      1.0      1.0      1.0      1.0
+  runner_avg_ms                        1220   1191.1   1034.2   1670.5   1671.9   1672.8   1672.8
+  runner_max_ms                        1220   1191.1   1034.2   1670.5   1671.9   1672.8   1672.8
+  parse_ms                             1220      0.1      0.1      0.1      0.2      0.6      0.6
+  map_ms                               1220      0.1      0.1      0.2      0.2      0.3      0.3
+
+== TRT result cache groups (trt_log) ==
+  disabled     count=1220 total_p50=  1048.0ms total_p95=  1684.6ms total_p99=  1686.6ms total_p9999=  1688.6ms total_max=  1688.6ms
+  unknown      count=  70 total_p50=     0.0ms total_p95=     0.0ms total_p99=     0.0ms total_p9999=     0.0ms total_max=     0.0ms
+
+== DataSystem C++ KV block stages (all measured phases) ==
+  scope: per KV block, from TRT-LLM C++ [Datasystem][TRACE], host wall-clock
+  metric                              count      avg      p50      p95      p99    p9999      max
+  offload: events=3202
+  offload.create_ms                    3202    1.669    1.662    1.790    1.826    2.265    2.286
+  offload.d2h_ms                       3202    0.524    0.516    0.643    0.736    0.786    0.787
+  offload.set_ms                       3202  314.491  314.149  315.288  315.610  325.289  328.397
+  offload.total_ms                     3202  316.721  316.451  317.597  317.915  327.545  330.647
+  onboard: events=1346
+  onboard.get_ms                       1346  315.930  315.572  316.862  317.038  321.050  321.650
+  onboard.h2d_ms                       1346    0.405    0.405    0.421    0.429    0.487    0.494
+  onboard.total_ms                     1346  316.370  316.010  317.307  317.480  321.488  322.087
+
+== DataSystem C++ KV block stages [pressure] ==
+  scope: per KV block, from TRT-LLM C++ [Datasystem][TRACE], host wall-clock
+  metric                              count      avg      p50      p95      p99    p9999      max
+  offload: events=871
+  offload.create_ms                     871    1.696    1.745    1.795    1.823    2.211    2.220
+  offload.d2h_ms                        871    0.555    0.545    0.730    0.759    0.787    0.787
+  offload.set_ms                        871  314.497  314.138  315.294  315.644  327.552  328.397
+  offload.total_ms                      871  316.785  316.481  317.668  318.017  329.804  330.647
+  onboard: events=15
+  onboard.get_ms                         15  316.029  315.604  316.877  316.899  316.905  316.905
+  onboard.h2d_ms                         15    0.404    0.407    0.423    0.423    0.423    0.423
+  onboard.total_ms                       15  316.470  316.044  317.336  317.350  317.354  317.354
+
+== DataSystem C++ KV block stages [replay/onboard] ==
+  scope: per KV block, from TRT-LLM C++ [Datasystem][TRACE], host wall-clock
+  metric                              count      avg      p50      p95      p99    p9999      max
+  offload: events=2331
+  offload.create_ms                    2331    1.659    1.633    1.787    1.829    2.210    2.286
+  offload.d2h_ms                       2331    0.513    0.509    0.615    0.637    0.657    0.658
+  offload.set_ms                       2331  314.489  314.153  315.281  315.601  318.162  318.255
+  offload.total_ms                     2331  316.697  316.415  317.554  317.835  320.396  320.472
+  onboard: events=1331
+  onboard.get_ms                       1331  315.929  315.572  316.861  317.041  321.057  321.650
+  onboard.h2d_ms                       1331    0.405    0.405    0.421    0.429    0.487    0.494
+  onboard.total_ms                     1331  316.368  316.009  317.304  317.483  321.495  322.087
 ```
