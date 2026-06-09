@@ -1,0 +1,168 @@
+# ============================================
+# Inference Deployment (hostPath runtime smoke)
+# ============================================
+#
+# This manifest captures the ARM worker1 setup validated on 2026-06-09:
+# - image docker.io/library/zcx-pairec-image:v1.1 provides TRT-LLM/DataSystem runtime
+# - repository, model, checkpoint, engine and semantic map are mounted from hostPath
+# - TensorRT-LLM model_runner_cpp.py is patched at container startup so
+#   ModelRunnerCpp.from_dir can forward scheduler_config into ExecutorConfig
+#
+# This is intended for the current K8s minimal closure test. Replace hostPath and
+# startup patch with a proper inference image/PVC before treating it as production.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference
+  namespace: pairec
+  labels:
+    app: inference
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: inference
+  template:
+    metadata:
+      labels:
+        app: inference
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        pairec/gpu: "true"
+      containers:
+        - name: inference
+          image: docker.io/library/zcx-pairec-image:v1.1
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          env:
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+            - name: PYTHONPATH
+              value: "/app:/home/TensorRT-LLM"
+            - name: LD_LIBRARY_PATH
+              value: "/opt/openEuler/gcc-toolset-14/root/usr/lib64:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64:/usr/local/lib"
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |
+              set -ex
+
+              ABSEIL="$(find / -name libabseil_dll.so.2407.0.0 2>/dev/null | head -1 || true)"
+              export LD_PRELOAD="/usr/lib64/libnvidia-ml.so.570.124.06${ABSEIL:+ $ABSEIL}"
+
+              python - <<'PY'
+              from pathlib import Path
+
+              p = Path("/home/TensorRT-LLM/tensorrt_llm/runtime/model_runner_cpp.py")
+              lines = p.read_text().splitlines(True)
+
+              def find_line(start, pred):
+                  for i in range(start, len(lines)):
+                      if pred(lines[i]):
+                          return i
+                  raise RuntimeError("target line not found")
+
+              def_i = find_line(0, lambda x: "def from_dir(" in x)
+              header_end = find_line(
+                  def_i,
+                  lambda x: x.lstrip().startswith(")") or x.rstrip().endswith("):"),
+              )
+              header = "".join(lines[def_i:header_end + 1])
+              if "scheduler_config" not in header:
+                  indent = " " * (len(lines[header_end]) - len(lines[header_end].lstrip()))
+                  lines.insert(
+                      header_end,
+                      f"{indent}scheduler_config: Optional[trtllm.SchedulerConfig] = None,\n",
+                  )
+
+              text = "".join(lines)
+              lines = text.splitlines(True)
+              exec_i = find_line(0, lambda x: "trtllm.ExecutorConfig(" in x)
+              exec_end = find_line(
+                  exec_i,
+                  lambda x: x.startswith("            )") or x.startswith("        )"),
+              )
+              exec_block = "".join(lines[exec_i:exec_end + 1])
+              if "scheduler_config" not in exec_block:
+                  insert_i = find_line(exec_i, lambda x: "max_beam_width=max_beam_width" in x)
+                  indent = " " * (len(lines[insert_i]) - len(lines[insert_i].lstrip()))
+                  lines.insert(insert_i + 1, f"{indent}scheduler_config=scheduler_config,\n")
+
+              p.write_text("".join(lines))
+              PY
+
+              rm -rf /home/TensorRT-LLM/tensorrt_llm/runtime/__pycache__
+              exec python -m inference.trt_llm.server \
+                --model_path /app/checkpoints/decoder_qwen3/decoder_epoch_20.pt \
+                --qwen3_model_path /app/models/Qwen3-0.6B \
+                --trt_engine_dir /app/trt_engines/qwen3_rec_v4 \
+                --port 18000 \
+                --device cuda \
+                --use_trt_llm \
+                --trt_max_kv_tokens 1024 \
+                --trt_scheduler_policy max_utilization \
+                --trt_max_input_len 64 \
+                --trt_num_samples 1 \
+                --trt_result_cache_enabled 1
+          ports:
+            - containerPort: 18000
+              name: http
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: "24Gi"
+              cpu: "4"
+            requests:
+              memory: "12Gi"
+              cpu: "2"
+          volumeMounts:
+            - name: repo
+              mountPath: /app
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 18000
+            periodSeconds: 5
+            failureThreshold: 72
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 18000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 18000
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: repo
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm
+            type: Directory
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference
+  namespace: pairec
+  labels:
+    app: inference
+spec:
+  selector:
+    app: inference
+  ports:
+    - name: http
+      port: 18000
+      targetPort: 18000
+  type: ClusterIP

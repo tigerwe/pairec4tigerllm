@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-05 | 当前状态: K8s 最小闭环部署配置已对齐当前 TRT/DataSystem/PaiRec 链路 | 下一步: 远程 K8s 集群构建镜像、准备 PVC 并验证 Pod Ready 与端到端推荐
+> 最后更新: 2026-06-09 | 当前状态: K8s inference/TRT hostPath 单服务闭环已在 ARM worker1 验证通过 | 下一步: 固化 inference Deployment 后构建/导入 PaiRec Go 镜像并验证 PaiRec `/api/recommend`
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/9** | **F13 K8s inference 单服务闭环跑通并固化 hostPath manifest：worker1 已注册 `nvidia.com/gpu=1`；`zcx-pairec-image:v1.1` 作为 TRT/DataSystem runtime，hostPath 挂 `/home/zcx/workspace/pairec4tigerllm`；修正 `LD_LIBRARY_PATH` 使用 gcc-toolset-14、`LD_PRELOAD` 使用有效 NVML + DataSystem abseil，并在启动时临时 patch `ModelRunnerCpp.from_dir()` 转发 `scheduler_config`；远程验证 `/health` 返回 `status=healthy backend=trt-qwen3 trt_num_samples=1`，`/recommend` 返回 `code=200` 和 5 个 item；新增 `k8s/deployment-inference-hostpath.yaml` 与 `scripts/k8s_apply_inference_hostpath.sh`。遗留：Python DataSystem 为 disabled，C++ `CacheTransceiver` disabled，PaiRec Go 镜像/Deployment 待接入** |
 | **6/5** | **F13 K8s 最小闭环部署配置已成型：修正 inference `:18000`、PaiRec `:18080`、PaiRec `/ping` 探针、`http://inference:18000` 服务发现、TRT engine/Qwen3/checkpoint/DataSystem/LD_PRELOAD 环境变量、GPU 单副本 `Recreate` 策略；新增 `k8s/README.md` 执行步骤；PaiRec Dockerfile 改为 `-mod=vendor` 离线构建并本机验证 `go build -mod=vendor` 通过** |
 | **6/5** | **远端 DataSystem Get 到本地测试完成并补充到 `docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md`：DS host=`141.61.91.188:18581`，client p50=1050.3ms、p99=1689.2ms；C++ onboard=1346，Get p50=315.572ms、p99=317.038ms；H2D p50=0.405ms，确认当前路径是远端 DS Get 到本机 host 后再本机 H2D，remote H2D 暂未测试** |
 | **6/4** | **`docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md` 补充原始 benchmark stdout 附录，保留 pressure/replay、请求级阶段和 C++ DataSystem block 指标的原始输出，便于复核摘要表** |
@@ -45,7 +46,7 @@
 - **推理服务**: ✅ /recommend 可用
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
 - **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set/Get 阶段性统计已完成；✅ 关闭结果缓存后的 E2E pressure/replay 最终报告已生成；✅ 远端 DS Get 到本地中等样本已完成；🔄 remote H2D 与 pinned DRAM A/B 待补充
-- **K8s 部署**: 🔄 最小闭环 manifests 与 entrypoint 已对齐当前链路；待远程集群验证镜像、PVC、GPU 调度、DataSystem 连通与 `/api/recommend`
+- **K8s 部署**: 🔄 ARM worker1 GPU device plugin 已就绪；inference hostPath Pod 已完成 `/health` 和 `/recommend` 验证，并新增可复用 Deployment/Service manifest；待启动正式 inference Deployment、构建/导入 PaiRec Go 镜像并验证 PaiRec `/api/recommend`；DataSystem Python/C++ KV 路径暂未连通
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 

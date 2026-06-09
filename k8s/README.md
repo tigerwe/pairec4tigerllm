@@ -63,6 +63,38 @@ kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/deployment-inference.yaml
 ```
 
+### 已验证 hostPath 推理服务方案
+
+2026-06-09 在 ARM `worker1` 上已验证一个临时 hostPath 推理部署：
+
+- 节点已有 `nvidia.com/gpu: 1`，并使用 `runtimeClassName: nvidia`。
+- runtime 镜像为 `docker.io/library/zcx-pairec-image:v1.1`。
+- 代码、Qwen3 模型、checkpoint、TRT engine 和 semantic map 均来自
+  `worker1:/home/zcx/workspace/pairec4tigerllm`。
+- 启动时临时 patch
+  `/home/TensorRT-LLM/tensorrt_llm/runtime/model_runner_cpp.py`，使
+  `ModelRunnerCpp.from_dir()` 支持 `scheduler_config`。
+- Python DataSystem 当前为 `disabled`，C++ `CacheTransceiver` 仍未启用；该
+  manifest 只用于先跑通 HTTP/TRT 推荐闭环。
+
+应用方式：
+
+```bash
+bash scripts/k8s_apply_inference_hostpath.sh
+kubectl -n pairec port-forward svc/inference 18002:18000
+curl http://127.0.0.1:18002/health
+curl -X POST http://127.0.0.1:18002/recommend \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"test","history":[[169,41,0,0],[20,53,0,0],[80,201,0,0]],"topk":5}'
+```
+
+已验证响应：
+
+```text
+GET /health -> status=healthy, backend=trt-qwen3, trt_num_samples=1
+POST /recommend -> code=200, recommendations 非空
+```
+
 先确认推理服务：
 
 ```bash

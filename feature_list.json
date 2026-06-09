@@ -129,8 +129,8 @@
       "description": "将 TRT-LLM 推理服务、DataSystem 依赖和 PaiRec 联调链路整理为可部署的 Kubernetes manifests/Helm 配置",
       "files": ["k8s/", "docker/entrypoint-inference.sh", "docker/entrypoint-pairec.sh", "docker/Dockerfile.pairec", "docker/Dockerfile.inference"],
       "validation_method": "K8s 环境中 Pod Ready, /health 返回 healthy, PaiRec 端到端推荐请求成功",
-      "validation_evidence": "2026-06-05: 最小闭环 manifests/entrypoint 已对齐当前链路：inference :18000 + GPU 单副本 Recreate + TRT engine/Qwen3/checkpoint/DataSystem/LD_PRELOAD env；PaiRec :18080 + /ping 探针 + http://inference:18000；ConfigMap 内嵌 PaiRec JSON 解析通过；entrypoint shell 语法通过；go build -mod=vendor 生成 PaiRec 二进制通过",
-      "next_step": "远程 K8s 集群准备已验证的 TensorRT-LLM/DataSystem inference 镜像、PaiRec 镜像和 PVC 目录，按 k8s/README.md apply 后验证 inference /health、PaiRec /ping 与 /api/recommend"
+      "validation_evidence": "2026-06-05: 最小闭环 manifests/entrypoint 已对齐当前链路：inference :18000 + GPU 单副本 Recreate + TRT engine/Qwen3/checkpoint/DataSystem/LD_PRELOAD env；PaiRec :18080 + /ping 探针 + http://inference:18000；ConfigMap 内嵌 PaiRec JSON 解析通过；entrypoint shell 语法通过；go build -mod=vendor 生成 PaiRec 二进制通过。2026-06-09: ARM worker1 已修复 NVIDIA device plugin/runtime，node 显示 nvidia.com/gpu=1；`zcx-pairec-image:v1.1` runtime 通过 GPU、torch、TensorRT-LLM、DataSystem import 检查；hostPath 挂 `/home/zcx/workspace/pairec4tigerllm` 后 inference Pod 成功加载 TRT engine，`GET /health` 返回 status=healthy/backend=trt-qwen3/trt_num_samples=1，`POST /recommend` 返回 code=200 和 5 个 recommendations；新增 k8s/deployment-inference-hostpath.yaml 与 scripts/k8s_apply_inference_hostpath.sh 固化当前可复用方案。遗留：Python DataSystem 为 disabled，C++ CacheTransceiver disabled，PaiRec Go 镜像/Deployment 未接入",
+      "next_step": "在远程集群应用 k8s/deployment-inference-hostpath.yaml 验证 svc/inference；随后构建/导入 PaiRec Go 镜像，部署 PaiRec 并验证 /ping 与 /api/recommend；HTTP 闭环稳定后再单独处理 Python DataSystem 连接和 C++ CacheTransceiver"
     },
     {
       "id": "F14",
