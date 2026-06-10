@@ -95,6 +95,51 @@ GET /health -> status=healthy, backend=trt-qwen3, trt_num_samples=1
 POST /recommend -> code=200, recommendations 非空
 ```
 
+### 已验证 hostPath PaiRec 方案
+
+2026-06-10 在 ARM `worker1` 上已验证 PaiRec 通过 K8s Service 调用
+`svc/inference:18000`：
+
+- PaiRec 镜像为 `docker.io/library/pairec-server:k8s-arm64-static`，由
+  `go build -mod=vendor` 生成的静态 arm64 二进制打包。
+- `worker1:/home/zcx/workspace/pairec4tigerllm/data` 挂载到容器 `/data`。
+- 容器 `workingDir=/app`，代码中 `../data/...` 相对路径解析为 `/data/...`。
+- 首次请求会加载 fallback 用户特征 JSON，PaiRec 内存限制已提升到 `8Gi`，避免
+  `OOMKilled`。
+
+构建并导入 PaiRec 镜像示例：
+
+```bash
+cd /home/zcx/workspace/pairec4tigerllm
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+  go build -mod=vendor -ldflags="-s -w" -o ./pairec-server ./services/main.go
+docker build -f /tmp/Dockerfile.pairec.binary \
+  -t docker.io/library/pairec-server:k8s-arm64-static .
+docker save docker.io/library/pairec-server:k8s-arm64-static \
+  -o /tmp/pairec-server-k8s-arm64-static.tar
+scp /tmp/pairec-server-k8s-arm64-static.tar root@141.61.91.188:/tmp/
+ssh root@141.61.91.188 \
+  'ctr -n k8s.io images import /tmp/pairec-server-k8s-arm64-static.tar'
+```
+
+应用方式：
+
+```bash
+bash scripts/k8s_apply_pairec_hostpath.sh
+kubectl -n pairec port-forward svc/pairec 18081:18080
+curl http://127.0.0.1:18081/ping
+curl -X POST http://127.0.0.1:18081/api/recommend \
+  -H 'Content-Type: application/json' \
+  -d '{"uid":"6312","size":10,"scene_id":"home_feed"}'
+```
+
+已验证响应：
+
+```text
+GET /ping -> success
+POST /api/recommend -> code=200, size=10, 10 个 generative_recall item
+```
+
 先确认推理服务：
 
 ```bash

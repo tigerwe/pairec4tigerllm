@@ -1,0 +1,104 @@
+# ============================================
+# PaiRec Deployment (hostPath runtime smoke)
+# ============================================
+#
+# This manifest captures the ARM worker1 setup validated on 2026-06-10:
+# - image docker.io/library/pairec-server:k8s-arm64-static contains the static
+#   /app/pairec-server binary and default configs
+# - k8s/configmap.yaml overrides /app/configs/pairec_config.json
+# - worker1:/home/zcx/workspace/pairec4tigerllm/data is mounted at /data
+# - workingDir=/app lets the existing ../data relative paths resolve to /data
+#
+# This is intended for the current K8s minimal closure test. Replace hostPath
+# and node-local image usage with a proper image registry/PVC before production.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pairec
+  namespace: pairec
+  labels:
+    app: pairec
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pairec
+  template:
+    metadata:
+      labels:
+        app: pairec
+    spec:
+      # The PaiRec image is currently imported only on worker1. This service is
+      # CPU-only, but the node selector keeps scheduling deterministic.
+      nodeSelector:
+        pairec/gpu: "true"
+      containers:
+        - name: pairec
+          image: docker.io/library/pairec-server:k8s-arm64-static
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command:
+            - /app/pairec-server
+          ports:
+            - containerPort: 18080
+              name: http
+          env:
+            - name: CONFIG_PATH
+              value: /app/configs/pairec_config.json
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "8Gi"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/configs
+              readOnly: true
+            - name: data-volume
+              mountPath: /data
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 18080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 18080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config-volume
+          configMap:
+            name: pairec-config
+        - name: data-volume
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/data
+            type: Directory
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: pairec
+  namespace: pairec
+  labels:
+    app: pairec
+spec:
+  selector:
+    app: pairec
+  ports:
+    - name: http
+      port: 18080
+      targetPort: 18080
+  type: ClusterIP
