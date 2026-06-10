@@ -95,6 +95,51 @@ GET /health -> status=healthy, backend=trt-qwen3, trt_num_samples=1
 POST /recommend -> code=200, recommendations 非空
 ```
 
+### 正式 inference runtime 镜像方案
+
+hostPath 推理方案验证通过后，优先使用
+`docker/Dockerfile.inference.runtime` 构建正式 inference 镜像。该镜像基于已验证
+的 `docker.io/library/zcx-pairec-image:v1.1` runtime，内置：
+
+- `/app/inference` 和必要的 `/app/training` 代码。
+- 构建期 TensorRT-LLM `ModelRunnerCpp.from_dir()` `scheduler_config` patch。
+- 推理 entrypoint，统一设置 `LD_LIBRARY_PATH`、有效 NVML 与 DataSystem abseil
+  `LD_PRELOAD`。
+
+模型、checkpoint、TRT engine 和数据仍由挂载提供，当前 manifest 继续使用
+worker1 hostPath；后续再替换为 PVC。
+
+在 master 构建并导入 worker1：
+
+```bash
+cd /home/zcx/workspace/pairec4tigerllm
+
+# 如果 docker daemon 里没有基础镜像，先 load 已验证 runtime tar。
+# docker load -i /path/to/zcx-pairec-image.tar
+
+bash scripts/build_inference_runtime_image.sh \
+  docker.io/library/pairec-inference:k8s-arm64-runtime
+docker save docker.io/library/pairec-inference:k8s-arm64-runtime \
+  -o /tmp/pairec-inference-k8s-arm64-runtime.tar
+scp /tmp/pairec-inference-k8s-arm64-runtime.tar root@141.61.91.188:/tmp/
+ssh root@141.61.91.188 \
+  'ctr -n k8s.io images import /tmp/pairec-inference-k8s-arm64-runtime.tar'
+```
+
+应用并验证：
+
+```bash
+bash scripts/k8s_apply_inference_image.sh
+kubectl -n pairec port-forward svc/inference 18002:18000
+curl http://127.0.0.1:18002/health
+curl -X POST http://127.0.0.1:18002/recommend \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"test","history":[[169,41,0,0],[20,53,0,0],[80,201,0,0]],"topk":5}'
+```
+
+该方案默认保持 Python DataSystem disabled，用于稳定复现已验证 HTTP/TRT 基线。
+DataSystem Python client 与 C++ `CacheTransceiver` 后续作为独立变量打开。
+
 ### 已验证 hostPath PaiRec 方案
 
 2026-06-10 在 ARM `worker1` 上已验证 PaiRec 通过 K8s Service 调用

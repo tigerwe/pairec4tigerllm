@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-10 | 当前状态: K8s PaiRec -> inference -> TRT 端到端 hostPath 闭环已在 ARM worker1 验证通过 | 下一步: 将 hostPath/启动时 patch 固化为正式镜像/PVC，并单独修复 DataSystem Python/C++ KV 路径
+> 最后更新: 2026-06-10 | 当前状态: K8s PaiRec -> inference -> TRT 端到端 hostPath 闭环已验证，正式 inference runtime 镜像方案已落文件 | 下一步: 远程构建/导入 `pairec-inference:k8s-arm64-runtime` 并用 `k8s/deployment-inference-image.yaml` 复验 `/health` 与 `/recommend`
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/10** | **正式 inference runtime 镜像方案已新增：`docker/Dockerfile.inference.runtime` 基于已验证 `zcx-pairec-image:v1.1` runtime，复制 `/app` 业务代码并在构建期 patch TensorRT-LLM `ModelRunnerCpp.from_dir()` 支持 `scheduler_config`；新增 `docker/entrypoint-inference-runtime.sh` 统一设置 gcc-toolset-14 `LD_LIBRARY_PATH`、有效 NVML 和 DataSystem abseil `LD_PRELOAD`；新增 `k8s/deployment-inference-image.yaml` 与 `scripts/build_inference_runtime_image.sh`、`scripts/k8s_apply_inference_image.sh`。本机静态校验 `py_compile`、`bash -n`、YAML parse 通过；待远程 ARM 构建、导入 worker1 并复验 HTTP/TRT 基线** |
 | **6/10** | **F13 K8s PaiRec 端到端闭环验证通过：基于 `go build -mod=vendor` 生成 arm64 静态 PaiRec 二进制并打包为 `docker.io/library/pairec-server:k8s-arm64-static`；修复 Alpine 动态链接导致的 `exec /app/pairec-server: no such file or directory`；修复 PaiRec `../data/...` 相对路径，通过 hostPath 将 worker1 `/home/zcx/workspace/pairec4tigerllm/data` 挂到 `/data`，`workingDir=/app`；首次 fallback JSON 触发 1Gi OOM 后将 PaiRec memory limit 提到 8Gi；远程验证 `GET /ping -> success`，`POST /api/recommend` uid=6312,size=10 返回 `code=200` 和 10 个 `generative_recall` item；新增 `k8s/deployment-pairec-hostpath.yaml` 与 `scripts/k8s_apply_pairec_hostpath.sh`** |
 | **6/9** | **F13 K8s inference 单服务闭环跑通并固化 hostPath manifest：worker1 已注册 `nvidia.com/gpu=1`；`zcx-pairec-image:v1.1` 作为 TRT/DataSystem runtime，hostPath 挂 `/home/zcx/workspace/pairec4tigerllm`；修正 `LD_LIBRARY_PATH` 使用 gcc-toolset-14、`LD_PRELOAD` 使用有效 NVML + DataSystem abseil，并在启动时临时 patch `ModelRunnerCpp.from_dir()` 转发 `scheduler_config`；远程验证 `/health` 返回 `status=healthy backend=trt-qwen3 trt_num_samples=1`，`/recommend` 返回 `code=200` 和 5 个 item；新增 `k8s/deployment-inference-hostpath.yaml` 与 `scripts/k8s_apply_inference_hostpath.sh`。遗留：Python DataSystem 为 disabled，C++ `CacheTransceiver` disabled，PaiRec Go 镜像/Deployment 待接入** |
 | **6/5** | **F13 K8s 最小闭环部署配置已成型：修正 inference `:18000`、PaiRec `:18080`、PaiRec `/ping` 探针、`http://inference:18000` 服务发现、TRT engine/Qwen3/checkpoint/DataSystem/LD_PRELOAD 环境变量、GPU 单副本 `Recreate` 策略；新增 `k8s/README.md` 执行步骤；PaiRec Dockerfile 改为 `-mod=vendor` 离线构建并本机验证 `go build -mod=vendor` 通过** |
@@ -47,7 +48,7 @@
 - **推理服务**: ✅ /recommend 可用
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
 - **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set/Get 阶段性统计已完成；✅ 关闭结果缓存后的 E2E pressure/replay 最终报告已生成；✅ 远端 DS Get 到本地中等样本已完成；🔄 remote H2D 与 pinned DRAM A/B 待补充
-- **K8s 部署**: ✅ ARM worker1 hostPath 最小闭环已通过：inference `/health` + `/recommend` 和 PaiRec `/ping` + `/api/recommend` 均已验证；🔄 仍需将 hostPath、节点本地镜像和启动时 TRT patch 固化为正式镜像/PVC；DataSystem Python/C++ KV 路径暂未连通
+- **K8s 部署**: ✅ ARM worker1 hostPath 最小闭环已通过：inference `/health` + `/recommend` 和 PaiRec `/ping` + `/api/recommend` 均已验证；🔄 正式 inference runtime 镜像方案已落文件，待远程构建验证；仍需将模型/数据 hostPath 替换为 PVC，并单独修 DataSystem Python/C++ KV 路径
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 

@@ -1,0 +1,55 @@
+# PaiRec4TigerLLM inference image on top of the validated ARM TRT-LLM/DataSystem runtime.
+#
+# Build on the ARM K8s master/worker where docker.io/library/zcx-pairec-image:v1.1
+# is already available:
+#
+#   docker build -f docker/Dockerfile.inference.runtime \
+#     -t docker.io/library/pairec-inference:k8s-arm64-runtime .
+#
+# The image intentionally does not contain model weights, checkpoint, TRT engine or
+# data files. Mount those at /app/models, /app/checkpoints, /app/trt_engines and
+# /app/data via hostPath/PVC.
+
+FROM docker.io/library/zcx-pairec-image:v1.1
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/app:/home/TensorRT-LLM
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV LD_LIBRARY_PATH=/opt/openEuler/gcc-toolset-14/root/usr/lib64:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64:/usr/local/lib
+
+WORKDIR /app
+
+COPY inference/ /app/inference/
+COPY training/decoder/model.py /app/training/decoder/model.py
+COPY training/decoder/qwen3_generative_rec.py /app/training/decoder/qwen3_generative_rec.py
+COPY training/__init__.py /app/training/__init__.py
+COPY training/decoder/__init__.py /app/training/decoder/__init__.py
+
+COPY docker/patch_trtllm_model_runner_cpp.py /tmp/patch_trtllm_model_runner_cpp.py
+RUN python /tmp/patch_trtllm_model_runner_cpp.py \
+      --path /home/TensorRT-LLM/tensorrt_llm/runtime/model_runner_cpp.py && \
+    rm -rf /home/TensorRT-LLM/tensorrt_llm/runtime/__pycache__ && \
+    rm -f /tmp/patch_trtllm_model_runner_cpp.py
+
+COPY docker/entrypoint-inference-runtime.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+ENV MODEL_PATH=/app/checkpoints/decoder_qwen3/decoder_epoch_20.pt
+ENV QWEN3_MODEL_PATH=/app/models/Qwen3-0.6B
+ENV TRT_ENGINE_DIR=/app/trt_engines/qwen3_rec_v4
+ENV PORT=18000
+ENV DEVICE=cuda
+ENV MAX_BATCH_SIZE=32
+ENV MAX_SEQ_LEN=512
+ENV BACKBONE=qwen3
+ENV USE_TRT_LLM=true
+ENV TRT_MAX_KV_TOKENS=1024
+ENV TRT_SCHEDULER_POLICY=max_utilization
+ENV TRT_MAX_INPUT_LEN=64
+ENV TRT_NUM_SAMPLES=1
+ENV TRT_RESULT_CACHE_ENABLED=1
+
+EXPOSE 18000
+
+ENTRYPOINT ["/app/entrypoint.sh"]

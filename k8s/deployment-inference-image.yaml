@@ -1,0 +1,131 @@
+# ============================================
+# Inference Deployment (formal runtime image)
+# ============================================
+#
+# Uses docker.io/library/pairec-inference:k8s-arm64-runtime, which contains:
+# - /app inference/training code
+# - TensorRT-LLM model_runner_cpp.py scheduler_config patch
+# - runtime entrypoint with verified LD_LIBRARY_PATH and NVML/abseil LD_PRELOAD
+#
+# Model, checkpoint, TRT engine and data are still mounted from worker1 hostPath.
+# Replace these hostPath mounts with PVCs after the image baseline is verified.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference
+  namespace: pairec
+  labels:
+    app: inference
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: inference
+  template:
+    metadata:
+      labels:
+        app: inference
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        pairec/gpu: "true"
+      containers:
+        - name: inference
+          image: docker.io/library/pairec-inference:k8s-arm64-runtime
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TRT_NUM_SAMPLES
+              value: "1"
+            - name: TRT_RESULT_CACHE_ENABLED
+              value: "1"
+            - name: TRT_MAX_KV_TOKENS
+              value: "1024"
+            - name: TRT_SCHEDULER_POLICY
+              value: max_utilization
+            - name: TRT_MAX_INPUT_LEN
+              value: "64"
+            # Keep Python DataSystem disabled for the current stable baseline.
+            - name: DATASYSTEM_HOST
+              value: ""
+          ports:
+            - containerPort: 18000
+              name: http
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: "24Gi"
+              cpu: "4"
+            requests:
+              memory: "12Gi"
+              cpu: "2"
+          volumeMounts:
+            - name: models
+              mountPath: /app/models
+              readOnly: true
+            - name: checkpoints
+              mountPath: /app/checkpoints
+              readOnly: true
+            - name: trt-engines
+              mountPath: /app/trt_engines
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 18000
+            periodSeconds: 5
+            failureThreshold: 72
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 18000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 18000
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: models
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/models
+            type: Directory
+        - name: checkpoints
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/checkpoints
+            type: Directory
+        - name: trt-engines
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/trt_engines
+            type: Directory
+        - name: data
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/data
+            type: Directory
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference
+  namespace: pairec
+  labels:
+    app: inference
+spec:
+  selector:
+    app: inference
+  ports:
+    - name: http
+      port: 18000
+      targetPort: 18000
+  type: ClusterIP
