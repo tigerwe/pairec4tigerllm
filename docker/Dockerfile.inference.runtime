@@ -4,7 +4,7 @@
 # is already available:
 #
 #   docker build -f docker/Dockerfile.inference.runtime \
-#     -t docker.io/library/pairec-inference:k8s-arm64-runtime .
+#     -t docker.io/library/pairec-inference:k8s-arm64-ds-kv-v1 .
 #
 # The image intentionally does not contain model weights, checkpoint, TRT engine or
 # data files. Mount those at /app/models, /app/checkpoints, /app/trt_engines and

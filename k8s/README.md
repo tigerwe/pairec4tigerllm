@@ -118,12 +118,12 @@ cd /home/zcx/workspace/pairec4tigerllm
 # docker load -i /path/to/zcx-pairec-image.tar
 
 bash scripts/build_inference_runtime_image.sh \
-  docker.io/library/pairec-inference:k8s-arm64-runtime
-docker save docker.io/library/pairec-inference:k8s-arm64-runtime \
-  -o /tmp/pairec-inference-k8s-arm64-runtime.tar
-scp /tmp/pairec-inference-k8s-arm64-runtime.tar root@141.61.91.188:/tmp/
+  docker.io/library/pairec-inference:k8s-arm64-ds-kv-v1
+docker save docker.io/library/pairec-inference:k8s-arm64-ds-kv-v1 \
+  -o /tmp/pairec-inference-k8s-arm64-ds-kv-v1.tar
+scp /tmp/pairec-inference-k8s-arm64-ds-kv-v1.tar root@141.61.91.188:/tmp/
 ssh root@141.61.91.188 \
-  'ctr -n k8s.io images import /tmp/pairec-inference-k8s-arm64-runtime.tar'
+  'ctr -n k8s.io images import /tmp/pairec-inference-k8s-arm64-ds-kv-v1.tar'
 ```
 
 应用并验证：
