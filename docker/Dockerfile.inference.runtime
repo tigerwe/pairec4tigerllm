@@ -21,10 +21,7 @@ ENV LD_LIBRARY_PATH=/opt/openEuler/gcc-toolset-14/root/usr/lib64:/usr/local/nvid
 WORKDIR /app
 
 COPY inference/ /app/inference/
-COPY training/decoder/model.py /app/training/decoder/model.py
-COPY training/decoder/qwen3_generative_rec.py /app/training/decoder/qwen3_generative_rec.py
-COPY training/__init__.py /app/training/__init__.py
-COPY training/decoder/__init__.py /app/training/decoder/__init__.py
+COPY training/ /app/training/
 
 COPY docker/patch_trtllm_model_runner_cpp.py /tmp/patch_trtllm_model_runner_cpp.py
 RUN python /tmp/patch_trtllm_model_runner_cpp.py \
