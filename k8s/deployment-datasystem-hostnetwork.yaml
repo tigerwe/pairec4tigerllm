@@ -53,7 +53,7 @@ spec:
             - name: ETCDCTL_BIN
               value: /host-etcd/etcdctl
             - name: DS_WORKER_BIN
-              value: /usr/local/lib64/python3.11/site-packages/yr/datasystem/datasystem_worker
+              value: ""
           command: ["/bin/bash", "-lc"]
           args:
             - |
@@ -68,10 +68,32 @@ spec:
                 echo "ERROR: etcd binary not found or not executable: $ETCD_BIN" >&2
                 exit 1
               fi
+
+              if [ -n "${DS_WORKER_BIN:-}" ] && [ ! -x "$DS_WORKER_BIN" ]; then
+                echo "Configured DS_WORKER_BIN is not executable: $DS_WORKER_BIN"
+                DS_WORKER_BIN=""
+              fi
+              if [ -z "${DS_WORKER_BIN:-}" ]; then
+                DS_WORKER_BIN="$(command -v datasystem_worker 2>/dev/null || true)"
+              fi
+              if [ -z "${DS_WORKER_BIN:-}" ]; then
+                DS_WORKER_BIN="$(find /usr/local /usr /opt /root \
+                  -path '*datasystem*' -name datasystem_worker -type f \
+                  2>/dev/null | head -1 || true)"
+              fi
+              if [ -n "${DS_WORKER_BIN:-}" ] && [ ! -x "$DS_WORKER_BIN" ]; then
+                chmod +x "$DS_WORKER_BIN" 2>/dev/null || true
+              fi
               if [ ! -x "$DS_WORKER_BIN" ]; then
-                echo "ERROR: datasystem_worker not found or not executable: $DS_WORKER_BIN" >&2
+                echo "ERROR: datasystem_worker not found or not executable." >&2
+                echo "dscli path: $(command -v dscli 2>/dev/null || true)" >&2
+                echo "DataSystem candidates:" >&2
+                find /usr/local /usr /opt /root \
+                  \( -name 'datasystem_worker*' -o -name dscli -o -path '*yr/datasystem*' \) \
+                  2>/dev/null | head -200 >&2 || true
                 exit 1
               fi
+              echo "Using DataSystem worker binary: $DS_WORKER_BIN"
 
               rm -rf "$ETCD_DATA_DIR"
               mkdir -p "$DS_LOG_DIR"
