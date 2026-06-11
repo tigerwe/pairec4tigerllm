@@ -48,6 +48,8 @@ spec:
               value: "18481"
             - name: SHARED_MEMORY_SIZE_MB
               value: "5120"
+            - name: LD_PRELOAD
+              value: ""
             - name: ETCD_BIN
               value: /host-etcd/etcd
             - name: ETCDCTL_BIN
@@ -58,6 +60,7 @@ spec:
           args:
             - |
               set -euo pipefail
+              unset LD_PRELOAD
 
               : "${HOST_IP:?HOST_IP is required}"
               ETCD_DATA_DIR=/tmp/etcd-yuanrong-k8s
