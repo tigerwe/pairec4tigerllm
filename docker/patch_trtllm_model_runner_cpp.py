@@ -37,6 +37,30 @@ def patch_model_runner(path: Path) -> bool:
             f"{indent}scheduler_config: Optional[trtllm.SchedulerConfig] = None,\n",
         )
         changed = True
+        header_end += 1
+        header = "".join(lines[def_i : header_end + 1])
+    if "kv_cache_host_cache_size" not in header:
+        indent = " " * (len(lines[header_end]) - len(lines[header_end].lstrip()))
+        lines.insert(header_end, f"{indent}kv_cache_host_cache_size: Optional[int] = None,\n")
+        lines.insert(header_end + 1, f"{indent}kv_cache_onboard_blocks: bool = True,\n")
+        changed = True
+
+    text = "".join(lines)
+    lines = text.splitlines(True)
+
+    kv_i = _find_line(lines, 0, lambda x: "trtllm.KvCacheConfig(" in x)
+    kv_end = _find_line(
+        lines,
+        kv_i,
+        lambda x: x.startswith("        )") or x.startswith("            )"),
+    )
+    kv_block = "".join(lines[kv_i : kv_end + 1])
+    if "host_cache_size" not in kv_block:
+        insert_i = _find_line(lines, kv_i, lambda x: "enable_block_reuse=kv_cache_enable_block_reuse" in x)
+        indent = " " * (len(lines[insert_i]) - len(lines[insert_i].lstrip()))
+        lines.insert(insert_i + 1, f"{indent}host_cache_size=kv_cache_host_cache_size,\n")
+        lines.insert(insert_i + 2, f"{indent}onboard_blocks=kv_cache_onboard_blocks,\n")
+        changed = True
 
     text = "".join(lines)
     lines = text.splitlines(True)

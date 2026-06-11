@@ -40,16 +40,23 @@ spec:
             - name: TRT_NUM_SAMPLES
               value: "1"
             - name: TRT_RESULT_CACHE_ENABLED
-              value: "1"
+              value: "0"
             - name: TRT_MAX_KV_TOKENS
               value: "1024"
+            - name: TRT_KV_CACHE_HOST_CACHE_SIZE
+              value: "104857600"
             - name: TRT_SCHEDULER_POLICY
               value: max_utilization
             - name: TRT_MAX_INPUT_LEN
               value: "64"
-            # Keep Python DataSystem disabled for the current stable baseline.
+            # Keep Python DataSystem disabled while exposing DataSystem env to
+            # TensorRT-LLM C++ KV cache code.
+            - name: PYTHON_DATASYSTEM_ENABLED
+              value: "0"
             - name: DATASYSTEM_HOST
-              value: ""
+              value: "141.61.91.188"
+            - name: DATASYSTEM_PORT
+              value: "18481"
           ports:
             - containerPort: 18000
               name: http

@@ -50,6 +50,7 @@ class InferenceConfig:
     datasystem_host: str = ''  # DataSystem worker host (empty = disabled)
     datasystem_port: int = 31501  # DataSystem worker port
     trt_max_kv_tokens: int = 2048  # TRT-LLM paged KV cache pressure knob
+    trt_kv_cache_host_cache_size: int = 0  # C++ KV secondary pool bytes (0 = disabled)
     trt_scheduler_policy: str = 'max_utilization'
     trt_max_input_len: int = 64   # TRT engine max_input_len (match trtllm-build --max_input_len)
     trt_num_samples: int = 8      # Serial runner.generate calls used to build the candidate pool
@@ -344,6 +345,7 @@ class GenerativeInferenceService:
             temperature=self.config.temperature,
             top_k=self.config.top_k,
             max_tokens_in_paged_kv_cache=self.config.trt_max_kv_tokens,
+            kv_cache_host_cache_size=self.config.trt_kv_cache_host_cache_size,
             scheduler_policy=self.config.trt_scheduler_policy,
             max_input_len=self.config.trt_max_input_len,
             num_samples=self.config.trt_num_samples,
@@ -375,6 +377,10 @@ class GenerativeInferenceService:
             DsClient 实例或 None
         """
         import os
+        if not _env_bool("PYTHON_DATASYSTEM_ENABLED", True):
+            print("[DataSystem] Disabled (PYTHON_DATASYSTEM_ENABLED=0)")
+            return None
+
         host = os.environ.get("DATASYSTEM_HOST", config.datasystem_host)
         port = int(os.environ.get("DATASYSTEM_PORT", str(config.datasystem_port)))
         
@@ -1124,6 +1130,10 @@ def main():
                         default=int(os.environ.get('TRT_MAX_KV_TOKENS', '2048')),
                         help='TRT-LLM max tokens in paged KV cache '
                              '(env: TRT_MAX_KV_TOKENS, default: 2048)')
+    parser.add_argument('--trt_kv_cache_host_cache_size', type=int,
+                        default=int(os.environ.get('TRT_KV_CACHE_HOST_CACHE_SIZE', '0')),
+                        help='TRT-LLM C++ KV secondary/host cache size in bytes '
+                             '(env: TRT_KV_CACHE_HOST_CACHE_SIZE, default: 0)')
     parser.add_argument('--trt_scheduler_policy', type=str,
                         default=os.environ.get('TRT_SCHEDULER_POLICY', 'max_utilization'),
                         help='TRT-LLM scheduler policy '
@@ -1155,6 +1165,7 @@ def main():
         datasystem_host=args.datasystem_host,
         datasystem_port=args.datasystem_port,
         trt_max_kv_tokens=args.trt_max_kv_tokens,
+        trt_kv_cache_host_cache_size=args.trt_kv_cache_host_cache_size,
         trt_scheduler_policy=args.trt_scheduler_policy,
         trt_max_input_len=args.trt_max_input_len,
         trt_num_samples=args.trt_num_samples,

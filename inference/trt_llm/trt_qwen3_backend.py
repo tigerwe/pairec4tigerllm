@@ -13,6 +13,8 @@ class TRTQwen3Backend:
     def __init__(self, engine_dir: str, tokenizer, num_quantizers: int = 4,
                  vocab_size: int = 256, temperature: float = 0.7, top_k: int = 50,
                  max_tokens_in_paged_kv_cache: int = None,
+                 kv_cache_host_cache_size: int = 0,
+                 kv_cache_onboard_blocks: bool = True,
                  scheduler_policy: str = "max_utilization",
                  max_input_len: int = 64,
                  num_samples: int = 8):
@@ -40,7 +42,8 @@ class TRTQwen3Backend:
                 raise ValueError(f"Unsupported scheduler_policy: {scheduler_policy}")
             scheduler_config = SchedulerConfig(policy)
             print(f"[TRTQwen3Backend] Scheduler policy: {scheduler_policy}, "
-                  f"max_kv_tokens={max_tokens_in_paged_kv_cache}")
+                  f"max_kv_tokens={max_tokens_in_paged_kv_cache}, "
+                  f"host_cache_size={kv_cache_host_cache_size}")
         except Exception as e:
             print(f"[TRTQwen3Backend] SchedulerConfig unavailable: {e}")
             import traceback; traceback.print_exc()
@@ -53,6 +56,9 @@ class TRTQwen3Backend:
             "kv_cache_enable_block_reuse": True,
             "scheduler_config": scheduler_config,
         }
+        if kv_cache_host_cache_size and kv_cache_host_cache_size > 0:
+            runner_kwargs["kv_cache_host_cache_size"] = kv_cache_host_cache_size
+            runner_kwargs["kv_cache_onboard_blocks"] = kv_cache_onboard_blocks
         try:
             self.runner = ModelRunnerCpp.from_dir(engine_dir, **runner_kwargs)
         except TypeError as e:
@@ -62,6 +68,19 @@ class TRTQwen3Backend:
                     "scheduler_config yet. Patch "
                     "tensorrt_llm/runtime/model_runner_cpp.py to forward it "
                     "into ExecutorConfig before starting the service."
+                ) from e
+            if (
+                "kv_cache_host_cache_size" in str(e)
+                or "kv_cache_onboard_blocks" in str(e)
+                or "host_cache_size" in str(e)
+                or "onboard_blocks" in str(e)
+            ):
+                raise RuntimeError(
+                    "TensorRT-LLM ModelRunnerCpp.from_dir does not accept "
+                    "KV host-cache knobs yet. Patch "
+                    "tensorrt_llm/runtime/model_runner_cpp.py to forward "
+                    "host_cache_size/onboard_blocks into KvCacheConfig before "
+                    "starting the service."
                 ) from e
             raise
         self.tokenizer = tokenizer

@@ -1,0 +1,145 @@
+# ============================================
+# DataSystem worker for C++ KV offload/onboard verification
+# ============================================
+#
+# Runs an isolated etcd + DataSystem worker on worker1 with hostNetwork so the
+# TRT-LLM C++ runtime can connect to 141.61.91.188:18481 directly.
+#
+# Prerequisite on worker1:
+#   /home/zcx/workspace/pairec4tigerllm/etcd-v3.5.10-linux-arm64/etcd
+#   /home/zcx/workspace/pairec4tigerllm/etcd-v3.5.10-linux-arm64/etcdctl
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datasystem
+  namespace: pairec
+  labels:
+    app: datasystem
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: datasystem
+  template:
+    metadata:
+      labels:
+        app: datasystem
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        pairec/gpu: "true"
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: datasystem
+          image: docker.io/library/zcx-pairec-image:v1.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOST_IP
+              value: "141.61.91.188"
+            - name: ETCD_CLIENT_PORT
+              value: "12379"
+            - name: ETCD_PEER_PORT
+              value: "12380"
+            - name: DS_WORKER_PORT
+              value: "18481"
+            - name: SHARED_MEMORY_SIZE_MB
+              value: "5120"
+            - name: ETCD_BIN
+              value: /host-etcd/etcd
+            - name: ETCDCTL_BIN
+              value: /host-etcd/etcdctl
+            - name: DS_WORKER_BIN
+              value: /usr/local/lib64/python3.11/site-packages/yr/datasystem/datasystem_worker
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              : "${HOST_IP:?HOST_IP is required}"
+              ETCD_DATA_DIR=/tmp/etcd-yuanrong-k8s
+              ETCD_LOG=/tmp/etcd-yuanrong-k8s.log
+              DS_LOG_DIR=/tmp/datasystem-yuanrong-k8s/log
+
+              if [ ! -x "$ETCD_BIN" ]; then
+                echo "ERROR: etcd binary not found or not executable: $ETCD_BIN" >&2
+                exit 1
+              fi
+              if [ ! -x "$DS_WORKER_BIN" ]; then
+                echo "ERROR: datasystem_worker not found or not executable: $DS_WORKER_BIN" >&2
+                exit 1
+              fi
+
+              rm -rf "$ETCD_DATA_DIR"
+              mkdir -p "$DS_LOG_DIR"
+
+              "$ETCD_BIN" \
+                --name etcd-yuanrong-k8s \
+                --data-dir "$ETCD_DATA_DIR" \
+                --listen-client-urls "http://0.0.0.0:${ETCD_CLIENT_PORT}" \
+                --advertise-client-urls "http://${HOST_IP}:${ETCD_CLIENT_PORT}" \
+                --listen-peer-urls "http://0.0.0.0:${ETCD_PEER_PORT}" \
+                --initial-advertise-peer-urls "http://${HOST_IP}:${ETCD_PEER_PORT}" \
+                --initial-cluster "etcd-yuanrong-k8s=http://${HOST_IP}:${ETCD_PEER_PORT}" \
+                >"$ETCD_LOG" 2>&1 &
+              ETCD_PID=$!
+
+              stop_children() {
+                kill "$ETCD_PID" 2>/dev/null || true
+              }
+              trap stop_children TERM INT EXIT
+
+              if [ -x "$ETCDCTL_BIN" ]; then
+                for _ in $(seq 1 60); do
+                  if ETCDCTL_API=3 "$ETCDCTL_BIN" \
+                    --endpoints "http://${HOST_IP}:${ETCD_CLIENT_PORT}" \
+                    endpoint health >/tmp/etcd-health.log 2>&1; then
+                    break
+                  fi
+                  sleep 1
+                done
+              else
+                sleep 5
+              fi
+
+              echo "Starting DataSystem worker on ${HOST_IP}:${DS_WORKER_PORT}"
+              exec "$DS_WORKER_BIN" \
+                --worker_address="${HOST_IP}:${DS_WORKER_PORT}" \
+                --etcd_address="${HOST_IP}:${ETCD_CLIENT_PORT}" \
+                --shared_memory_size_mb="${SHARED_MEMORY_SIZE_MB}" \
+                --log_dir="$DS_LOG_DIR"
+          ports:
+            - name: ds-worker
+              containerPort: 18481
+              hostPort: 18481
+            - name: etcd-client
+              containerPort: 12379
+              hostPort: 12379
+            - name: etcd-peer
+              containerPort: 12380
+              hostPort: 12380
+          resources:
+            requests:
+              cpu: "1"
+              memory: "6Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          volumeMounts:
+            - name: etcd-bin
+              mountPath: /host-etcd
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: etcd-bin
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/etcd-v3.5.10-linux-arm64
+            type: Directory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 6Gi

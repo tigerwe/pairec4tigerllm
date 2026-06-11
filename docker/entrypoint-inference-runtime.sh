@@ -14,7 +14,9 @@ BACKBONE="${BACKBONE:-qwen3}"
 USE_TRT_LLM="${USE_TRT_LLM:-true}"
 DATASYSTEM_HOST="${DATASYSTEM_HOST:-}"
 DATASYSTEM_PORT="${DATASYSTEM_PORT:-31501}"
+PYTHON_DATASYSTEM_ENABLED="${PYTHON_DATASYSTEM_ENABLED:-1}"
 TRT_MAX_KV_TOKENS="${TRT_MAX_KV_TOKENS:-1024}"
+TRT_KV_CACHE_HOST_CACHE_SIZE="${TRT_KV_CACHE_HOST_CACHE_SIZE:-0}"
 TRT_SCHEDULER_POLICY="${TRT_SCHEDULER_POLICY:-max_utilization}"
 TRT_MAX_INPUT_LEN="${TRT_MAX_INPUT_LEN:-64}"
 TRT_NUM_SAMPLES="${TRT_NUM_SAMPLES:-1}"
@@ -58,8 +60,10 @@ echo "TRT engine dir:  $TRT_ENGINE_DIR"
 echo "Port:            $PORT"
 echo "Device:          $DEVICE"
 echo "Use TRT-LLM:     $USE_TRT_LLM"
-echo "DataSystem:      ${DATASYSTEM_HOST:-<disabled>}:${DATASYSTEM_PORT}"
+echo "C++ DataSystem:  ${DATASYSTEM_HOST:-<unset>}:${DATASYSTEM_PORT}"
+echo "Python DS:       $PYTHON_DATASYSTEM_ENABLED"
 echo "TRT samples:     $TRT_NUM_SAMPLES"
+echo "TRT host cache:  $TRT_KV_CACHE_HOST_CACHE_SIZE"
 echo "Result cache:    $TRT_RESULT_CACHE_ENABLED"
 echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
 echo "LD_PRELOAD:      ${LD_PRELOAD:-<unset>}"
@@ -96,11 +100,12 @@ if [ "$USE_TRT_LLM" = "true" ]; then
     ARGS="$ARGS --use_trt_llm --trt_engine_dir $TRT_ENGINE_DIR"
 fi
 
-if [ -n "$DATASYSTEM_HOST" ]; then
+if [ "$PYTHON_DATASYSTEM_ENABLED" != "0" ] && [ -n "$DATASYSTEM_HOST" ]; then
     ARGS="$ARGS --datasystem_host $DATASYSTEM_HOST --datasystem_port $DATASYSTEM_PORT"
 fi
 
 ARGS="$ARGS --trt_max_kv_tokens $TRT_MAX_KV_TOKENS"
+ARGS="$ARGS --trt_kv_cache_host_cache_size $TRT_KV_CACHE_HOST_CACHE_SIZE"
 ARGS="$ARGS --trt_scheduler_policy $TRT_SCHEDULER_POLICY"
 ARGS="$ARGS --trt_max_input_len $TRT_MAX_INPUT_LEN"
 ARGS="$ARGS --trt_num_samples $TRT_NUM_SAMPLES"
