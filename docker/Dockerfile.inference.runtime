@@ -1,16 +1,22 @@
 # PaiRec4TigerLLM inference image on top of the validated ARM TRT-LLM/DataSystem runtime.
 #
-# Build on the ARM K8s master/worker where docker.io/library/zcx-pairec-image:v1.1
-# is already available:
+# Build on the ARM K8s master/worker after committing the manually verified
+# TensorRT-LLM/DataSystem runtime container:
+#
+#   docker commit 3d25ebe028d6 docker.io/library/zcx-pairec-ds-runtime:v1
 #
 #   docker build -f docker/Dockerfile.inference.runtime \
-#     -t docker.io/library/pairec-inference:k8s-arm64-ds-kv-v1 .
+#     --build-arg BASE_IMAGE=docker.io/library/zcx-pairec-ds-runtime:v1 \
+#     -t docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1 .
 #
 # The image intentionally does not contain model weights, checkpoint, TRT engine or
 # data files. Mount those at /app/models, /app/checkpoints, /app/trt_engines and
 # /app/data via hostPath/PVC.
 
-FROM docker.io/library/zcx-pairec-image:v1.1
+ARG BASE_IMAGE=docker.io/library/zcx-pairec-ds-runtime:v1
+FROM ${BASE_IMAGE}
+
+SHELL ["/bin/bash", "-lc"]
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -22,6 +28,16 @@ WORKDIR /app
 
 COPY inference/ /app/inference/
 COPY training/ /app/training/
+
+COPY scripts/block_consumer.c /tmp/block_consumer.c
+COPY scripts/stub_gpu.c /tmp/stub_gpu.c
+RUN if [ -f /opt/openEuler/gcc-toolset-14/enable ]; then \
+        source /opt/openEuler/gcc-toolset-14/enable; \
+    fi && \
+    mkdir -p /opt/pairec/lib && \
+    gcc -shared -fPIC -o /opt/pairec/lib/block_ds_consumer.so /tmp/block_consumer.c -ldl && \
+    gcc -shared -fPIC -o /opt/pairec/lib/stub_gpu.so /tmp/stub_gpu.c && \
+    rm -f /tmp/block_consumer.c /tmp/stub_gpu.c
 
 COPY docker/patch_trtllm_model_runner_cpp.py /tmp/patch_trtllm_model_runner_cpp.py
 RUN python /tmp/patch_trtllm_model_runner_cpp.py \
@@ -42,6 +58,7 @@ ENV MAX_SEQ_LEN=512
 ENV BACKBONE=qwen3
 ENV USE_TRT_LLM=true
 ENV PYTHON_DATASYSTEM_ENABLED=1
+ENV ENABLE_DATASYSTEM_PRELOADS=1
 ENV TRT_MAX_KV_TOKENS=1024
 ENV TRT_KV_CACHE_HOST_CACHE_SIZE=0
 ENV TRT_SCHEDULER_POLICY=max_utilization

@@ -2,10 +2,12 @@
 # Inference Deployment (formal runtime image)
 # ============================================
 #
-# Uses docker.io/library/pairec-inference:k8s-arm64-ds-kv-v1, which contains:
+# Uses docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1, which contains:
 # - /app inference/training code
+# - TensorRT-LLM C++ DataSystem runtime from the manually verified base image
 # - TensorRT-LLM model_runner_cpp.py scheduler_config patch
-# - runtime entrypoint with verified LD_LIBRARY_PATH and NVML/abseil LD_PRELOAD
+# - runtime entrypoint with verified LD_LIBRARY_PATH and DataSystem/NVML/abseil
+#   LD_PRELOAD helpers
 #
 # Model, checkpoint, TRT engine and data are still mounted from worker1 hostPath.
 # Replace these hostPath mounts with PVCs after the image baseline is verified.
@@ -34,7 +36,7 @@ spec:
         pairec/gpu: "true"
       containers:
         - name: inference
-          image: docker.io/library/pairec-inference:k8s-arm64-ds-kv-v1
+          image: docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1
           imagePullPolicy: IfNotPresent
           env:
             - name: TRT_NUM_SAMPLES

@@ -3,6 +3,11 @@
 
 set -eu
 
+# Drop stale preload paths inherited from the base image or an interactive
+# container. The runtime below rebuilds the exact preload chain from files that
+# exist inside this image.
+unset LD_PRELOAD || true
+
 MODEL_PATH="${MODEL_PATH:-/app/checkpoints/decoder_qwen3/decoder_epoch_20.pt}"
 QWEN3_MODEL_PATH="${QWEN3_MODEL_PATH:-/app/models/Qwen3-0.6B}"
 TRT_ENGINE_DIR="${TRT_ENGINE_DIR:-/app/trt_engines/qwen3_rec_v4}"
@@ -15,6 +20,7 @@ USE_TRT_LLM="${USE_TRT_LLM:-true}"
 DATASYSTEM_HOST="${DATASYSTEM_HOST:-}"
 DATASYSTEM_PORT="${DATASYSTEM_PORT:-31501}"
 PYTHON_DATASYSTEM_ENABLED="${PYTHON_DATASYSTEM_ENABLED:-1}"
+ENABLE_DATASYSTEM_PRELOADS="${ENABLE_DATASYSTEM_PRELOADS:-1}"
 TRT_MAX_KV_TOKENS="${TRT_MAX_KV_TOKENS:-1024}"
 TRT_KV_CACHE_HOST_CACHE_SIZE="${TRT_KV_CACHE_HOST_CACHE_SIZE:-0}"
 TRT_SCHEDULER_POLICY="${TRT_SCHEDULER_POLICY:-max_utilization}"
@@ -25,9 +31,23 @@ TRT_RESULT_CACHE_ENABLED="${TRT_RESULT_CACHE_ENABLED:-1}"
 export PYTHONPATH="${PYTHONPATH:-/app:/home/TensorRT-LLM}"
 export NVIDIA_DRIVER_CAPABILITIES="${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}"
 export LD_LIBRARY_PATH="/opt/openEuler/gcc-toolset-14/root/usr/lib64:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64:/usr/local/lib:${LD_LIBRARY_PATH:-}"
+export DATASYSTEM_HOST DATASYSTEM_PORT
+export TRT_KV_CACHE_HOST_CACHE_SIZE
 
 find_first_file() {
     find "$1" -name "$2" 2>/dev/null | head -1 || true
+}
+
+PRELOADS=""
+append_preload() {
+    candidate="$1"
+    if [ -n "$candidate" ] && [ -s "$candidate" ]; then
+        if [ -n "$PRELOADS" ]; then
+            PRELOADS="$PRELOADS $candidate"
+        else
+            PRELOADS="$candidate"
+        fi
+    fi
 }
 
 NVML=""
@@ -41,12 +61,16 @@ elif [ -e /usr/lib64/libnvidia-ml.so.1 ]; then
 fi
 
 ABSEIL="$(find_first_file /usr/local libabseil_dll.so.2407.0.0)"
-if [ -n "$NVML" ] && [ -n "$ABSEIL" ]; then
-    export LD_PRELOAD="$NVML $ABSEIL"
-elif [ -n "$NVML" ]; then
-    export LD_PRELOAD="$NVML"
-elif [ -n "$ABSEIL" ]; then
-    export LD_PRELOAD="$ABSEIL"
+
+if [ "$ENABLE_DATASYSTEM_PRELOADS" != "0" ]; then
+    append_preload /opt/pairec/lib/block_ds_consumer.so
+    append_preload /opt/pairec/lib/stub_gpu.so
+fi
+append_preload "$NVML"
+append_preload "$ABSEIL"
+
+if [ -n "$PRELOADS" ]; then
+    export LD_PRELOAD="$PRELOADS"
 else
     unset LD_PRELOAD
 fi
@@ -62,6 +86,7 @@ echo "Device:          $DEVICE"
 echo "Use TRT-LLM:     $USE_TRT_LLM"
 echo "C++ DataSystem:  ${DATASYSTEM_HOST:-<unset>}:${DATASYSTEM_PORT}"
 echo "Python DS:       $PYTHON_DATASYSTEM_ENABLED"
+echo "DS preloads:     $ENABLE_DATASYSTEM_PRELOADS"
 echo "TRT samples:     $TRT_NUM_SAMPLES"
 echo "TRT host cache:  $TRT_KV_CACHE_HOST_CACHE_SIZE"
 echo "Result cache:    $TRT_RESULT_CACHE_ENABLED"

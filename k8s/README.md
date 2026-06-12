@@ -99,31 +99,42 @@ POST /recommend -> code=200, recommendations 非空
 
 hostPath 推理方案验证通过后，优先使用
 `docker/Dockerfile.inference.runtime` 构建正式 inference 镜像。该镜像基于已验证
-的 `docker.io/library/zcx-pairec-image:v1.1` runtime，内置：
+的 DataSystem C++ runtime 容器，内置：
 
 - `/app/inference` 和必要的 `/app/training` 代码。
+- 历史手工验证容器里的 TensorRT-LLM C++ DataSystem patch。
 - 构建期 TensorRT-LLM `ModelRunnerCpp.from_dir()` `scheduler_config` patch。
-- 推理 entrypoint，统一设置 `LD_LIBRARY_PATH`、有效 NVML 与 DataSystem abseil
-  `LD_PRELOAD`。
+- 推理 entrypoint，统一设置 `LD_LIBRARY_PATH`，并按顺序加载
+  `block_ds_consumer.so`、`stub_gpu.so`、有效 NVML 与 DataSystem abseil。
 
 模型、checkpoint、TRT engine 和数据仍由挂载提供，当前 manifest 继续使用
 worker1 hostPath；后续再替换为 PVC。
 
-在 master 构建并导入 worker1：
+先在能看到历史容器 `3d25ebe028d6` 的 Docker 宿主机上确认
+`/home/TensorRT-LLM` 不是 bind mount，然后把该容器提交为正式 base image：
+
+```bash
+docker inspect 3d25ebe028d6 \
+  --format '{{range .Mounts}}{{println .Destination "->" .Source}}{{end}}'
+
+# 如果输出里没有 /home/TensorRT-LLM，再执行：
+docker commit 3d25ebe028d6 docker.io/library/zcx-pairec-ds-runtime:v1
+```
+
+然后在 master 构建并导入 worker1：
 
 ```bash
 cd /home/zcx/workspace/pairec4tigerllm
 
-# 如果 docker daemon 里没有基础镜像，先 load 已验证 runtime tar。
-# docker load -i /path/to/zcx-pairec-image.tar
-
 bash scripts/build_inference_runtime_image.sh \
-  docker.io/library/pairec-inference:k8s-arm64-ds-kv-v1
-docker save docker.io/library/pairec-inference:k8s-arm64-ds-kv-v1 \
-  -o /tmp/pairec-inference-k8s-arm64-ds-kv-v1.tar
-scp /tmp/pairec-inference-k8s-arm64-ds-kv-v1.tar root@141.61.91.188:/tmp/
+  docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1 \
+  /tmp/pairec-inference-k8s-arm64-ds-runtime-v1.tar \
+  docker.io/library/zcx-pairec-ds-runtime:v1
+docker save docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1 \
+  -o /tmp/pairec-inference-k8s-arm64-ds-runtime-v1.tar
+scp /tmp/pairec-inference-k8s-arm64-ds-runtime-v1.tar root@141.61.91.188:/tmp/
 ssh root@141.61.91.188 \
-  'ctr -n k8s.io images import /tmp/pairec-inference-k8s-arm64-ds-kv-v1.tar'
+  'ctr -n k8s.io images import /tmp/pairec-inference-k8s-arm64-ds-runtime-v1.tar'
 ```
 
 应用并验证：
@@ -139,6 +150,16 @@ curl -X POST http://127.0.0.1:18002/recommend \
 
 该方案默认保持 Python DataSystem disabled，用于稳定复现已验证 HTTP/TRT 基线。
 DataSystem Python client 与 C++ `CacheTransceiver` 后续作为独立变量打开。
+如果启动日志没有出现：
+
+```text
+[TensorRT-LLM][Datasystem] Create Datasystem class
+[TensorRT-LLM][Datasystem] Init KvCache Manager DataSystem success
+```
+
+优先检查 base image 是否来自上述手工验证容器，以及
+`LD_PRELOAD` 是否包含 `/opt/pairec/lib/block_ds_consumer.so` 和
+`/opt/pairec/lib/stub_gpu.so`。
 
 ### C++ DataSystem KV runtime 诊断
 
@@ -182,7 +203,7 @@ offload/onboard，再构建独立的验证 engine：
 bash scripts/k8s_build_trt_engine_paged_fmha.sh
 ```
 
-该 Job 固定调度到 worker1，使用 `pairec-inference:k8s-arm64-ds-kv-v1`
+该 Job 固定调度到 worker1，使用 `pairec-inference:k8s-arm64-ds-runtime-v1`
 runtime，在 hostPath repo 下生成：
 
 ```text
