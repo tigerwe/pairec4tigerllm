@@ -28,7 +28,8 @@ TRT_MAX_INPUT_LEN="${TRT_MAX_INPUT_LEN:-64}"
 TRT_NUM_SAMPLES="${TRT_NUM_SAMPLES:-1}"
 TRT_RESULT_CACHE_ENABLED="${TRT_RESULT_CACHE_ENABLED:-1}"
 
-export PYTHONPATH="${PYTHONPATH:-/app:/home/TensorRT-LLM}"
+DEFAULT_PYTHONPATH="/app:/home/TensorRT-LLM:/TensorRT-LLM:/home/TensorRT-LLM/3rdparty/cutlass/python:/TensorRT-LLM/3rdparty/cutlass/python"
+export PYTHONPATH="${PYTHONPATH:-$DEFAULT_PYTHONPATH}"
 export NVIDIA_DRIVER_CAPABILITIES="${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}"
 export LD_LIBRARY_PATH="/opt/openEuler/gcc-toolset-14/root/usr/lib64:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 export DATASYSTEM_HOST DATASYSTEM_PORT

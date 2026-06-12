@@ -110,15 +110,20 @@ hostPath 推理方案验证通过后，优先使用
 模型、checkpoint、TRT engine 和数据仍由挂载提供，当前 manifest 继续使用
 worker1 hostPath；后续再替换为 PVC。
 
-先在能看到历史容器 `3d25ebe028d6` 的 Docker 宿主机上确认
-`/home/TensorRT-LLM` 不是 bind mount，然后把该容器提交为正式 base image：
+先在能看到历史容器 `3d25ebe028d6` 的 Docker 宿主机上确认 TensorRT-LLM
+来源。如果 `pip show tensorrt-llm` 显示 `Editable project location:
+/TensorRT-LLM`，且 `docker inspect` 显示 `/TensorRT-LLM` 是 bind mount，则不要
+直接 `docker commit`；commit 不会包含挂载目录。应把该目录复制进一个独立 base
+image：
 
 ```bash
 docker inspect 3d25ebe028d6 \
   --format '{{range .Mounts}}{{println .Destination "->" .Source}}{{end}}'
 
-# 如果输出里没有 /home/TensorRT-LLM，再执行：
-docker commit 3d25ebe028d6 docker.io/library/zcx-pairec-ds-runtime:v1
+bash scripts/build_datasystem_runtime_base_image.sh \
+  3d25ebe028d6 \
+  docker.io/library/zcx-pairec-ds-runtime:v1 \
+  docker.io/library/zcx-pairec-image:v1.1
 ```
 
 然后在 master 构建并导入 worker1：
