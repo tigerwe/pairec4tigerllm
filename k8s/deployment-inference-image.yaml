@@ -49,8 +49,6 @@ spec:
               value: max_utilization
             - name: TRT_MAX_INPUT_LEN
               value: "64"
-            - name: TRT_ENGINE_DIR
-              value: "/app/trt_engines/qwen3_rec_v4_paged_fmha"
             # Keep Python DataSystem disabled while exposing DataSystem env to
             # TensorRT-LLM C++ KV cache code.
             - name: PYTHON_DATASYSTEM_ENABLED

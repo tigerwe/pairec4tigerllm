@@ -140,18 +140,43 @@ curl -X POST http://127.0.0.1:18002/recommend \
 该方案默认保持 Python DataSystem disabled，用于稳定复现已验证 HTTP/TRT 基线。
 DataSystem Python client 与 C++ `CacheTransceiver` 后续作为独立变量打开。
 
-### C++ DataSystem KV 验证 engine
+### C++ DataSystem KV runtime 诊断
 
-`qwen3_rec_v4` 是当前 HTTP/TRT 基线 engine。K8s DataSystem KV 验证需要
-TensorRT-LLM block reuse；如果 engine config 中
-`plugin_config.context_fmha=false` 或
-`plugin_config.use_paged_context_fmha=false`，运行时会输出：
+先确认当前 inference Pod 里的 TensorRT-LLM C++ 动态库是否包含 DataSystem
+patch 和结构化 TRACE 字符串：
+
+```bash
+bash scripts/k8s_check_trtllm_datasystem_runtime.sh
+```
+
+期望至少能在某个 `.so` 里看到：
+
+```text
+Create Datasystem class
+Init KvCache Manager DataSystem
+op=offload
+op=onboard
+```
+
+如果输出 `NO_DATASYSTEM_CPP_STRINGS_FOUND`，问题在 runtime 镜像内的
+TensorRT-LLM C++ 动态库，不在 engine；需要先用带 DataSystem patch 的
+TensorRT-LLM runtime 重建/替换 inference 镜像。
+
+### C++ DataSystem KV 验证 engine 后备方案
+
+`qwen3_rec_v4` 是当前 HTTP/TRT 基线 engine。当前 worker1 上这份 engine config
+为 `plugin_config.context_fmha=false` 且
+`plugin_config.use_paged_context_fmha=false`。如果当前 TRT-LLM runtime 严格按
+upstream 逻辑处理 block reuse，会输出：
 
 ```text
 KV cache reuse disabled because model was not built with paged context FMHA support
 ```
 
-此时压测不会进入 C++ offload/onboard 路径。先构建独立的验证 engine：
+历史容器中同样的 `qwen3_rec_v4` 曾跑通过 C++ offload/onboard，因此不要仅凭
+这个 config 直接判定 engine 必须重建；应优先完成上面的 runtime 诊断。
+如果确认 runtime 已包含 DataSystem patch，但仍因该 warning 无法进入
+offload/onboard，再构建独立的验证 engine：
 
 ```bash
 bash scripts/k8s_build_trt_engine_paged_fmha.sh
