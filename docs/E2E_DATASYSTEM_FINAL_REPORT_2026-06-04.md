@@ -285,6 +285,168 @@ context deadline exceeded (Client.Timeout exceeded while awaiting headers)
 
 远端 DS 测试建议将 `timeout_ms` 调到 `5000ms`，并保持 `max_retries=1`，避免重试放大 GPU/DS 压力。
 
+## 9. 指标口径详细说明
+
+本节解释报告中所有主要 `*_ms` 指标的来源和含义。需要先区分三类统计粒度：
+
+1. **请求级**：`client_e2e_ms`、PaiRec stages、GenerativeRecall stages、TRT service stages，单位是每个推荐请求。
+2. **服务内阶段级**：`tr_*` 和 TRT service stages 来自 inference 服务返回的 `trace`，部分字段是同一底层字段在不同日志里的别名。
+3. **KV block 级**：`offload.*_ms` 和 `onboard.*_ms` 来自 TensorRT-LLM C++ `[Datasystem][TRACE]`，单位是每个 KV block，不是每个请求。
+
+所有指标均为 host wall-clock 计时：Go 侧使用 `time.Now()` / `time.Since()`，Python 侧使用 `time.perf_counter()`，C++ DataSystem trace 使用 host 计时。当前没有 CUDA event 的 device-only 指标。
+
+### 9.1 Client 指标
+
+| 指标 | 粒度 | 来源 | 含义 | 解读 |
+|---|---|---|---|---|
+| `client_e2e_ms` | request | `scripts/benchmark_e2e_latency.py` | 压测客户端从发起 `POST /api/recommend` 到收到 PaiRec 响应的完整 HTTP 往返耗时。 | 最接近用户侧体感延迟，包含客户端到 PaiRec、PaiRec 内部、PaiRec 调 inference、inference 内部和响应解析。 |
+
+本地 DS 报告中 `client_e2e_ms p50=92.8ms`，而 PaiRec 服务端 `total_ms p50=92.0ms`，两者只差约 `0.8ms`，说明压测客户端到 PaiRec 的额外开销很小。
+
+### 9.2 PaiRec recommend stages
+
+这些字段来自 PaiRec Go 服务的 `RecommendTrace` 日志，描述 `/api/recommend` 在 PaiRec 内部的阶段耗时。
+
+| 指标 | 粒度 | 含义 | 本报告中的判断 |
+|---|---|---|---|
+| `total_ms` | request | PaiRec 处理一次 `/api/recommend` 的服务端总耗时，不包含压测客户端侧网络开销。 | 本地 DS p50=`92.0ms`，几乎等于 `recall_ms`。 |
+| `user_feature_ms` | request | 获取用户特征的耗时，可能来自实时特征、fallback 文件或上下文。 | 本轮为 `0.0ms`，不是瓶颈。 |
+| `recall_ms` | request | PaiRec 召回阶段总耗时，包含 GenerativeRecall 调 inference。 | 几乎等于 `total_ms`，说明本轮 pipeline 的主要工作就是生成式召回。 |
+| `filter_ms` | request | 过滤阶段耗时，例如过滤已看、黑名单或业务规则。 | 本轮为 `0.0ms`。 |
+| `general_rank_ms` | request | 粗排/通用排序阶段耗时。 | 本轮为 `0.0ms`，没有明显排序负载。 |
+| `feature_ms` | request | 排序或模型需要的特征加载耗时。 | 本轮为 `0.0ms`。 |
+| `rank_ms` | request | 精排阶段耗时。 | 本轮为 `0.0ms`，当前主要测召回链路。 |
+| `pipeline_wait_ms` | request | pipeline 并发等待耗时，例如等待多路召回或 rank stage。 | 本轮为 `0.0ms`。 |
+| `merge_ms` | request | 多路召回结果合并耗时。 | 本轮为 `0.0ms`，主要只有一路 `generative_recall`。 |
+| `sort_ms` | request | 最终排序耗时。 | 本轮为 `0.0ms`。 |
+
+因此，本地 DS 下 PaiRec 侧几乎没有额外瓶颈：`total_ms ≈ recall_ms ≈ GenerativeRecall http_ms`。
+
+### 9.3 GenerativeRecall stages
+
+这些字段来自 `services/recall/generative_recall.go`，描述 PaiRec 自定义召回内部从取历史、转换、调用 inference 到转换返回 item 的耗时。
+
+| 指标 | 粒度 | 来源/计算方式 | 含义 | 解读 |
+|---|---|---|---|---|
+| `cost` | request | `utils.CostTime(stageStart)` | GenerativeRecall 总耗时，单位 ms。 | 基本等于 PaiRec `recall_ms`。 |
+| `cache_ms` | request | Go recall cache 查询计时 | GenerativeRecall 自己的 Go 侧缓存查询耗时。 | 本轮为 `0.0ms`，没有靠 Go recall cache 命中。 |
+| `history_ms` | request | `getUserHistory()` 计时 | 获取用户历史行为耗时。 | 本轮为 `0.0ms`，历史获取不是瓶颈。 |
+| `convert_ms` | request | `convertToSemanticIDs()` 计时 | 将用户历史 item 转成 semantic id 历史的耗时。 | 本轮为 `0.0ms`，转换成本很低。 |
+| `http_ms` | request | `r.client.Recommend()` 外围计时 | GenerativeRecall 调 inference `/recommend` 的 HTTP 总耗时。 | 本地 DS p50=`92.0ms`，主要由 inference 服务耗时贡献。 |
+| `items_ms` | request | `convertToItems()` 计时 | 将 inference 返回的 recommendations 转成 PaiRec item 的耗时。 | 本轮为 `0.0ms`。 |
+| `http_overhead_ms` | request | `http_ms - response.Trace.TotalMs`，负数归零 | HTTP/JSON/Flask 路由/网络/排队等 inference 自报耗时之外的开销。 | 本地 DS p50 约 `1ms`，服务间 HTTP 开销很小。 |
+
+`tr_*` 字段是 inference 服务 response 中 `trace` 字段的透传，GenerativeRecall 只是加了 `tr_` 前缀：
+
+| GenerativeRecall 字段 | inference trace 字段 | 含义 |
+|---|---|---|
+| `tr_total_ms` | `total_ms` | inference 服务处理 `/recommend` 的总耗时。 |
+| `tr_prepare_ms` | `prepare_input_ms` | 输入准备耗时。 |
+| `tr_infer_ms` | `infer_ms` | 推理分支总耗时。 |
+| `tr_prompt_ms` | `prompt_ms` | TRT prompt 构造、tokenizer 编码和历史截断耗时。 |
+| `tr_runner_ms` | `runner_generate_ms` | TensorRT-LLM `ModelRunnerCpp.generate()` 累计耗时。 |
+| `tr_parse_ms` | `parse_combo_ms` | TRT 输出 token 解析、semantic id 组合和去重耗时。 |
+| `tr_pad_ms` | `output_pad_ms` | 将结果 padding 成统一 tensor 的耗时。 |
+| `tr_map_ms` | `map_item_ms` | semantic id 映射回 item id 的耗时。 |
+| `tr_kv_lookup_ms` | `kv_lookup_ms` | Python 层 KVCacheManager 查询耗时。 |
+| `tr_kv_write_ms` | `kv_write_ms` | Python 层 KV cache 异步写入提交耗时。 |
+| `tr_result_cache_lookup_ms` | `result_cache_lookup_ms` | Python 侧推荐结果 HBM LRU cache 查询耗时。 |
+| `tr_result_cache_ds_lookup_ms` | `result_cache_ds_lookup_ms` | Python 侧推荐结果缓存从 DataSystem 查询耗时。 |
+| `tr_result_cache_write_submit_ms` | `result_cache_write_submit_ms` | Python 侧推荐结果缓存异步写入提交耗时。 |
+
+注意：`tr_kv_lookup_ms`、`tr_kv_write_ms` 和 `tr_result_cache_*` 都是 Python inference 服务层指标，不是 TensorRT-LLM C++ KV block 的 `offload/onboard` 指标。
+
+### 9.4 TRT service stages
+
+这些字段来自 inference 服务日志 `[TRACE]`，与上面的 `tr_*` 基本是同一批数据，只是没有 `tr_` 前缀。
+
+| 指标 | 粒度 | 含义 | 解读 |
+|---|---|---|---|
+| `total_ms` | request | inference 服务处理 `/recommend` 的总耗时。 | 等价于 `tr_total_ms`。 |
+| `prepare_ms` | request | 输入准备耗时，对应 `prepare_input_ms`。 | 包括构造模型输入、转 tensor、移动到 GPU、计算 history hash。 |
+| `kv_lookup_ms` | request | Python 层 KVCacheManager 查询耗时。 | 不是 C++ KV block 的 Set/Get。 |
+| `result_cache_lookup_ms` | request | Python 推荐结果 HBM LRU cache 查询耗时。 | 本报告关闭 result cache，因此为 `0.0ms`。 |
+| `result_cache_ds_lookup_ms` | request | Python 推荐结果缓存从 DataSystem 查询耗时。 | 本报告关闭 result cache，因此为 `0.0ms`。 |
+| `prompt_ms` | request | TRT backend prompt 构造、tokenizer 编码和历史截断耗时。 | 本地 DS p50 约 `2.7ms`。 |
+| `runner_ms` | request | TensorRT-LLM `runner.generate()` 累计耗时。 | 本地 DS p50 约 `84.9ms`，是主瓶颈。 |
+| `runner_calls` | request | 本请求内调用 `runner.generate()` 的次数。 | 本报告 `TRT_NUM_SAMPLES=1`，因此为 `1`。 |
+| `runner_avg_ms` | request | `runner_ms / runner_calls`。 | 当前等于 `runner_ms`。 |
+| `runner_max_ms` | request | 多次 `runner.generate()` 中最慢一次耗时。 | 当前 `runner_calls=1`，也等于 `runner_ms`。 |
+| `parse_ms` | request | 输出 token 解析、semantic id 组合和去重耗时。 | 本轮接近 `0.0ms`。 |
+| `map_ms` | request | semantic id 映射回 item id 的耗时。 | 本轮约 `0.1ms`。 |
+
+本地 DS 下，`runner_ms p50=84.9ms`，`total_ms p50=90.7ms`，runner 约占 inference 总耗时的 `94%`。这就是报告判断“TRT runner 仍是主要瓶颈”的依据。
+
+### 9.5 inference trace 内部字段补充
+
+以下字段没有全部单独出现在 TRT service table 中，但会出现在 GenerativeRecall 的 `tr_*` 或 response trace 里：
+
+| 字段 | 粒度 | 含义 |
+|---|---|---|
+| `prepare_input_ms` | request | inference 服务输入准备耗时，对应 `tr_prepare_ms` / `prepare_ms`。 |
+| `infer_ms` | request | 推理分支总耗时，对应 `tr_infer_ms`。TRT path 下主要覆盖 TRT backend generate。 |
+| `generate_ms` | request | 生成总耗时。TRT path 下通常等于 `backend_total_ms`。 |
+| `model_forward_ms` | request | PyTorch forward path 的模型前向耗时。TRT path 下通常为 `0.0ms`。 |
+| `backend_total_ms` | request | TRT backend `generate()` 端到端耗时，包含 prompt、runner、parse、pad。 |
+| `map_item_ms` | request | semantic id 到 item id 的映射耗时。 |
+| `kv_write_ms` | request | Python 层 KV cache store 的异步提交耗时；TRT C++ KV path 下通常为 `0.0ms`。 |
+
+### 9.6 DataSystem C++ KV block stages
+
+这些字段来自 TensorRT-LLM C++ `[Datasystem][TRACE]`。它们是 per KV block 指标，不是 per request 指标，不能直接与 `client_e2e_ms` 相加。一个请求可能触发多个 KV block 的 offload/onboard。
+
+| 指标 | 粒度 | 含义 | 本地 DS 结论 |
+|---|---|---|---|
+| `offload.create_ms` | KV block | offload 时创建/准备 DataSystem object 或 buffer 的耗时。 | p50=`0.605ms`。 |
+| `offload.d2h_ms` | KV block | GPU device KV block 拷贝到 host buffer 的耗时，即 GPU -> host。 | p50=`0.468ms`。 |
+| `offload.set_ms` | KV block | 调用 DataSystem `Set` 将 host buffer 写入 DataSystem 的耗时。 | p50=`0.746ms`，p99=`1.015ms`。 |
+| `offload.total_ms` | KV block | 一次 KV block offload 的总耗时，包含 create、D2H、Set 及少量 C++ 路径开销。 | p50=`1.870ms`。 |
+| `onboard.get_ms` | KV block | 从 DataSystem `Get` 取回 KV block 到 host buffer 的耗时。 | p50=`0.623ms`，p99=`0.818ms`。 |
+| `onboard.h2d_ms` | KV block | host buffer 拷贝回 GPU KV cache block 的耗时，即 host -> GPU。 | p50=`0.336ms`。 |
+| `onboard.total_ms` | KV block | 一次 KV block onboard 的总耗时，包含 Get、H2D 及少量 C++ 路径开销。 | p50=`0.992ms`。 |
+
+本地 DS 下，per request 近似触发量为：
+
+```text
+offload blocks/request ≈ 29330 / 11853 ≈ 2.47
+onboard blocks/request ≈ 13421 / 11853 ≈ 1.13
+```
+
+这意味着本地 DS 的 KV 传输成本通常是每请求几毫秒量级，远小于 `tr_runner_ms p50=84.9ms`，因此本地 DS 不是端到端主瓶颈。
+
+远端 DS 下，关键字段变化是：
+
+```text
+offload.set_ms p50 = 314.149ms
+onboard.get_ms p50 = 315.572ms
+onboard.h2d_ms p50 = 0.405ms
+```
+
+这说明远端慢点集中在 DataSystem `Set/Get` 到本机 host buffer 的路径，而不是本机 H2D。当前远端路径仍是：
+
+```text
+远端 DataSystem Get -> 本机 host buffer -> 本机 GPU H2D
+```
+
+还不是 remote H2D。
+
+### 9.7 cache group 指标
+
+| 指标/分组 | 含义 |
+|---|---|
+| `disabled` | Python TRT 推荐结果缓存已关闭，当前请求走 cold runner path。 |
+| `hbm_hit` | Python 侧推荐结果 HBM LRU cache 命中。该场景会绕过 TRT runner。 |
+| `ds_hit` | Python 侧推荐结果缓存从 DataSystem 命中。注意这不是 C++ KV block onboard。 |
+| `unknown` | request id 未能和 TRT trace 关联，通常用于保底归类，不作为性能结论主体。 |
+
+本报告中 `TRT_RESULT_CACHE_ENABLED=0`，因此主要分组为：
+
+```text
+disabled count=11804
+```
+
+这证明当前 E2E 统计代表 cold runner path，而不是 Python 推荐结果缓存命中后的低延迟路径。
+
 ## 附录 A. 原始 Benchmark 输出
 
 以下为远程 `scripts/benchmark_e2e_latency.py` 输出原始摘录，保留 pressure/replay、请求级阶段和 C++ DataSystem block 指标，便于复核上文汇总表。
