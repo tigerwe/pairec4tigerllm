@@ -140,6 +140,54 @@ curl -X POST http://127.0.0.1:18002/recommend \
 该方案默认保持 Python DataSystem disabled，用于稳定复现已验证 HTTP/TRT 基线。
 DataSystem Python client 与 C++ `CacheTransceiver` 后续作为独立变量打开。
 
+### C++ DataSystem KV 验证 engine
+
+`qwen3_rec_v4` 是当前 HTTP/TRT 基线 engine。K8s DataSystem KV 验证需要
+TensorRT-LLM block reuse；如果 engine config 中
+`plugin_config.context_fmha=false` 或
+`plugin_config.use_paged_context_fmha=false`，运行时会输出：
+
+```text
+KV cache reuse disabled because model was not built with paged context FMHA support
+```
+
+此时压测不会进入 C++ offload/onboard 路径。先构建独立的验证 engine：
+
+```bash
+bash scripts/k8s_build_trt_engine_paged_fmha.sh
+```
+
+该 Job 固定调度到 worker1，使用 `pairec-inference:k8s-arm64-ds-kv-v1`
+runtime，在 hostPath repo 下生成：
+
+```text
+trt_engines/qwen3_rec_v4_paged_fmha/
+```
+
+然后应用 inference DS 验证版 manifest：
+
+```bash
+bash scripts/k8s_apply_inference_image.sh
+```
+
+该 manifest 默认设置：
+
+```text
+TRT_ENGINE_DIR=/app/trt_engines/qwen3_rec_v4_paged_fmha
+PYTHON_DATASYSTEM_ENABLED=0
+DATASYSTEM_HOST=141.61.91.188
+DATASYSTEM_PORT=18481
+TRT_KV_CACHE_HOST_CACHE_SIZE=104857600
+TRT_RESULT_CACHE_ENABLED=0
+```
+
+验证目标是启动日志不再出现 `KV cache reuse disabled`，并且压测日志出现：
+
+```text
+[TensorRT-LLM][Datasystem][TRACE] op=offload
+[TensorRT-LLM][Datasystem][TRACE] op=onboard
+```
+
 ### 已验证 hostPath PaiRec 方案
 
 2026-06-10 在 ARM `worker1` 上已验证 PaiRec 通过 K8s Service 调用

@@ -1,0 +1,205 @@
+# Build a TRT-LLM engine that supports KV block reuse.
+#
+# The current HTTP baseline engine qwen3_rec_v4 is kept untouched. This job
+# writes qwen3_rec_v4_paged_fmha under the same worker1 hostPath tree.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trt-engine-paged-fmha
+  namespace: pairec
+  labels:
+    app: trt-engine-builder
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: trt-engine-builder
+    spec:
+      restartPolicy: Never
+      runtimeClassName: nvidia
+      nodeSelector:
+        pairec/gpu: "true"
+      containers:
+        - name: builder
+          image: docker.io/library/pairec-inference:k8s-arm64-ds-kv-v1
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace/repo
+          env:
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+            - name: PYTHONPATH
+              value: "/workspace/repo:/app:/home/TensorRT-LLM"
+            - name: LD_LIBRARY_PATH
+              value: "/opt/openEuler/gcc-toolset-14/root/usr/lib64:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64:/usr/local/lib"
+            - name: QWEN3_MODEL_PATH
+              value: "/workspace/repo/models/Qwen3-0.6B"
+            - name: DECODER_CKPT_PATH
+              value: "/workspace/repo/checkpoints/decoder_qwen3/decoder_epoch_20.pt"
+            - name: EXPORT_DIR
+              value: "/workspace/repo/exported/qwen3_rec_paged_fmha"
+            - name: TRT_CKPT_DIR
+              value: "/workspace/repo/trt_ckpt/qwen3_rec_paged_fmha"
+            - name: ENGINE_DIR
+              value: "/workspace/repo/trt_engines/qwen3_rec_v4_paged_fmha"
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              unset LD_PRELOAD || true
+              NVML=""
+              if [ -s /usr/lib64/libnvidia-ml.so.570.124.06 ]; then
+                NVML="/usr/lib64/libnvidia-ml.so.570.124.06"
+              elif [ -e /usr/lib64/libnvidia-ml.so.1 ]; then
+                NVML="$(readlink -f /usr/lib64/libnvidia-ml.so.1 || true)"
+                [ -s "$NVML" ] || NVML=""
+              fi
+              ABSEIL="$(find /usr/local -name libabseil_dll.so.2407.0.0 2>/dev/null | head -1 || true)"
+              if [ -n "$NVML" ] && [ -n "$ABSEIL" ]; then
+                export LD_PRELOAD="$NVML $ABSEIL"
+              elif [ -n "$NVML" ]; then
+                export LD_PRELOAD="$NVML"
+              elif [ -n "$ABSEIL" ]; then
+                export LD_PRELOAD="$ABSEIL"
+              fi
+
+              echo "Builder runtime:"
+              python - <<'PY'
+              import tensorrt_llm, torch
+              print("  tensorrt_llm", tensorrt_llm.__version__)
+              print("  torch", torch.__version__)
+              PY
+
+              if [ -f "$ENGINE_DIR/rank0.engine" ]; then
+                echo "Engine already exists: $ENGINE_DIR"
+                python - <<'PY'
+              import json, os
+              p = os.path.join(os.environ["ENGINE_DIR"], "config.json")
+              j = json.load(open(p))
+              pc = j["build_config"]["plugin_config"]
+              print("context_fmha =", pc.get("context_fmha"))
+              print("use_paged_context_fmha =", pc.get("use_paged_context_fmha"))
+              print("kv_cache_type =", j["build_config"].get("kv_cache_type"))
+              PY
+                exit 0
+              fi
+
+              test -d "$QWEN3_MODEL_PATH"
+              test -f "$DECODER_CKPT_PATH"
+
+              echo "Exporting merged Qwen3 model to $EXPORT_DIR"
+              python - <<'PY'
+              import json
+              import os
+              from pathlib import Path
+
+              import torch
+              from training.decoder.qwen3_generative_rec import Qwen3GenerativeRec
+
+              ckpt_path = os.environ["DECODER_CKPT_PATH"]
+              base_model = os.environ["QWEN3_MODEL_PATH"]
+              out_dir = Path(os.environ["EXPORT_DIR"])
+
+              print("  checkpoint:", ckpt_path)
+              print("  base model:", base_model)
+              ckpt = torch.load(ckpt_path, map_location="cpu")
+              cfg = ckpt.get("config", {})
+              model = Qwen3GenerativeRec(
+                  model_name_or_path=base_model,
+                  vocab_size=cfg.get("vocab_size", 256),
+                  num_quantizers=cfg.get("num_quantizers", 4),
+                  max_seq_len=cfg.get("max_seq_len", 2048),
+                  use_lora=True,
+                  lora_rank=8,
+                  lora_alpha=16,
+              )
+              model.load_state_dict(ckpt["model_state_dict"], strict=False)
+              model.merge_lora()
+              out_dir.mkdir(parents=True, exist_ok=True)
+              model.base_model.save_pretrained(out_dir, safe_serialization=True)
+              model.tokenizer.save_pretrained(out_dir)
+
+              config_path = out_dir / "config.json"
+              config = json.load(open(config_path))
+              config["vocab_size"] = len(model.tokenizer)
+              json.dump(config, open(config_path, "w"), indent=2)
+              print("  exported:", out_dir)
+              print("  vocab_size:", config["vocab_size"])
+              PY
+
+              echo "Converting HF checkpoint to TensorRT-LLM checkpoint"
+              CONVERT_SCRIPT=""
+              for candidate in \
+                /home/TensorRT-LLM/examples/models/core/qwen/convert_checkpoint.py \
+                /TensorRT-LLM/examples/models/core/qwen/convert_checkpoint.py \
+                /opt/TensorRT-LLM/examples/models/core/qwen/convert_checkpoint.py; do
+                if [ -f "$candidate" ]; then
+                  CONVERT_SCRIPT="$candidate"
+                  break
+                fi
+              done
+              if [ -z "$CONVERT_SCRIPT" ]; then
+                echo "ERROR: convert_checkpoint.py not found" >&2
+                find /home /TensorRT-LLM /opt -path '*qwen*convert_checkpoint.py' 2>/dev/null | head -20 >&2 || true
+                exit 1
+              fi
+              echo "  convert script: $CONVERT_SCRIPT"
+              rm -rf "$TRT_CKPT_DIR"
+              python "$CONVERT_SCRIPT" \
+                --model_dir "$EXPORT_DIR" \
+                --output_dir "$TRT_CKPT_DIR" \
+                --dtype bfloat16 \
+                --tp_size 1 \
+                --pp_size 1
+
+              echo "Building paged-context-FMHA engine: $ENGINE_DIR"
+              rm -rf "$ENGINE_DIR"
+              trtllm-build \
+                --checkpoint_dir "$TRT_CKPT_DIR" \
+                --output_dir "$ENGINE_DIR" \
+                --gemm_plugin bfloat16 \
+                --gpt_attention_plugin bfloat16 \
+                --max_batch_size 32 \
+                --max_input_len 64 \
+                --max_seq_len 96 \
+                --max_num_tokens 3072 \
+                --max_beam_width 1 \
+                --kv_cache_type paged \
+                --remove_input_padding enable \
+                --context_fmha enable \
+                --use_paged_context_fmha enable \
+                --profiling_verbosity detailed
+
+              test -f "$ENGINE_DIR/rank0.engine"
+              python - <<'PY'
+              import json
+              import os
+              p = os.path.join(os.environ["ENGINE_DIR"], "config.json")
+              j = json.load(open(p))
+              pc = j["build_config"]["plugin_config"]
+              print("Built engine config:")
+              print("  context_fmha =", pc.get("context_fmha"))
+              print("  use_paged_context_fmha =", pc.get("use_paged_context_fmha"))
+              print("  paged_kv_cache =", pc.get("paged_kv_cache"))
+              print("  kv_cache_type =", j["build_config"].get("kv_cache_type"))
+              if not pc.get("context_fmha") or not pc.get("use_paged_context_fmha"):
+                  raise SystemExit("paged context FMHA is not enabled")
+              PY
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: "32Gi"
+              cpu: "8"
+            requests:
+              memory: "16Gi"
+              cpu: "4"
+          volumeMounts:
+            - name: repo
+              mountPath: /workspace/repo
+      volumes:
+        - name: repo
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm
+            type: Directory
