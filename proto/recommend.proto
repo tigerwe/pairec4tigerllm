@@ -1,0 +1,74 @@
+syntax = "proto2";
+
+package pairec.inference;
+
+option cc_generic_services = true;
+
+message SemanticId {
+  repeated int32 value = 1;
+}
+
+message RecommendRequest {
+  optional string user_id = 1;
+  repeated SemanticId history = 2;
+  optional int32 topk = 3 [default = 10];
+  optional double temperature = 4 [default = 1.0];
+  optional int32 beam_width = 5 [default = 1];
+  optional string request_id = 6;
+}
+
+message TraceInfo {
+  optional double total_ms = 1;
+  optional double prepare_input_ms = 2;
+  optional double infer_ms = 3;
+  optional double model_forward_ms = 4;
+  optional double generate_ms = 5;
+  optional double prompt_ms = 6;
+  optional double runner_generate_ms = 7;
+  optional int32 runner_calls = 8;
+  optional double runner_avg_ms = 9;
+  optional double runner_max_ms = 10;
+  optional double parse_combo_ms = 11;
+  optional double output_pad_ms = 12;
+  optional double backend_total_ms = 13;
+  optional double map_item_ms = 14;
+  optional double kv_lookup_ms = 15;
+  optional double kv_write_ms = 16;
+  optional string kv_source = 17;
+  optional string result_cache_source = 18;
+  optional double result_cache_lookup_ms = 19;
+  optional double result_cache_ds_lookup_ms = 20;
+  optional double result_cache_write_submit_ms = 21;
+  optional string backend = 22;
+}
+
+message Recommendation {
+  optional int32 item_id = 1;
+  repeated int32 semantic_id = 2;
+  optional double score = 3;
+}
+
+message RecommendResponse {
+  optional int32 code = 1;
+  optional string user_id = 2;
+  repeated Recommendation recommendations = 3;
+  optional double inference_time_ms = 4;
+  optional string error = 5;
+  optional TraceInfo trace = 6;
+  optional string raw_json = 100;
+}
+
+message HealthRequest {
+}
+
+message HealthResponse {
+  optional int32 code = 1;
+  optional string status = 2;
+  optional string backend = 3;
+  optional string raw_json = 100;
+}
+
+service RecommendService {
+  rpc Recommend(RecommendRequest) returns (RecommendResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}

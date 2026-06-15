@@ -1,0 +1,178 @@
+# ============================================
+# Inference Deployment + native brpc/TCP gateway sidecar
+# ============================================
+#
+# F14 phase-1 PoC:
+# - keeps the validated Python Flask + TRT-LLM inference container unchanged
+# - adds a C++ brpc-gateway sidecar listening on TCP :18100
+# - brpc-gateway forwards requests to localhost:18000 /recommend
+# - Service exposes both HTTP :18000 and brpc :18100
+#
+# This manifest intentionally stands beside deployment-inference-image.yaml
+# rather than replacing it. Use only when validating the brpc PoC.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference
+  namespace: pairec
+  labels:
+    app: inference
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: inference
+  template:
+    metadata:
+      labels:
+        app: inference
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        pairec/gpu: "true"
+      containers:
+        - name: inference
+          image: docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TRT_NUM_SAMPLES
+              value: "1"
+            - name: TRT_RESULT_CACHE_ENABLED
+              value: "0"
+            - name: TRT_MAX_KV_TOKENS
+              value: "1024"
+            - name: TRT_KV_CACHE_HOST_CACHE_SIZE
+              value: "104857600"
+            - name: TRT_SCHEDULER_POLICY
+              value: max_utilization
+            - name: TRT_MAX_INPUT_LEN
+              value: "64"
+            - name: PYTHON_DATASYSTEM_ENABLED
+              value: "0"
+            - name: DATASYSTEM_HOST
+              value: "141.61.91.188"
+            - name: DATASYSTEM_PORT
+              value: "18481"
+          ports:
+            - containerPort: 18000
+              name: http
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: "24Gi"
+              cpu: "4"
+            requests:
+              memory: "12Gi"
+              cpu: "2"
+          volumeMounts:
+            - name: models
+              mountPath: /app/models
+              readOnly: true
+            - name: checkpoints
+              mountPath: /app/checkpoints
+              readOnly: true
+            - name: trt-engines
+              mountPath: /app/trt_engines
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 18000
+            periodSeconds: 5
+            failureThreshold: 72
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 18000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 18000
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+        - name: brpc-gateway
+          image: docker.io/library/pairec-brpc-gateway:k8s-arm64-v1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --listen_port=18100
+            - --http_forward=127.0.0.1:18000
+            - --http_timeout_ms=5000
+            - --http_max_retry=0
+          ports:
+            - containerPort: 18100
+              name: brpc
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          startupProbe:
+            tcpSocket:
+              port: 18100
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            tcpSocket:
+              port: 18100
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 18100
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: models
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/models
+            type: Directory
+        - name: checkpoints
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/checkpoints
+            type: Directory
+        - name: trt-engines
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/trt_engines
+            type: Directory
+        - name: data
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/data
+            type: Directory
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference
+  namespace: pairec
+  labels:
+    app: inference
+spec:
+  selector:
+    app: inference
+  ports:
+    - name: http
+      port: 18000
+      targetPort: 18000
+      protocol: TCP
+    - name: brpc
+      port: 18100
+      targetPort: 18100
+      protocol: TCP
+  type: ClusterIP

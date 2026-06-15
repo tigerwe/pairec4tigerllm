@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-12 | 当前状态: 正式 inference runtime 镜像已复验通过，K8s PaiRec -> inference -> TRT HTTP 基线闭环稳定；`pairec-inference:k8s-arm64-ds-runtime-v1` 已恢复 TensorRT-LLM C++ DataSystem 初始化并完成 C++ KV offload/onboard 功能闭环，当前压测观测 `op=offload` 1313 次、`op=onboard` 3 次；E2E DataSystem 报告已补齐所有主要 `*_ms` 指标口径说明 | 下一步: 扩大 replay/onboard 样本到 >=10000，用于输出可信 p9999 分位数
+> 最后更新: 2026-06-15 | 当前状态: F14 brpc phase-1 PoC 设计与代码骨架已落地，采用 native brpc/`baidu_std` over TCP 的 C++ gateway sidecar，先转发到现有 Python Flask `/recommend`，不改稳定 HTTP/TRT 主链路；本机已完成 proto 生成、脚本语法、YAML parse 与 CMake 依赖探测，当前阻塞为本机无 brpc SDK，需在 ARM brpc builder/runtime 镜像中编译并做 K8s smoke | 下一步: 在远程构建 `pairec-brpc-gateway:k8s-arm64-v1`，apply `k8s/deployment-inference-brpc-image.yaml`，执行 `scripts/test_brpc_gateway_smoke.sh` 验证 `Health`/`Recommend`
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/15** | **F14 brpc phase-1 PoC 设计与实现骨架完成：新增 `proto/recommend.proto` 定义 `RecommendService.Recommend/Health`，字段对齐当前 `/recommend` JSON 并保留 `raw_json` 便于对比；新增 `cpp/brpc_gateway/recommend_gateway.cpp`，作为 native brpc `baidu_std`/TCP server 监听 `18100`，内部通过 brpc HTTP channel 转发到 `127.0.0.1:18000/recommend`；新增 `cpp/brpc_gateway/recommend_client.cpp` 作为 C++ smoke client；新增 `docker/Dockerfile.brpc.gateway`、`k8s/deployment-inference-brpc-image.yaml` 和构建/部署/验证脚本。当前本机验证：`protoc --proto_path=proto --cpp_out=/tmp/pairec-brpc-proto-check proto/recommend.proto` 通过；`bash -n scripts/build_brpc_gateway_image.sh scripts/k8s_apply_inference_brpc_gateway.sh scripts/test_brpc_gateway_smoke.sh` 通过；`python -c "import yaml; list(yaml.safe_load_all(open('k8s/deployment-inference-brpc-image.yaml'))); print('yaml ok')"` 输出 `yaml ok`；`cmake -S cpp/brpc_gateway -B /tmp/pairec-brpc-cmake-check` 找到 Protobuf 3.12.4 后按预期失败于 `brpc SDK was not found`，说明本机缺 brpc headers/libs，需远程或专用 builder 镜像完成编译。F14 仍为 pending，下一步是远程构建 gateway 镜像并在 inference Pod 内做 `Health`/`Recommend` smoke，再输出 HTTP vs brpc 延迟对比** |
 | **6/12** | **补充 E2E DataSystem 时延报告指标口径说明：在 `docs/E2E_DATASYSTEM_FINAL_REPORT_2026-06-04.md` 新增“指标口径详细说明”，逐项解释 `client_e2e_ms`、PaiRec `total/user_feature/recall/filter/rank/merge/sort`、GenerativeRecall `cache/history/convert/http/items/http_overhead`、inference `tr_*`/TRT service stages，以及 C++ DataSystem per KV block `offload.create/d2h/set/total`、`onboard.get/h2d/total`。报告明确区分 request 级、服务内阶段级和 KV block 级指标，并标注 `tr_*` 与 inference trace 字段的别名关系，避免将 Python 结果缓存/DataSystem 指标与 TensorRT-LLM C++ KV block Set/Get 混淆** |
 | **6/12** | **K8s C++ KV DataSystem offload/onboard 功能闭环验证通过：基于正式 `pairec-inference:k8s-arm64-ds-runtime-v1` 镜像运行 pressure/replay 压测，日志判定显示 KV pool `primaryBlocks=32 secondaryBlocks=28`、scheduler `MAX_UTILIZATION`、`reuse disabled warning seen=False`，新增结构化 DataSystem trace `offload/onboard=1313/3`，`Get Key=3`，说明 C++ 层已真实触发 GPU KV block offload 到 DataSystem 并从 DataSystem onboard 回 HBM。当前样本量仍不足以给 p9999 结论：offload count=1313、onboard count=3，低于脚本建议 minimum=10000/recommended>=100000；下一步只需扩大 replay/onboard 压测样本用于分位数报告，不再需要改 runtime 镜像或 engine** |
 | **6/12** | **正式 K8s inference DS runtime 镜像启动验证通过：基于 `scripts/build_datasystem_runtime_base_image.sh` 固化的 patched TensorRT-LLM runtime 重建 `docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1` 后，inference Pod 启动日志显示 `[TRTQwen3Backend] Scheduler policy: max_utilization, max_kv_tokens=1024, host_cache_size=104857600`、KV pool `primaryBlocks=32 secondaryBlocks=28`、`[TensorRT-LLM][Datasystem] Create Datasystem class`、`Init KvCache Manager DataSystem. host = 141.61.91.188, ip = 18481` 与 `Init KvCache Manager DataSystem success`。Python DataSystem 按预期保持 `PYTHON_DATASYSTEM_ENABLED=0`，当前只验证 C++ KV path。下一步运行 `scripts/test_trt_cpp_kv_offload.py` 的 pressure/replay 压测，确认结构化 `[Datasystem][TRACE] op=offload/onboard` 出现并汇总 C++ Set/Get latency** |
@@ -61,6 +62,7 @@
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
 - **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set/Get 阶段性统计已完成；✅ 关闭结果缓存后的 E2E pressure/replay 最终报告已生成；✅ 远端 DS Get 到本地中等样本已完成；🔄 remote H2D 与 pinned DRAM A/B 待补充
 - **K8s 部署**: ✅ ARM worker1 HTTP/TRT 基线闭环已通过：正式 inference runtime 镜像 `/health` + `/recommend` 和 PaiRec `/ping` + `/api/recommend` 均已验证；🔄 仍需将模型/数据 hostPath 替换为 PVC，并单独修 DataSystem Python/C++ KV 路径
+- **brpc 改造**: 🔄 F14 phase-1 native brpc/TCP gateway sidecar PoC 已完成本地代码与静态校验；待远程 brpc SDK 环境编译、部署和 smoke 验证
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 

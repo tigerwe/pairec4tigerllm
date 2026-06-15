@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+
+ARG BASE_IMAGE=docker.io/library/zcx-pairec-image:v1.1
+
+FROM ${BASE_IMAGE} AS build
+
+WORKDIR /src
+
+COPY proto /src/proto
+COPY cpp/brpc_gateway /src/cpp/brpc_gateway
+
+RUN cmake -S /src/cpp/brpc_gateway -B /tmp/brpc-gateway-build \
+      -DCMAKE_BUILD_TYPE=Release \
+ && cmake --build /tmp/brpc-gateway-build -j"$(nproc)" \
+ && cmake --install /tmp/brpc-gateway-build --prefix /opt/pairec-brpc
+
+FROM ${BASE_IMAGE}
+
+COPY --from=build /opt/pairec-brpc /opt/pairec-brpc
+
+ENV PATH="/opt/pairec-brpc/bin:${PATH}"
+
+EXPOSE 18100
+
+ENTRYPOINT ["/opt/pairec-brpc/bin/brpc_gateway"]
+CMD ["--listen_port=18100", "--http_forward=127.0.0.1:18000"]
