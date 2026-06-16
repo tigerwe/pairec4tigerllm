@@ -32,6 +32,56 @@ if(NOT BRPC_INCLUDE_DIR OR NOT BRPC_LIBRARY)
     "or build inside an image that already contains Apache bRPC.")
 endif()
 
+# Some ARM/openEuler images ship protobuf builds that depend on Abseil shared
+# libraries without exporting every transitive dependency through
+# protobuf::libprotobuf. Link the common Abseil runtime libraries explicitly
+# when they are present. The first entry fixes the observed
+# libabsl_log_internal_message DSO-missing linker failure.
+set(ABSL_OPTIONAL_LIB_NAMES
+  absl_log_internal_message
+  absl_log_internal_check_op
+  absl_log_internal_conditions
+  absl_log_internal_format
+  absl_log_internal_globals
+  absl_log_internal_log_sink_set
+  absl_log_internal_nullguard
+  absl_log_internal_proto
+  absl_log_sink
+  absl_log_entry
+  absl_log_severity
+  absl_raw_logging_internal
+  absl_base
+  absl_spinlock_wait
+  absl_strings
+  absl_throw_delegate
+  absl_status
+  absl_statusor
+  absl_symbolize
+  absl_stacktrace
+  absl_examine_stack
+  absl_malloc_internal
+  absl_time
+  absl_time_zone
+  absl_civil_time
+  absl_int128
+  absl_str_format_internal
+)
+
+set(ABSL_EXTRA_LIBS)
+foreach(ABSL_LIB_NAME IN LISTS ABSL_OPTIONAL_LIB_NAMES)
+  string(MAKE_C_IDENTIFIER "${ABSL_LIB_NAME}" ABSL_LIB_VAR)
+  string(TOUPPER "${ABSL_LIB_VAR}" ABSL_LIB_VAR)
+  find_library("${ABSL_LIB_VAR}_LIBRARY" NAMES "${ABSL_LIB_NAME}")
+  set(ABSL_LIB_PATH "${${ABSL_LIB_VAR}_LIBRARY}")
+  if(ABSL_LIB_PATH)
+    list(APPEND ABSL_EXTRA_LIBS "${ABSL_LIB_PATH}")
+  endif()
+endforeach()
+
+if(ABSL_EXTRA_LIBS)
+  message(STATUS "Linking optional Abseil libraries: ${ABSL_EXTRA_LIBS}")
+endif()
+
 set(PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/../../proto/recommend.proto)
 protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILE})
 
@@ -58,6 +108,7 @@ target_link_libraries(
   PRIVATE
     pairec_recommend_proto
     ${BRPC_LIBRARY}
+    ${ABSL_EXTRA_LIBS}
     ${BRPC_EXTRA_LIBS}
     Threads::Threads
 )
@@ -69,6 +120,7 @@ target_link_libraries(
   PRIVATE
     pairec_recommend_proto
     ${BRPC_LIBRARY}
+    ${ABSL_EXTRA_LIBS}
     ${BRPC_EXTRA_LIBS}
     Threads::Threads
 )
