@@ -17,6 +17,7 @@ FROM ${BASE_IMAGE}
 COPY --from=build /opt/pairec-brpc /opt/pairec-brpc
 
 ENV PATH="/opt/pairec-brpc/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:/usr/lib64:/usr/lib:${LD_LIBRARY_PATH}"
 
 EXPOSE 18100
 
