@@ -75,6 +75,10 @@ BASE_IMAGE=docker.io/library/zcx-pairec-brpc-sdk:v1 \
   bash scripts/build_brpc_gateway_image.sh
 ```
 
+The gateway build script runs `ldd` inside the final image for both
+`brpc_gateway` and `brpc_recommend_client`. The build fails immediately if any
+runtime `.so` is missing, before the image is exported to worker1.
+
 If GitHub is not reachable from the master node, set `BRPC_REPO` to an internal
 mirror before running `scripts/build_brpc_sdk_image.sh`.
 

@@ -10,6 +10,19 @@ docker build \
   -f docker/Dockerfile.brpc.gateway \
   -t "$IMAGE" .
 
+echo "Checking runtime dynamic library dependencies ..."
+docker run --rm --entrypoint /bin/bash "$IMAGE" -lc '
+  set -euo pipefail
+  for bin in /opt/pairec-brpc/bin/brpc_gateway /opt/pairec-brpc/bin/brpc_recommend_client; do
+    echo "== ldd $bin =="
+    ldd "$bin" | tee "/tmp/$(basename "$bin").ldd"
+    if grep -q "not found" "/tmp/$(basename "$bin").ldd"; then
+      echo "ERROR: missing runtime libraries for $bin" >&2
+      exit 1
+    fi
+  done
+'
+
 echo "Built $IMAGE"
 echo "Base image: $BASE_IMAGE"
 echo "Export with:"
