@@ -60,18 +60,33 @@ into C++ before we have evidence that the RPC transport work is valuable.
 ## Build
 
 The local workstation currently does not have brpc headers or libraries. Build
-inside an ARM runtime/builder image that has Apache brpc, protobuf, and cmake:
+on the ARM master node using a dedicated SDK image:
 
 ```bash
 BASE_IMAGE=docker.io/library/zcx-pairec-image:v1.1 \
-  bash scripts/build_brpc_gateway_image.sh
-
-docker save docker.io/library/pairec-brpc-gateway:k8s-arm64-v1 \
-  -o /tmp/pairec-brpc-gateway-k8s-arm64-v1.tar
+  bash scripts/build_brpc_sdk_image.sh \
+    docker.io/library/zcx-pairec-brpc-sdk:v1
 ```
 
-If the base image does not contain brpc, either install brpc into a dedicated
-builder image or pass `BRPC_INCLUDE_DIR` / `BRPC_LIBRARY` during CMake configure.
+Then build the gateway image from that SDK image:
+
+```bash
+BASE_IMAGE=docker.io/library/zcx-pairec-brpc-sdk:v1 \
+  bash scripts/build_brpc_gateway_image.sh
+```
+
+If GitHub is not reachable from the master node, set `BRPC_REPO` to an internal
+mirror before running `scripts/build_brpc_sdk_image.sh`.
+
+## Ship to worker1
+
+The current K8s flow builds images on master, then copies the tar to worker1 and
+imports it into containerd:
+
+```bash
+WORKER=root@141.61.91.188 \
+  bash scripts/ship_brpc_gateway_to_worker.sh
+```
 
 ## Deploy
 

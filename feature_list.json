@@ -137,9 +137,9 @@
       "name": "引入 brpc",
       "status": "pending",
       "description": "评估并引入 brpc 作为 PaiRec 与推理服务之间的高性能 RPC 通道, 替代或并行 HTTP /recommend",
-      "files": ["proto/recommend.proto", "cpp/brpc_gateway/", "docker/Dockerfile.brpc.gateway", "k8s/deployment-inference-brpc-image.yaml", "scripts/build_brpc_gateway_image.sh", "scripts/k8s_apply_inference_brpc_gateway.sh", "scripts/test_brpc_gateway_smoke.sh", "docs/F14_BRPC_GATEWAY_DESIGN.md"],
+      "files": ["proto/recommend.proto", "cpp/brpc_gateway/", "docker/Dockerfile.brpc.gateway", "k8s/deployment-inference-brpc-image.yaml", "scripts/build_brpc_sdk_image.sh", "scripts/build_brpc_gateway_image.sh", "scripts/ship_brpc_gateway_to_worker.sh", "scripts/k8s_apply_inference_brpc_gateway.sh", "scripts/test_brpc_gateway_smoke.sh", "docs/F14_BRPC_GATEWAY_DESIGN.md"],
       "validation_method": "brpc 调用返回与 HTTP /recommend 等价结果, 并输出延迟对比",
-      "validation_evidence": "2026-06-15: phase-1 选择 native brpc/baidu_std over TCP gateway sidecar，不改现有 HTTP/TRT 主链路；新增 RecommendService proto、C++ brpc gateway、C++ smoke client、Dockerfile、K8s sidecar manifest 和构建/验证脚本。本机静态校验通过：protoc 生成 C++ 代码成功；三个新增脚本 bash -n 通过；k8s/deployment-inference-brpc-image.yaml YAML parse 输出 yaml ok；CMake 依赖探测找到 Protobuf 3.12.4 后按预期失败于 brpc SDK was not found，说明本机缺 brpc headers/libs，需远程或专用 builder 镜像编译。",
+      "validation_evidence": "2026-06-15: phase-1 选择 native brpc/baidu_std over TCP gateway sidecar，不改现有 HTTP/TRT 主链路；新增 RecommendService proto、C++ brpc gateway、C++ smoke client、Dockerfile、K8s sidecar manifest 和构建/验证脚本。本机静态校验通过：protoc 生成 C++ 代码成功；三个新增脚本 bash -n 通过；k8s/deployment-inference-brpc-image.yaml YAML parse 输出 yaml ok；CMake 依赖探测找到 Protobuf 3.12.4 后按预期失败于 brpc SDK was not found，说明本机缺 brpc headers/libs，需远程或专用 builder 镜像编译。2026-06-16: 新增 scripts/build_brpc_sdk_image.sh 固化 brpc SDK base image 构建，并新增 scripts/ship_brpc_gateway_to_worker.sh 固化 master 构建、tar 导出、scp 到 worker1、containerd/docker 导入流程；新增脚本 bash -n、feature_list.json JSON parse 与 git diff --check 通过。",
       "next_step": "在远程 ARM brpc builder/runtime 镜像中构建 docker.io/library/pairec-brpc-gateway:k8s-arm64-v1；apply k8s/deployment-inference-brpc-image.yaml；执行 scripts/test_brpc_gateway_smoke.sh 验证 Health/Recommend；再与 HTTP /recommend 做同批请求延迟和结果等价对比"
     }
   ]
