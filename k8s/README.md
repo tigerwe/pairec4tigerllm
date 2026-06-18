@@ -284,58 +284,6 @@ GET /ping -> success
 POST /api/recommend -> code=200, size=10, 10 个 generative_recall item
 ```
 
-### F14 PaiRec brpc 接入方案
-
-2026-06-18 起，推荐链路可以通过 PaiRec 侧 `brpc_http_proxy` sidecar 接入
-inference 侧 brpc gateway：
-
-```text
-PaiRec :18080
-  -> HTTP localhost:18090 /recommend
-  -> brpc_http_proxy sidecar
-  -> brpc/TCP inference:18100
-  -> brpc_gateway sidecar
-  -> HTTP localhost:18000 /recommend
-  -> TRT-LLM
-```
-
-这一路径要求重新构建并导入包含 `brpc_http_proxy` 的 brpc 镜像：
-
-```bash
-BASE_IMAGE=docker.io/library/zcx-pairec-brpc-sdk:v1 \
-  bash scripts/build_brpc_gateway_image.sh
-WORKER=root@141.61.91.188 \
-  bash scripts/ship_brpc_gateway_to_worker.sh
-```
-
-当前默认 tag 是：
-
-```text
-docker.io/library/pairec-brpc-gateway:k8s-arm64-v2
-```
-
-先应用 inference brpc gateway，再应用 PaiRec brpc proxy：
-
-```bash
-bash scripts/k8s_apply_inference_brpc_gateway.sh
-bash scripts/k8s_apply_pairec_brpc_hostpath.sh
-```
-
-验证：
-
-```bash
-bash scripts/test_brpc_gateway_smoke.sh
-bash scripts/test_pairec_brpc_e2e.sh
-```
-
-`scripts/k8s_apply_pairec_brpc_hostpath.sh` 会应用
-`k8s/configmap-pairec-brpc.yaml`，其中 PaiRec `RecallAlgo.server_url` 指向
-`http://127.0.0.1:18090`。如需回退 HTTP 基线，重新执行：
-
-```bash
-bash scripts/k8s_apply_pairec_hostpath.sh
-```
-
 先确认推理服务：
 
 ```bash

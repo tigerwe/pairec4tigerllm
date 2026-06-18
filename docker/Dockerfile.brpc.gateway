@@ -19,7 +19,7 @@ COPY --from=build /opt/pairec-brpc /opt/pairec-brpc
 ENV PATH="/opt/pairec-brpc/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:/usr/lib64:/usr/lib:${LD_LIBRARY_PATH}"
 
-EXPOSE 18100 18090
+EXPOSE 18100
 
 ENTRYPOINT ["/opt/pairec-brpc/bin/brpc_gateway"]
 CMD ["--listen_port=18100", "--http_forward=127.0.0.1:18000"]

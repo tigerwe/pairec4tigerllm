@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${1:-docker.io/library/pairec-brpc-gateway:k8s-arm64-v2}"
-TAR_PATH="${2:-/tmp/pairec-brpc-gateway-k8s-arm64-v2.tar}"
+IMAGE="${1:-docker.io/library/pairec-brpc-gateway:k8s-arm64-v1}"
+TAR_PATH="${2:-/tmp/pairec-brpc-gateway-k8s-arm64-v1.tar}"
 WORKER="${WORKER:-${3:-root@141.61.91.188}}"
 REMOTE_TAR="${REMOTE_TAR:-$TAR_PATH}"
 IMPORT_CMD="${IMPORT_CMD:-ctr}"
@@ -35,6 +35,4 @@ echo ""
 echo "Gateway image is available on $WORKER"
 echo "Next:"
 echo "  bash scripts/k8s_apply_inference_brpc_gateway.sh"
-echo "  bash scripts/k8s_apply_pairec_brpc_hostpath.sh"
 echo "  bash scripts/test_brpc_gateway_smoke.sh"
-echo "  bash scripts/test_pairec_brpc_e2e.sh"
