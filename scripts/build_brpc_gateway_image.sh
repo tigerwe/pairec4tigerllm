@@ -4,9 +4,19 @@ set -euo pipefail
 IMAGE="${1:-docker.io/library/pairec-brpc-gateway:k8s-arm64-v1}"
 TAR_PATH="${2:-/home/zcx/pairec-brpc-gateway-k8s-arm64-v1.tar}"
 BASE_IMAGE="${BASE_IMAGE:-${3:-zcx-pairec-brpc-sdk:v1}}"
+ENABLE_TRTLLM_CPP="${ENABLE_TRTLLM_CPP:-OFF}"
+TRTLLM_INCLUDE_DIR="${TRTLLM_INCLUDE_DIR:-}"
+TRTLLM_LIBRARY="${TRTLLM_LIBRARY:-}"
+TRTLLM_EXTRA_LIBS="${TRTLLM_EXTRA_LIBS:-}"
+TRTLLM_CUDA_INCLUDE_DIR="${TRTLLM_CUDA_INCLUDE_DIR:-}"
 
 docker build \
   --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+  --build-arg "ENABLE_TRTLLM_CPP=$ENABLE_TRTLLM_CPP" \
+  --build-arg "TRTLLM_INCLUDE_DIR=$TRTLLM_INCLUDE_DIR" \
+  --build-arg "TRTLLM_LIBRARY=$TRTLLM_LIBRARY" \
+  --build-arg "TRTLLM_EXTRA_LIBS=$TRTLLM_EXTRA_LIBS" \
+  --build-arg "TRTLLM_CUDA_INCLUDE_DIR=$TRTLLM_CUDA_INCLUDE_DIR" \
   -f docker/Dockerfile.brpc.gateway \
   -t "$IMAGE" .
 

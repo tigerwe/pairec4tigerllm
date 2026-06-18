@@ -297,7 +297,8 @@ brpc client
 ```
 
 当前 `backend=semantic_map` 只用于验证 native brpc 服务、镜像、K8s 和协议链路；
-它不是模型推理。真正目标是后续在同一服务内接入 `backend=trtllm_cpp`。
+它不是模型推理。真实 C++ TRT-LLM 后端使用独立的 `backend=trtllm_cpp`
+部署验证。
 
 构建并导入 worker1：
 
@@ -322,6 +323,53 @@ bash scripts/test_brpc_native_inference_smoke.sh
 health ok latency_ms=... code=200 status=healthy
 recommend ok index=1 latency_ms=... code=200 items=...
 ```
+
+构建真实 C++ TRT-LLM brpc inference 镜像时，先基于已经验证的 TRT-LLM
+DataSystem runtime 构建一个同时带 brpc SDK 的 base image：
+
+```bash
+BASE_IMAGE=docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1 \
+  bash scripts/build_brpc_sdk_image.sh \
+    docker.io/library/zcx-pairec-trtllm-brpc-sdk:v1
+```
+
+生成 C++ 后端使用的 tokenizer 配置：
+
+```bash
+python scripts/export_cpp_trt_tokenizer_config.py \
+  --tokenizer-dir ./exported/qwen3_rec \
+  --output ./exported/qwen3_rec/pairec_cpp_tokenizer.txt
+```
+
+然后构建并导出 TRT-LLM C++ brpc inference 镜像：
+
+```bash
+BASE_IMAGE=zcx-pairec-trtllm-brpc-sdk:v1 \
+  bash scripts/build_brpc_trtllm_inference_image.sh
+
+docker save docker.io/library/pairec-brpc-inference:k8s-arm64-trtllm-v1 \
+  -o /home/zcx/pairec-brpc-inference-k8s-arm64-trtllm-v1.tar
+```
+
+导入 worker1 后部署真实模型后端：
+
+```bash
+scp /home/zcx/pairec-brpc-inference-k8s-arm64-trtllm-v1.tar \
+  root@141.61.91.188:/home/zcx/
+
+ssh root@141.61.91.188 \
+  'sudo ctr -n k8s.io images import /home/zcx/pairec-brpc-inference-k8s-arm64-trtllm-v1.tar'
+
+bash scripts/k8s_apply_inference_brpc_trtllm.sh
+
+TARGET=deployment/inference-brpc-trtllm \
+CONTAINER=brpc-inference \
+  bash scripts/test_brpc_native_inference_smoke.sh
+```
+
+真实后端预期 `Health.backend=trtllm_cpp`，`Recommend` 返回非空
+recommendations，并在 trace 中包含 `runner_generate_ms`、`runner_calls`、
+`parse_combo_ms` 和 `map_item_ms`。
 
 先确认推理服务：
 

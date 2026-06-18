@@ -51,10 +51,26 @@ Flask HTTP. It has backend modes:
 | Backend | Purpose |
 |---------|---------|
 | `semantic_map` | Protocol/K8s smoke backend. Loads `semantic_id_map.json` and returns deterministic mapped items. It proves the native brpc service path without HTTP forwarding. |
-| `trtllm_cpp` | Production target. Currently fail-fast until the TensorRT-LLM C++ runner adapter is linked in the ARM TRT-LLM runtime image. |
+| `trtllm_cpp` | Production target. Links TensorRT-LLM C++ `Executor`, builds the same recommendation prompt token sequence, runs generation, parses semantic special tokens, maps them back to items, and returns over brpc/TCP. |
 
-This makes the next hard boundary explicit: moving the Python `TRTQwen3Backend`
-logic into a C++ TensorRT-LLM runner adapter.
+The C++ backend is guarded by `PAIREC_ENABLE_TRTLLM_CPP`. Normal brpc SDK
+images can still build the smoke server with the default `OFF` value. The real
+TRT-LLM image must set `ENABLE_TRTLLM_CPP=ON` and provide TensorRT-LLM C++
+headers, `libtensorrt_llm.so`, and CUDA headers.
+
+The first C++ tokenizer path intentionally does not reimplement HuggingFace BPE
+logic. Instead, `scripts/export_cpp_trt_tokenizer_config.py` exports the fixed
+prompt fragment token ids and all semantic special-token ids from the same
+exported tokenizer used by the TRT engine:
+
+```bash
+python scripts/export_cpp_trt_tokenizer_config.py \
+  --tokenizer-dir ./exported/qwen3_rec \
+  --output ./exported/qwen3_rec/pairec_cpp_tokenizer.txt
+```
+
+The service then consumes the generated file through
+`--trt_tokenizer_config_path=/app/exported/qwen3_rec/pairec_cpp_tokenizer.txt`.
 
 ## Files
 
@@ -68,11 +84,14 @@ logic into a C++ TensorRT-LLM runner adapter.
 | `docker/Dockerfile.brpc.gateway` | brpc binary image build, expects brpc SDK in the base image |
 | `k8s/deployment-inference-brpc-image.yaml` | optional inference deployment with brpc sidecar |
 | `k8s/deployment-inference-brpc-native.yaml` | native C++ brpc inference deployment |
+| `k8s/deployment-inference-brpc-trtllm.yaml` | native brpc deployment using `backend=trtllm_cpp` and GPU |
 | `scripts/build_brpc_gateway_image.sh` | build helper |
 | `scripts/build_brpc_inference_image.sh` | native brpc inference image build helper |
+| `scripts/build_brpc_trtllm_inference_image.sh` | native brpc TRT-LLM C++ image build helper |
 | `scripts/ship_brpc_inference_to_worker.sh` | master-to-worker image export/import helper |
 | `scripts/k8s_apply_inference_brpc_gateway.sh` | apply helper |
 | `scripts/k8s_apply_inference_brpc_native.sh` | native C++ service apply helper |
+| `scripts/k8s_apply_inference_brpc_trtllm.sh` | native C++ TRT-LLM service apply helper |
 | `scripts/test_brpc_gateway_smoke.sh` | in-cluster smoke test helper |
 | `scripts/test_brpc_native_inference_smoke.sh` | native C++ service smoke test helper |
 
@@ -106,6 +125,37 @@ already-imported gateway image:
 BASE_IMAGE=zcx-pairec-brpc-sdk:v1 \
   bash scripts/build_brpc_inference_image.sh
 ```
+
+For the real C++ TensorRT-LLM backend, first build a combined SDK image on top
+of the already validated TRT-LLM/DataSystem runtime image:
+
+```bash
+BASE_IMAGE=docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1 \
+  bash scripts/build_brpc_sdk_image.sh \
+    docker.io/library/zcx-pairec-trtllm-brpc-sdk:v1
+```
+
+Then build the TRT-LLM enabled brpc inference image:
+
+```bash
+BASE_IMAGE=zcx-pairec-trtllm-brpc-sdk:v1 \
+  bash scripts/build_brpc_trtllm_inference_image.sh
+```
+
+If TensorRT-LLM is mounted or built under a non-default path, pass explicit
+locations:
+
+```bash
+BASE_IMAGE=zcx-pairec-trtllm-brpc-sdk:v1 \
+TRTLLM_INCLUDE_DIR=/TensorRT-LLM/cpp/include \
+TRTLLM_LIBRARY=/TensorRT-LLM/cpp/build/tensorrt_llm/libtensorrt_llm.so \
+TRTLLM_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+  bash scripts/build_brpc_trtllm_inference_image.sh
+```
+
+The image build still runs `ldd` on the final `brpc_inference_server`. Missing
+TensorRT-LLM, brpc, protobuf, Abseil, CUDA, or TensorRT `.so` dependencies
+should fail during image build rather than later in K8s.
 
 If GitHub is not reachable from the master node, set `BRPC_REPO` to an internal
 mirror before running `scripts/build_brpc_sdk_image.sh`.
@@ -148,6 +198,27 @@ bash scripts/k8s_apply_inference_brpc_native.sh
 
 This deploys `inference-brpc-native:18100` with `backend=semantic_map`.
 
+## Deploy Native C++ TRT-LLM Service
+
+Generate the tokenizer config on the master/worker workspace before starting
+the deployment:
+
+```bash
+python scripts/export_cpp_trt_tokenizer_config.py \
+  --tokenizer-dir ./exported/qwen3_rec \
+  --output ./exported/qwen3_rec/pairec_cpp_tokenizer.txt
+```
+
+Then apply the TRT-LLM brpc service:
+
+```bash
+bash scripts/k8s_apply_inference_brpc_trtllm.sh
+```
+
+This deploys `inference-brpc-trtllm:18100` with `backend=trtllm_cpp`, requests
+one GPU, mounts `/app/trt_engines`, `/app/exported`, and `/app/data`, and keeps
+the DataSystem/KV runtime env aligned with the current HTTP/TRT baseline.
+
 ## Smoke Test Gateway
 
 ```bash
@@ -177,6 +248,18 @@ recommend ok index=1 latency_ms=... code=200 items=...
 The response backend should be `cpp-semantic-map-fallback` in this first native
 smoke stage. That is not model inference; it is a no-HTTP brpc service proof.
 
+For the TRT-LLM C++ service, reuse the same client against the new deployment:
+
+```bash
+TARGET=deployment/inference-brpc-trtllm \
+CONTAINER=brpc-inference \
+  bash scripts/test_brpc_native_inference_smoke.sh
+```
+
+The response backend should be `trtllm_cpp`, and the trace should include
+`prompt_ms`, `runner_generate_ms`, `runner_calls`, `parse_combo_ms`, and
+`map_item_ms`.
+
 ## Validation Criteria
 
 Gateway baseline is successful when:
@@ -193,15 +276,14 @@ Native C++ service smoke is successful when:
 - `Recommend` over brpc returns `code=200` and non-empty recommendations.
 - No HTTP server or HTTP gateway is involved in the native smoke path.
 
-## Next Step
+## Remaining Work
 
-Implement the `trtllm_cpp` backend inside the ARM TRT-LLM runtime image:
+The first `trtllm_cpp` implementation is now present, but still needs remote ARM
+runtime validation:
 
-- Create prompt text exactly matching `TRTQwen3Backend.generate()`.
-- Use the exported Qwen3 tokenizer or a C++ tokenizer runtime.
-- Call TensorRT-LLM C++ Executor/ModelRunner with the same max input/new token
-  limits and sampling config.
-- Port output token parsing to semantic-id combinations.
-- Reuse the C++ semantic map loader for item mapping.
-- Preserve trace fields: `prompt_ms`, `runner_generate_ms`,
-  `runner_calls`, `parse_combo_ms`, `map_item_ms`, `total_ms`.
+- Build the combined TRT-LLM/brpc SDK image on master.
+- Generate `pairec_cpp_tokenizer.txt` from the exported tokenizer.
+- Build/import `pairec-brpc-inference:k8s-arm64-trtllm-v1` to worker1.
+- Deploy `inference-brpc-trtllm` and run smoke.
+- Compare returned items and trace fields against the current Python
+  `TRTQwen3Backend` for the same request before wiring PaiRec Go to brpc.

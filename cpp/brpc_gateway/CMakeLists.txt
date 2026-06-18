@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+option(PAIREC_ENABLE_TRTLLM_CPP "Build brpc_inference_server with TensorRT-LLM C++ Executor backend" OFF)
+
 find_package(Protobuf REQUIRED)
 find_package(Threads REQUIRED)
 find_package(PkgConfig QUIET)
@@ -82,6 +84,96 @@ if(ABSL_EXTRA_LIBS)
   message(STATUS "Linking optional Abseil libraries: ${ABSL_EXTRA_LIBS}")
 endif()
 
+if(PAIREC_ENABLE_TRTLLM_CPP)
+  set(
+    TRTLLM_INCLUDE_DIR
+    ""
+    CACHE PATH
+    "TensorRT-LLM C++ include directory, usually /TensorRT-LLM/cpp/include or /home/TensorRT-LLM/cpp/include"
+  )
+  set(
+    TRTLLM_LIBRARY
+    ""
+    CACHE FILEPATH
+    "Path to libtensorrt_llm.so"
+  )
+  set(
+    TRTLLM_EXTRA_LIBS
+    ""
+    CACHE STRING
+    "Extra TensorRT-LLM runtime libraries, separated by semicolons"
+  )
+  set(
+    TRTLLM_CUDA_INCLUDE_DIR
+    ""
+    CACHE PATH
+    "CUDA include directory that contains cuda_fp16.h"
+  )
+
+  set(PAIREC_TRTLLM_INCLUDE_DIR "${TRTLLM_INCLUDE_DIR}")
+  set(PAIREC_TRTLLM_LIBRARY "${TRTLLM_LIBRARY}")
+  set(PAIREC_TRTLLM_CUDA_INCLUDE_DIR "${TRTLLM_CUDA_INCLUDE_DIR}")
+
+  if(NOT PAIREC_TRTLLM_INCLUDE_DIR)
+    find_path(
+      PAIREC_TRTLLM_INCLUDE_DIR
+      NAMES tensorrt_llm/executor/executor.h
+      HINTS
+        ENV TRTLLM_INCLUDE_DIR
+        /TensorRT-LLM/cpp/include
+        /home/TensorRT-LLM/cpp/include
+        /home/zcx/TensorRT-LLM/cpp/include
+        /usr/local/include
+    )
+  endif()
+
+  if(NOT PAIREC_TRTLLM_LIBRARY)
+    find_library(
+      PAIREC_TRTLLM_LIBRARY
+      NAMES tensorrt_llm
+      HINTS
+        ENV TRTLLM_LIBRARY_DIR
+        /TensorRT-LLM/cpp/build/tensorrt_llm
+        /home/TensorRT-LLM/cpp/build/tensorrt_llm
+        /home/zcx/TensorRT-LLM/cpp/build/tensorrt_llm
+        /usr/local/lib
+        /usr/local/lib64
+        /usr/lib64
+    )
+  endif()
+
+  if(NOT PAIREC_TRTLLM_CUDA_INCLUDE_DIR)
+    find_path(
+      PAIREC_TRTLLM_CUDA_INCLUDE_DIR
+      NAMES cuda_fp16.h
+      HINTS
+        ENV CUDA_HOME
+        /usr/local/cuda
+        /usr/local/cuda-12
+        /usr/local/cuda-12.8
+      PATH_SUFFIXES include
+    )
+  endif()
+
+  if(NOT PAIREC_TRTLLM_INCLUDE_DIR OR NOT EXISTS "${PAIREC_TRTLLM_INCLUDE_DIR}/tensorrt_llm/executor/executor.h")
+    message(FATAL_ERROR
+      "TensorRT-LLM C++ headers were not found. Set TRTLLM_INCLUDE_DIR.")
+  endif()
+  if(NOT PAIREC_TRTLLM_LIBRARY OR NOT EXISTS "${PAIREC_TRTLLM_LIBRARY}")
+    message(FATAL_ERROR
+      "libtensorrt_llm.so was not found. Set TRTLLM_LIBRARY.")
+  endif()
+  if(NOT PAIREC_TRTLLM_CUDA_INCLUDE_DIR OR NOT EXISTS "${PAIREC_TRTLLM_CUDA_INCLUDE_DIR}/cuda_fp16.h")
+    message(FATAL_ERROR
+      "CUDA headers were not found. Set TRTLLM_CUDA_INCLUDE_DIR.")
+  endif()
+
+  message(STATUS "TensorRT-LLM C++ backend enabled")
+  message(STATUS "  TRTLLM_INCLUDE_DIR=${PAIREC_TRTLLM_INCLUDE_DIR}")
+  message(STATUS "  TRTLLM_LIBRARY=${PAIREC_TRTLLM_LIBRARY}")
+  message(STATUS "  TRTLLM_CUDA_INCLUDE_DIR=${PAIREC_TRTLLM_CUDA_INCLUDE_DIR}")
+endif()
+
 set(PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/../../proto/recommend.proto)
 protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILE})
 
@@ -136,5 +228,27 @@ target_link_libraries(
     ${BRPC_EXTRA_LIBS}
     Threads::Threads
 )
+
+if(PAIREC_ENABLE_TRTLLM_CPP)
+  get_filename_component(PAIREC_TRTLLM_LIBRARY_DIR "${PAIREC_TRTLLM_LIBRARY}" DIRECTORY)
+  target_compile_definitions(brpc_inference_server PRIVATE PAIREC_ENABLE_TRTLLM_CPP=1)
+  target_include_directories(
+    brpc_inference_server
+    PRIVATE
+      ${PAIREC_TRTLLM_INCLUDE_DIR}
+      ${PAIREC_TRTLLM_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(
+    brpc_inference_server
+    PRIVATE
+      ${PAIREC_TRTLLM_LIBRARY}
+      ${TRTLLM_EXTRA_LIBS}
+  )
+  set_property(
+    TARGET brpc_inference_server
+    PROPERTY INSTALL_RPATH
+      "$ORIGIN/../lib;${PAIREC_TRTLLM_LIBRARY_DIR}"
+  )
+endif()
 
 install(TARGETS brpc_gateway brpc_recommend_client brpc_inference_server RUNTIME DESTINATION bin)

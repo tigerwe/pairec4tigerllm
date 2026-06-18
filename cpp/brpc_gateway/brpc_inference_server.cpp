@@ -1,11 +1,19 @@
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
+#include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <mutex>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -16,6 +24,11 @@
 
 #include "recommend.pb.h"
 
+#if defined(PAIREC_ENABLE_TRTLLM_CPP) && PAIREC_ENABLE_TRTLLM_CPP
+#include <tensorrt_llm/executor/executor.h>
+#include <tensorrt_llm/executor/types.h>
+#endif
+
 namespace {
 
 struct ServerConfig {
@@ -23,6 +36,18 @@ struct ServerConfig {
   int idle_timeout_sec = -1;
   std::string backend = "semantic_map";
   std::string semantic_map_path = "/app/data/tenrec/processed/semantic_id_map.json";
+  std::string trt_engine_dir = "/app/trt_engines/qwen3_rec_v4";
+  std::string trt_tokenizer_config_path =
+      "/app/exported/qwen3_rec/pairec_cpp_tokenizer.txt";
+  int trt_max_input_len = 64;
+  int trt_max_new_tokens = 32;
+  int trt_num_samples = 1;
+  int trt_top_k = 50;
+  double trt_temperature = 0.7;
+  int trt_max_kv_tokens = 1024;
+  size_t trt_kv_cache_host_cache_size = 0;
+  std::string trt_scheduler_policy = "max_utilization";
+  int trt_request_timeout_ms = 30000;
 };
 
 struct Candidate {
@@ -46,6 +71,17 @@ void PrintUsage(const char* argv0) {
       << "  --listen_port=18100\n"
       << "  --backend=semantic_map|trtllm_cpp\n"
       << "  --semantic_map_path=/app/data/tenrec/processed/semantic_id_map.json\n"
+      << "  --trt_engine_dir=/app/trt_engines/qwen3_rec_v4\n"
+      << "  --trt_tokenizer_config_path=/app/exported/qwen3_rec/pairec_cpp_tokenizer.txt\n"
+      << "  --trt_max_input_len=64\n"
+      << "  --trt_max_new_tokens=32\n"
+      << "  --trt_num_samples=1\n"
+      << "  --trt_top_k=50\n"
+      << "  --trt_temperature=0.7\n"
+      << "  --trt_max_kv_tokens=1024\n"
+      << "  --trt_kv_cache_host_cache_size=0\n"
+      << "  --trt_scheduler_policy=max_utilization|guaranteed_no_evict\n"
+      << "  --trt_request_timeout_ms=30000\n"
       << "  --idle_timeout_sec=-1\n";
 }
 
@@ -58,6 +94,29 @@ bool ParseArgs(int argc, char** argv, ServerConfig* config) {
       config->backend = value;
     } else if (ConsumeArgValue(argv[i], "semantic_map_path", &value)) {
       config->semantic_map_path = value;
+    } else if (ConsumeArgValue(argv[i], "trt_engine_dir", &value)) {
+      config->trt_engine_dir = value;
+    } else if (ConsumeArgValue(argv[i], "trt_tokenizer_config_path", &value)) {
+      config->trt_tokenizer_config_path = value;
+    } else if (ConsumeArgValue(argv[i], "trt_max_input_len", &value)) {
+      config->trt_max_input_len = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "trt_max_new_tokens", &value)) {
+      config->trt_max_new_tokens = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "trt_num_samples", &value)) {
+      config->trt_num_samples = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "trt_top_k", &value)) {
+      config->trt_top_k = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "trt_temperature", &value)) {
+      config->trt_temperature = std::atof(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "trt_max_kv_tokens", &value)) {
+      config->trt_max_kv_tokens = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "trt_kv_cache_host_cache_size", &value)) {
+      config->trt_kv_cache_host_cache_size =
+          static_cast<size_t>(std::strtoull(value.c_str(), nullptr, 10));
+    } else if (ConsumeArgValue(argv[i], "trt_scheduler_policy", &value)) {
+      config->trt_scheduler_policy = value;
+    } else if (ConsumeArgValue(argv[i], "trt_request_timeout_ms", &value)) {
+      config->trt_request_timeout_ms = std::atoi(value.c_str());
     } else if (ConsumeArgValue(argv[i], "idle_timeout_sec", &value)) {
       config->idle_timeout_sec = std::atoi(value.c_str());
     } else if (std::string(argv[i]) == "--help") {
@@ -81,6 +140,20 @@ std::string SemanticKey(const std::vector<int>& semantic_id) {
     out << semantic_id[i];
   }
   return out.str();
+}
+
+std::string Trim(const std::string& input) {
+  size_t begin = 0;
+  while (begin < input.size() &&
+         std::isspace(static_cast<unsigned char>(input[begin]))) {
+    ++begin;
+  }
+  size_t end = input.size();
+  while (end > begin &&
+         std::isspace(static_cast<unsigned char>(input[end - 1]))) {
+    --end;
+  }
+  return input.substr(begin, end - begin);
 }
 
 std::string SemanticKey(const pairec::inference::SemanticId& semantic_id) {
@@ -247,6 +320,129 @@ class SemanticMapParser {
   size_t pos_ = 0;
 };
 
+bool LoadSemanticCandidates(
+    const std::string& path,
+    std::vector<Candidate>* candidates,
+    std::string* error) {
+  std::ifstream in(path);
+  if (!in) {
+    *error = "failed to open semantic map: " + path;
+    return false;
+  }
+  std::stringstream buffer;
+  buffer << in.rdbuf();
+  SemanticMapParser parser(buffer.str());
+  if (!parser.Parse(candidates, error)) {
+    return false;
+  }
+  if (candidates->empty()) {
+    *error = "semantic map is empty: " + path;
+    return false;
+  }
+  std::sort(candidates->begin(), candidates->end(),
+            [](const Candidate& lhs, const Candidate& rhs) {
+              return lhs.item_id < rhs.item_id;
+            });
+  return true;
+}
+
+struct CppTokenizerConfig {
+  int eos_id = -1;
+  int pad_id = -1;
+  std::vector<int> prefix_tokens;
+  std::vector<int> separator_tokens;
+  std::vector<int> suffix_tokens;
+  std::vector<std::vector<int>> semantic_token_ids;
+  std::unordered_map<int, std::pair<int, int>> id_to_semantic;
+
+  bool Load(const std::string& path, std::string* error) {
+    std::ifstream in(path);
+    if (!in) {
+      *error = "failed to open C++ tokenizer config: " + path;
+      return false;
+    }
+
+    semantic_token_ids.assign(4, std::vector<int>(256, -1));
+    std::string line;
+    int line_no = 0;
+    while (std::getline(in, line)) {
+      ++line_no;
+      line = Trim(line);
+      if (line.empty() || line[0] == '#') {
+        continue;
+      }
+      std::istringstream iss(line);
+      std::string key;
+      iss >> key;
+      if (key == "eos_id") {
+        iss >> eos_id;
+      } else if (key == "pad_id") {
+        iss >> pad_id;
+      } else if (key == "prefix") {
+        if (!ParseTokenList(iss, &prefix_tokens)) {
+          *error = "failed to parse prefix at line " + std::to_string(line_no);
+          return false;
+        }
+      } else if (key == "separator") {
+        if (!ParseTokenList(iss, &separator_tokens)) {
+          *error = "failed to parse separator at line " + std::to_string(line_no);
+          return false;
+        }
+      } else if (key == "suffix") {
+        if (!ParseTokenList(iss, &suffix_tokens)) {
+          *error = "failed to parse suffix at line " + std::to_string(line_no);
+          return false;
+        }
+      } else if (key == "semantic") {
+        int layer = -1;
+        int value = -1;
+        int token_id = -1;
+        iss >> layer >> value >> token_id;
+        if (layer < 0 || value < 0 || token_id < 0) {
+          *error = "invalid semantic token entry at line " + std::to_string(line_no);
+          return false;
+        }
+        if (static_cast<size_t>(layer) >= semantic_token_ids.size()) {
+          semantic_token_ids.resize(layer + 1);
+        }
+        if (static_cast<size_t>(value) >= semantic_token_ids[layer].size()) {
+          semantic_token_ids[layer].resize(value + 1, -1);
+        }
+        semantic_token_ids[layer][value] = token_id;
+        id_to_semantic[token_id] = std::make_pair(layer, value);
+      } else {
+        *error = "unknown tokenizer config key at line " +
+                 std::to_string(line_no) + ": " + key;
+        return false;
+      }
+    }
+
+    if (eos_id < 0 || pad_id < 0) {
+      *error = "tokenizer config must define eos_id and pad_id";
+      return false;
+    }
+    if (prefix_tokens.empty() || suffix_tokens.empty()) {
+      *error = "tokenizer config must define non-empty prefix and suffix";
+      return false;
+    }
+    if (semantic_token_ids.size() < 4 || id_to_semantic.empty()) {
+      *error = "tokenizer config has no semantic token mappings";
+      return false;
+    }
+    return true;
+  }
+
+ private:
+  static bool ParseTokenList(std::istringstream& iss, std::vector<int>* tokens) {
+    tokens->clear();
+    int token = 0;
+    while (iss >> token) {
+      tokens->push_back(token);
+    }
+    return !tokens->empty();
+  }
+};
+
 class InferenceBackend {
  public:
   virtual ~InferenceBackend() = default;
@@ -260,25 +456,9 @@ class InferenceBackend {
 class SemanticMapBackend final : public InferenceBackend {
  public:
   bool Init(const ServerConfig& config, std::string* error) override {
-    std::ifstream in(config.semantic_map_path);
-    if (!in) {
-      *error = "failed to open semantic map: " + config.semantic_map_path;
+    if (!LoadSemanticCandidates(config.semantic_map_path, &candidates_, error)) {
       return false;
     }
-    std::stringstream buffer;
-    buffer << in.rdbuf();
-    SemanticMapParser parser(buffer.str());
-    if (!parser.Parse(&candidates_, error)) {
-      return false;
-    }
-    if (candidates_.empty()) {
-      *error = "semantic map is empty: " + config.semantic_map_path;
-      return false;
-    }
-    std::sort(candidates_.begin(), candidates_.end(),
-              [](const Candidate& lhs, const Candidate& rhs) {
-                return lhs.item_id < rhs.item_id;
-              });
     std::cout << "[brpc-inference] loaded semantic map entries="
               << candidates_.size() << " path=" << config.semantic_map_path << std::endl;
     return true;
@@ -324,9 +504,394 @@ class SemanticMapBackend final : public InferenceBackend {
 
 class TrtllmCppBackend final : public InferenceBackend {
  public:
+#if defined(PAIREC_ENABLE_TRTLLM_CPP) && PAIREC_ENABLE_TRTLLM_CPP
+  bool Init(const ServerConfig& config, std::string* error) override {
+    config_ = config;
+    if (config_.trt_num_samples < 1) {
+      config_.trt_num_samples = 1;
+    }
+    if (config_.trt_max_new_tokens < 1) {
+      config_.trt_max_new_tokens = 32;
+    }
+    if (config_.trt_max_input_len < 1) {
+      config_.trt_max_input_len = 64;
+    }
+
+    if (!tokenizer_.Load(config_.trt_tokenizer_config_path, error)) {
+      return false;
+    }
+    if (!LoadSemanticCandidates(config_.semantic_map_path, &candidates_, error)) {
+      return false;
+    }
+    for (const auto& candidate : candidates_) {
+      semantic_to_candidate_[SemanticKey(candidate.semantic_id)] = &candidate;
+    }
+
+    try {
+      namespace texec = tensorrt_llm::executor;
+      texec::SchedulerConfig scheduler_config(ParseSchedulerPolicy(config_.trt_scheduler_policy));
+      std::optional<texec::SizeType32> max_kv_tokens = std::nullopt;
+      if (config_.trt_max_kv_tokens > 0) {
+        max_kv_tokens = static_cast<texec::SizeType32>(config_.trt_max_kv_tokens);
+      }
+      std::optional<size_t> host_cache_size = std::nullopt;
+      if (config_.trt_kv_cache_host_cache_size > 0) {
+        host_cache_size = config_.trt_kv_cache_host_cache_size;
+      }
+      texec::KvCacheConfig kv_cache_config(
+          true,
+          max_kv_tokens,
+          std::nullopt,
+          std::nullopt,
+          std::nullopt,
+          host_cache_size,
+          true);
+      texec::ExecutorConfig executor_config(1, scheduler_config, kv_cache_config);
+      executor_.reset(new texec::Executor(
+          std::filesystem::path(config_.trt_engine_dir),
+          texec::ModelType::kDECODER_ONLY,
+          executor_config));
+    } catch (const std::exception& e) {
+      *error = std::string("failed to initialize TensorRT-LLM Executor: ") + e.what();
+      return false;
+    }
+
+    std::cout << "[brpc-inference] trtllm_cpp initialized"
+              << " engine_dir=" << config_.trt_engine_dir
+              << " tokenizer_config=" << config_.trt_tokenizer_config_path
+              << " semantic_map_entries=" << candidates_.size()
+              << " semantic_token_ids=" << tokenizer_.id_to_semantic.size()
+              << " max_input_len=" << config_.trt_max_input_len
+              << " max_new_tokens=" << config_.trt_max_new_tokens
+              << " num_samples=" << config_.trt_num_samples
+              << std::endl;
+    return true;
+  }
+
+  void Recommend(
+      const pairec::inference::RecommendRequest& request,
+      pairec::inference::RecommendResponse* response) override {
+    auto* trace = response->mutable_trace();
+    butil::Timer prompt_timer;
+    prompt_timer.start();
+    std::vector<int> prompt_tokens;
+    std::string prompt_error;
+    if (!BuildPromptTokens(request, &prompt_tokens, &prompt_error)) {
+      response->set_error(prompt_error);
+      return;
+    }
+    prompt_timer.stop();
+    trace->set_prompt_ms(prompt_timer.m_elapsed());
+
+    std::vector<int> sampled_tokens;
+    double runner_total_ms = 0.0;
+    double runner_max_ms = 0.0;
+    int runner_calls = 0;
+    const uint64_t base_seed =
+        seed_.fetch_add(static_cast<uint64_t>(config_.trt_num_samples));
+    for (int sample = 0; sample < config_.trt_num_samples; ++sample) {
+      std::vector<int> output_tokens;
+      double runner_ms = 0.0;
+      std::string error;
+      if (!RunExecutor(
+              prompt_tokens,
+              base_seed + static_cast<uint64_t>(sample),
+              &output_tokens,
+              &runner_ms,
+              &error)) {
+        response->set_error(error);
+        return;
+      }
+      runner_total_ms += runner_ms;
+      runner_max_ms = std::max(runner_max_ms, runner_ms);
+      ++runner_calls;
+      sampled_tokens.insert(sampled_tokens.end(), output_tokens.begin(), output_tokens.end());
+    }
+    trace->set_runner_generate_ms(runner_total_ms);
+    trace->set_runner_calls(runner_calls);
+    if (runner_calls > 0) {
+      trace->set_runner_avg_ms(runner_total_ms / runner_calls);
+    }
+    trace->set_runner_max_ms(runner_max_ms);
+
+    butil::Timer parse_timer;
+    parse_timer.start();
+    std::vector<std::vector<int>> semantic_candidates = ParseOutputTokens(sampled_tokens);
+    parse_timer.stop();
+    trace->set_parse_combo_ms(parse_timer.m_elapsed());
+
+    butil::Timer map_timer;
+    map_timer.start();
+    FillRecommendations(request, semantic_candidates, response);
+    map_timer.stop();
+    trace->set_map_item_ms(map_timer.m_elapsed());
+    trace->set_backend_total_ms(
+        trace->prompt_ms() + trace->runner_generate_ms() +
+        trace->parse_combo_ms() + trace->map_item_ms());
+    trace->set_generate_ms(trace->backend_total_ms());
+  }
+
+  std::string Name() const override {
+    return "trtllm_cpp";
+  }
+
+ private:
+  static tensorrt_llm::executor::CapacitySchedulerPolicy ParseSchedulerPolicy(
+      std::string policy) {
+    std::transform(policy.begin(), policy.end(), policy.begin(),
+                   [](unsigned char ch) { return std::tolower(ch); });
+    if (policy == "max_utilization" || policy == "max-utilization" ||
+        policy == "max_util" || policy == "max") {
+      return tensorrt_llm::executor::CapacitySchedulerPolicy::kMAX_UTILIZATION;
+    }
+    return tensorrt_llm::executor::CapacitySchedulerPolicy::kGUARANTEED_NO_EVICT;
+  }
+
+  bool BuildPromptTokens(
+      const pairec::inference::RecommendRequest& request,
+      std::vector<int>* prompt_tokens,
+      std::string* error) const {
+    std::vector<std::vector<int>> history;
+    for (const auto& semantic_id : request.history()) {
+      std::vector<int> item;
+      bool all_zero = true;
+      for (int value : semantic_id.value()) {
+        item.push_back(value);
+        if (value != 0) {
+          all_zero = false;
+        }
+      }
+      if (!all_zero && item.size() >= tokenizer_.semantic_token_ids.size()) {
+        history.push_back(std::move(item));
+      }
+    }
+    if (history.empty()) {
+      *error = "empty request history";
+      return false;
+    }
+
+    while (true) {
+      std::vector<int> built;
+      std::string build_error;
+      if (!BuildPromptTokensForHistory(history, &built, &build_error)) {
+        *error = build_error;
+        return false;
+      }
+      if (static_cast<int>(built.size()) <= config_.trt_max_input_len ||
+          history.size() <= 1) {
+        if (static_cast<int>(built.size()) > config_.trt_max_input_len) {
+          built.erase(built.begin(),
+                      built.begin() + (built.size() - config_.trt_max_input_len));
+        }
+        *prompt_tokens = std::move(built);
+        return true;
+      }
+      history.erase(history.begin());
+    }
+  }
+
+  bool BuildPromptTokensForHistory(
+      const std::vector<std::vector<int>>& history,
+      std::vector<int>* prompt_tokens,
+      std::string* error) const {
+    prompt_tokens->clear();
+    prompt_tokens->insert(prompt_tokens->end(),
+                          tokenizer_.prefix_tokens.begin(),
+                          tokenizer_.prefix_tokens.end());
+    for (size_t i = 0; i < history.size(); ++i) {
+      if (i != 0) {
+        prompt_tokens->insert(prompt_tokens->end(),
+                              tokenizer_.separator_tokens.begin(),
+                              tokenizer_.separator_tokens.end());
+      }
+      const auto& item = history[i];
+      for (size_t layer = 0; layer < tokenizer_.semantic_token_ids.size(); ++layer) {
+        const int value = item[layer];
+        if (value < 0 ||
+            static_cast<size_t>(value) >= tokenizer_.semantic_token_ids[layer].size()) {
+          *error = "semantic id value out of tokenizer range";
+          return false;
+        }
+        const int token_id = tokenizer_.semantic_token_ids[layer][value];
+        if (token_id < 0) {
+          *error = "missing semantic token id in C++ tokenizer config";
+          return false;
+        }
+        prompt_tokens->push_back(token_id);
+      }
+    }
+    prompt_tokens->insert(prompt_tokens->end(),
+                          tokenizer_.suffix_tokens.begin(),
+                          tokenizer_.suffix_tokens.end());
+    return true;
+  }
+
+  bool RunExecutor(
+      const std::vector<int>& prompt_tokens,
+      uint64_t seed,
+      std::vector<int>* output_tokens,
+      double* elapsed_ms,
+      std::string* error) {
+    namespace texec = tensorrt_llm::executor;
+    butil::Timer timer;
+    timer.start();
+    try {
+      texec::SamplingConfig sampling_config(1);
+      if (config_.trt_top_k > 0) {
+        sampling_config.setTopK(
+            std::optional<texec::SizeType32>(
+                static_cast<texec::SizeType32>(config_.trt_top_k)));
+      }
+      if (config_.trt_temperature > 0.0) {
+        sampling_config.setTemperature(
+            std::optional<texec::FloatType>(
+                static_cast<texec::FloatType>(config_.trt_temperature)));
+      }
+      sampling_config.setSeed(
+          std::optional<texec::RandomSeedType>(
+              static_cast<texec::RandomSeedType>(seed)));
+      texec::OutputConfig output_config(false, false, false, true);
+      texec::Request executor_request(
+          texec::VecTokens(prompt_tokens.begin(), prompt_tokens.end()),
+          static_cast<texec::SizeType32>(config_.trt_max_new_tokens),
+          false,
+          sampling_config,
+          output_config,
+          std::optional<texec::SizeType32>(
+              static_cast<texec::SizeType32>(tokenizer_.eos_id)),
+          std::optional<texec::SizeType32>(
+              static_cast<texec::SizeType32>(tokenizer_.pad_id)));
+      const auto request_id = executor_->enqueueRequest(executor_request);
+      const auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(config_.trt_request_timeout_ms);
+
+      while (std::chrono::steady_clock::now() < deadline) {
+        auto responses =
+            executor_->awaitResponses(
+                request_id,
+                std::optional<std::chrono::milliseconds>(
+                    std::chrono::milliseconds(10)));
+        for (const auto& response : responses) {
+          if (response.hasError()) {
+            *error = "TensorRT-LLM Executor error: " + response.getErrorMsg();
+            executor_->cancelRequest(request_id);
+            return false;
+          }
+          const auto& result = response.getResult();
+          if (result.isFinal) {
+            output_tokens->clear();
+            if (!result.outputTokenIds.empty()) {
+              output_tokens->assign(result.outputTokenIds[0].begin(),
+                                    result.outputTokenIds[0].end());
+            }
+            timer.stop();
+            *elapsed_ms = timer.m_elapsed();
+            return true;
+          }
+        }
+      }
+      executor_->cancelRequest(request_id);
+      *error = "TensorRT-LLM Executor request timed out";
+      return false;
+    } catch (const std::exception& e) {
+      *error = std::string("TensorRT-LLM Executor exception: ") + e.what();
+      return false;
+    }
+  }
+
+  std::vector<std::vector<int>> ParseOutputTokens(const std::vector<int>& token_ids) const {
+    std::vector<std::vector<int>> layer_values(tokenizer_.semantic_token_ids.size());
+    std::vector<std::unordered_set<int>> seen_values(tokenizer_.semantic_token_ids.size());
+    for (int token_id : token_ids) {
+      auto it = tokenizer_.id_to_semantic.find(token_id);
+      if (it == tokenizer_.id_to_semantic.end()) {
+        continue;
+      }
+      const int layer = it->second.first;
+      const int value = it->second.second;
+      if (layer < 0 || static_cast<size_t>(layer) >= layer_values.size()) {
+        continue;
+      }
+      if (seen_values[layer].insert(value).second) {
+        layer_values[layer].push_back(value);
+      }
+    }
+
+    for (auto& values : layer_values) {
+      if (values.empty()) {
+        values.push_back(0);
+      }
+      std::sort(values.begin(), values.end());
+    }
+
+    std::vector<std::vector<int>> combinations;
+    std::vector<int> current;
+    BuildCartesian(layer_values, 0, &current, &combinations);
+    return combinations;
+  }
+
+  static void BuildCartesian(
+      const std::vector<std::vector<int>>& layers,
+      size_t layer,
+      std::vector<int>* current,
+      std::vector<std::vector<int>>* combinations) {
+    if (layer == layers.size()) {
+      combinations->push_back(*current);
+      return;
+    }
+    for (int value : layers[layer]) {
+      current->push_back(value);
+      BuildCartesian(layers, layer + 1, current, combinations);
+      current->pop_back();
+    }
+  }
+
+  void FillRecommendations(
+      const pairec::inference::RecommendRequest& request,
+      const std::vector<std::vector<int>>& semantic_candidates,
+      pairec::inference::RecommendResponse* response) const {
+    std::unordered_set<std::string> history_keys;
+    for (const auto& history : request.history()) {
+      history_keys.insert(SemanticKey(history));
+    }
+    std::unordered_set<int> emitted_items;
+    const int topk = request.has_topk() && request.topk() > 0 ? request.topk() : 10;
+    for (const auto& semantic_id : semantic_candidates) {
+      if (response->recommendations_size() >= topk) {
+        break;
+      }
+      const std::string key = SemanticKey(semantic_id);
+      if (history_keys.find(key) != history_keys.end()) {
+        continue;
+      }
+      auto it = semantic_to_candidate_.find(key);
+      if (it == semantic_to_candidate_.end()) {
+        continue;
+      }
+      const Candidate* candidate = it->second;
+      if (!emitted_items.insert(candidate->item_id).second) {
+        continue;
+      }
+      auto* rec = response->add_recommendations();
+      rec->set_item_id(candidate->item_id);
+      rec->set_score(1.0);
+      for (int value : candidate->semantic_id) {
+        rec->add_semantic_id(value);
+      }
+    }
+  }
+
+  ServerConfig config_;
+  CppTokenizerConfig tokenizer_;
+  std::vector<Candidate> candidates_;
+  std::unordered_map<std::string, const Candidate*> semantic_to_candidate_;
+  std::unique_ptr<tensorrt_llm::executor::Executor> executor_;
+  std::atomic<uint64_t> seed_{42};
+#else
   bool Init(const ServerConfig&, std::string* error) override {
     *error = "trtllm_cpp backend is not linked yet; build the TensorRT-LLM C++ "
-             "runner adapter inside the ARM TRT-LLM runtime image";
+             "Executor adapter inside the ARM TRT-LLM runtime image with "
+             "-DPAIREC_ENABLE_TRTLLM_CPP=ON";
     return false;
   }
 
@@ -337,6 +902,7 @@ class TrtllmCppBackend final : public InferenceBackend {
   std::string Name() const override {
     return "trtllm_cpp";
   }
+#endif
 };
 
 std::unique_ptr<InferenceBackend> CreateBackend(const std::string& name) {
@@ -376,7 +942,9 @@ class NativeInferenceServiceImpl final : public pairec::inference::RecommendServ
 
     if (response->recommendations_size() == 0) {
       response->set_code(299);
-      response->set_error("items size not enough");
+      if (!response->has_error() || response->error().empty()) {
+        response->set_error("items size not enough");
+      }
       cntl->SetFailed(response->error());
     }
 

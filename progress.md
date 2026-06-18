@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-18 | 当前状态: F14 已回退 `HTTP -> brpc -> HTTP` 的 PaiRec proxy 方案，改走无 HTTP 转发的 C++ brpc inference service 路线；`brpc_inference_server` 已在 K8s 内完成 native brpc smoke，Health/Recommend 均通过，当前 `semantic_map` backend 仅用于协议和部署验证 | 下一步: 在 ARM TRT-LLM runtime 内实现 `backend=trtllm_cpp`，再让 PaiRec Go 侧真正通过 brpc/TCP 调用该 inference service
+> 最后更新: 2026-06-18 | 当前状态: F14 真实 C++ TRT-LLM 后端第一版已实现：`brpc_inference_server --backend=trtllm_cpp` 可编译期开关接入 TensorRT-LLM C++ Executor，使用导出的 tokenizer token-id 配置拼接推荐 prompt，生成后解析 semantic special tokens 并映射 item；已新增 TRT-LLM brpc 镜像/部署/tokenizer 导出脚本，本机静态验证通过 | 下一步: 在 master ARM TRT-LLM runtime 内构建 `pairec-brpc-inference:k8s-arm64-trtllm-v1`，导入 worker1 后部署 `inference-brpc-trtllm` 并跑 brpc smoke，再改 PaiRec Go 侧 brpc/TCP client
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/18** | **F14 `backend=trtllm_cpp` 第一版代码已落地，待远程 ARM/GPU runtime 验证：`cpp/brpc_gateway/brpc_inference_server.cpp` 新增 TensorRT-LLM C++ Executor 后端，启动时加载 `/app/trt_engines/qwen3_rec_v4`、`/app/exported/qwen3_rec/pairec_cpp_tokenizer.txt` 和 `semantic_id_map.json`；请求侧按当前 Python `TRTQwen3Backend` 的 prompt 结构构造 token ids，保留 `max_input_len=64`、`max_new_tokens=32`、`num_samples/top_k/temperature` 参数，生成后按 layer 收集 semantic special tokens、缺失层补 0、笛卡尔积组合并映射 item；trace 保留 `prompt_ms`、`runner_generate_ms`、`runner_calls`、`parse_combo_ms`、`map_item_ms`、`backend_total_ms`。新增 `PAIREC_ENABLE_TRTLLM_CPP` CMake 开关、TRT-LLM brpc 镜像构建脚本、`scripts/export_cpp_trt_tokenizer_config.py`、`k8s/deployment-inference-brpc-trtllm.yaml` 和 apply 脚本。本机验证：`python -m py_compile scripts/export_cpp_trt_tokenizer_config.py`、新增脚本 `bash -n`、`k8s/deployment-inference-brpc-trtllm.yaml` YAML parse、`protoc --cpp_out`、`git diff --check`、CMake TRT OFF 配置和 TRT ON 配置分支均通过；尚未在远程 ARM TensorRT-LLM runtime 内完成真实编译、镜像导入和 K8s smoke** |
 | **6/18** | **F14 native C++ brpc inference K8s smoke 通过：`scripts/test_brpc_native_inference_smoke.sh` 输出 `health ok latency_ms=1 code=200 status=healthy`，`Recommend` 输出 `recommend ok index=1 latency_ms=1 code=200 user_id=brpc_smoke_1 items=5 inference_ms=0`。这条链路是 `brpc_recommend_client -> inference-brpc-native:18100 -> brpc_inference_server -> semantic_map backend`，不再经过 Flask HTTP 转发；当前验证的是协议、镜像、Service/Deployment 和 C++ brpc server 可用性，不代表真实模型推理时延。下一步进入 `backend=trtllm_cpp`，把 TensorRT-LLM C++ runner、tokenizer/prompt、semantic id 解析和 DataSystem/KV 运行时接入该 server** |
 | **6/18** | **补强 brpc 镜像离线构建：master 本地已有 `zcx-pairec-image:v1.1` 与 `zcx-pairec-brpc-sdk:v1`，但使用 `docker.io/library/zcx-*` 作为 `BASE_IMAGE` 会触发 daocloud 元数据解析并因私有镜像不在白名单返回 403。已将 brpc build 脚本默认 base image 改成本地 tag；新增 `.dockerignore` 排除 `datasystem/uds` Unix socket，避免 legacy builder 打包 build context 时输出 `archive/tar: sockets not supported`；`docker/Dockerfile.brpc.gateway` 在 build/final stage 清空继承的 `LD_PRELOAD`，避免 DataSystem 预加载路径污染 brpc 镜像构建和 ldd 检查** |
 | **6/18** | **统一镜像 tar 保存路径：后续 build/ship 脚本默认把导出的 `.tar` 或 `.tar.gz` 放到 `/home/zcx`，不再使用 `/tmp` 作为镜像中转目录；`ship_brpc_gateway_to_worker.sh` 与 `ship_brpc_inference_to_worker.sh` 会先创建本地 tar 目录，scp 到 worker 时也默认放到 `/home/zcx`，再由 worker 执行 `ctr -n k8s.io images import /home/zcx/*.tar`。已同步 `k8s/README.md` 示例和相关构建脚本输出** |
@@ -69,7 +70,7 @@
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
 - **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set/Get 阶段性统计已完成；✅ 关闭结果缓存后的 E2E pressure/replay 最终报告已生成；✅ 远端 DS Get 到本地中等样本已完成；🔄 remote H2D 与 pinned DRAM A/B 待补充
 - **K8s 部署**: ✅ ARM worker1 HTTP/TRT 基线闭环已通过：正式 inference runtime 镜像 `/health` + `/recommend` 和 PaiRec `/ping` + `/api/recommend` 均已验证；🔄 仍需将模型/数据 hostPath 替换为 PVC，并单独修 DataSystem Python/C++ KV 路径
-- **brpc 改造**: 🔄 F14 已回退 PaiRec proxy 方案，转向 C++ brpc inference service；当前已新增无 HTTP 转发的 `brpc_inference_server` smoke backend，待远程构建/部署验证并接入真实 `trtllm_cpp` backend
+- **brpc 改造**: 🔄 F14 已回退 PaiRec proxy 方案，转向 C++ brpc inference service；`semantic_map` native smoke 已在 K8s 通过；`trtllm_cpp` 后端第一版已实现并通过本机静态/CMake 配置验证，待远程 ARM TRT-LLM runtime 构建、部署和真实 brpc smoke
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 
