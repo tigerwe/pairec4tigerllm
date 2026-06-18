@@ -1,0 +1,94 @@
+# ============================================
+# Native C++ brpc inference service
+# ============================================
+#
+# This is the F14 native-service track, not the HTTP gateway track.
+# Current backend=semantic_map is a protocol/K8s smoke backend that directly
+# serves RecommendService over brpc without forwarding to Flask HTTP.
+# The production target is backend=trtllm_cpp once the TensorRT-LLM C++ runner
+# adapter is linked inside the ARM TRT-LLM runtime image.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-brpc-native
+  namespace: pairec
+  labels:
+    app: inference-brpc-native
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference-brpc-native
+  template:
+    metadata:
+      labels:
+        app: inference-brpc-native
+    spec:
+      nodeSelector:
+        pairec/gpu: "true"
+      containers:
+        - name: brpc-inference
+          image: docker.io/library/pairec-brpc-inference:k8s-arm64-v1
+          imagePullPolicy: IfNotPresent
+          command:
+            - /opt/pairec-brpc/bin/brpc_inference_server
+          args:
+            - --listen_port=18100
+            - --backend=semantic_map
+            - --semantic_map_path=/app/data/tenrec/processed/semantic_id_map.json
+          ports:
+            - containerPort: 18100
+              name: brpc
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+              readOnly: true
+          startupProbe:
+            tcpSocket:
+              port: 18100
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            tcpSocket:
+              port: 18100
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 18100
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: data
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/data
+            type: Directory
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-brpc-native
+  namespace: pairec
+  labels:
+    app: inference-brpc-native
+spec:
+  selector:
+    app: inference-brpc-native
+  ports:
+    - name: brpc
+      port: 18100
+      targetPort: 18100
+      protocol: TCP
+  type: ClusterIP

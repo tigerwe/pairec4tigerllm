@@ -284,6 +284,45 @@ GET /ping -> success
 POST /api/recommend -> code=200, size=10, 10 个 generative_recall item
 ```
 
+### F14 native C++ brpc inference 服务
+
+`brpc_http_proxy` sidecar 方案已回退，因为它仍然是
+`HTTP -> brpc -> HTTP`。当前 F14 新方向是无 HTTP 转发的 C++ brpc inference
+服务：
+
+```text
+brpc client
+  -> inference-brpc-native:18100
+  -> brpc_inference_server
+```
+
+当前 `backend=semantic_map` 只用于验证 native brpc 服务、镜像、K8s 和协议链路；
+它不是模型推理。真正目标是后续在同一服务内接入 `backend=trtllm_cpp`。
+
+构建并导入 worker1：
+
+```bash
+BASE_IMAGE=docker.io/library/zcx-pairec-brpc-sdk:v1 \
+  bash scripts/build_brpc_inference_image.sh
+
+WORKER=root@141.61.91.188 \
+  bash scripts/ship_brpc_inference_to_worker.sh
+```
+
+部署并验证：
+
+```bash
+bash scripts/k8s_apply_inference_brpc_native.sh
+bash scripts/test_brpc_native_inference_smoke.sh
+```
+
+预期输出：
+
+```text
+health ok latency_ms=... code=200 status=healthy
+recommend ok index=1 latency_ms=... code=200 items=...
+```
+
 先确认推理服务：
 
 ```bash

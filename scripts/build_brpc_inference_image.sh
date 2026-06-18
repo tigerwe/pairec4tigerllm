@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${1:-docker.io/library/pairec-brpc-gateway:k8s-arm64-v1}"
-TAR_PATH="${2:-/tmp/pairec-brpc-gateway-k8s-arm64-v1.tar}"
-BASE_IMAGE="${BASE_IMAGE:-${3:-docker.io/library/zcx-pairec-image:v1.1}}"
+IMAGE="${1:-docker.io/library/pairec-brpc-inference:k8s-arm64-v1}"
+TAR_PATH="${2:-/tmp/pairec-brpc-inference-k8s-arm64-v1.tar}"
+BASE_IMAGE="${BASE_IMAGE:-${3:-docker.io/library/zcx-pairec-brpc-sdk:v1}}"
 
 docker build \
   --build-arg "BASE_IMAGE=$BASE_IMAGE" \
@@ -14,9 +14,8 @@ echo "Checking runtime dynamic library dependencies ..."
 docker run --rm --entrypoint /bin/bash "$IMAGE" -lc '
   set -euo pipefail
   for bin in \
-      /opt/pairec-brpc/bin/brpc_gateway \
-      /opt/pairec-brpc/bin/brpc_recommend_client \
-      /opt/pairec-brpc/bin/brpc_inference_server; do
+      /opt/pairec-brpc/bin/brpc_inference_server \
+      /opt/pairec-brpc/bin/brpc_recommend_client; do
     echo "== ldd $bin =="
     ldd "$bin" | tee "/tmp/$(basename "$bin").ldd"
     if grep -q "not found" "/tmp/$(basename "$bin").ldd"; then
