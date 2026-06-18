@@ -16,10 +16,29 @@ cat > "$TMP_DIR/Dockerfile" <<'EOF'
 ARG BASE_IMAGE=zcx-pairec-image:v1.1
 ARG BRPC_REPO=https://github.com/apache/brpc.git
 ARG BRPC_REF=master
+ARG HTTP_PROXY=
+ARG HTTPS_PROXY=
+ARG NO_PROXY=
+ARG http_proxy=
+ARG https_proxy=
+ARG no_proxy=
 
 FROM ${BASE_IMAGE}
 
 SHELL ["/bin/bash", "-lc"]
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+ENV HTTP_PROXY="${HTTP_PROXY}" \
+    HTTPS_PROXY="${HTTPS_PROXY}" \
+    NO_PROXY="${NO_PROXY}" \
+    http_proxy="${http_proxy}" \
+    https_proxy="${https_proxy}" \
+    no_proxy="${no_proxy}"
 
 RUN if command -v dnf >/dev/null 2>&1; then \
       dnf install -y git gcc gcc-c++ make cmake openssl-devel gflags-devel protobuf-devel protobuf-compiler leveldb-devel zlib-devel && dnf clean all; \
@@ -54,11 +73,20 @@ echo "  image:      $IMAGE"
 echo "  base image: $BASE_IMAGE"
 echo "  brpc repo:  $BRPC_REPO"
 echo "  brpc ref:   $BRPC_REF"
+if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}${http_proxy:-}${https_proxy:-}" ]; then
+  echo "  proxy:      enabled"
+fi
 
 docker build \
   --build-arg "BASE_IMAGE=$BASE_IMAGE" \
   --build-arg "BRPC_REPO=$BRPC_REPO" \
   --build-arg "BRPC_REF=$BRPC_REF" \
+  --build-arg "HTTP_PROXY=${HTTP_PROXY:-}" \
+  --build-arg "HTTPS_PROXY=${HTTPS_PROXY:-}" \
+  --build-arg "NO_PROXY=${NO_PROXY:-}" \
+  --build-arg "http_proxy=${http_proxy:-}" \
+  --build-arg "https_proxy=${https_proxy:-}" \
+  --build-arg "no_proxy=${no_proxy:-}" \
   -f "$TMP_DIR/Dockerfile" \
   -t "$IMAGE" \
   "$TMP_DIR"
