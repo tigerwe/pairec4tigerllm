@@ -133,13 +133,13 @@ cd /home/zcx/workspace/pairec4tigerllm
 
 bash scripts/build_inference_runtime_image.sh \
   docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1 \
-  /tmp/pairec-inference-k8s-arm64-ds-runtime-v1.tar \
+  /home/zcx/pairec-inference-k8s-arm64-ds-runtime-v1.tar \
   docker.io/library/zcx-pairec-ds-runtime:v1
 docker save docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1 \
-  -o /tmp/pairec-inference-k8s-arm64-ds-runtime-v1.tar
-scp /tmp/pairec-inference-k8s-arm64-ds-runtime-v1.tar root@141.61.91.188:/tmp/
+  -o /home/zcx/pairec-inference-k8s-arm64-ds-runtime-v1.tar
+scp /home/zcx/pairec-inference-k8s-arm64-ds-runtime-v1.tar root@141.61.91.188:/home/zcx/
 ssh root@141.61.91.188 \
-  'ctr -n k8s.io images import /tmp/pairec-inference-k8s-arm64-ds-runtime-v1.tar'
+  'ctr -n k8s.io images import /home/zcx/pairec-inference-k8s-arm64-ds-runtime-v1.tar'
 ```
 
 应用并验证：
@@ -260,10 +260,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 docker build -f /tmp/Dockerfile.pairec.binary \
   -t docker.io/library/pairec-server:k8s-arm64-static .
 docker save docker.io/library/pairec-server:k8s-arm64-static \
-  -o /tmp/pairec-server-k8s-arm64-static.tar
-scp /tmp/pairec-server-k8s-arm64-static.tar root@141.61.91.188:/tmp/
+  -o /home/zcx/pairec-server-k8s-arm64-static.tar
+scp /home/zcx/pairec-server-k8s-arm64-static.tar root@141.61.91.188:/home/zcx/
 ssh root@141.61.91.188 \
-  'ctr -n k8s.io images import /tmp/pairec-server-k8s-arm64-static.tar'
+  'ctr -n k8s.io images import /home/zcx/pairec-server-k8s-arm64-static.tar'
 ```
 
 应用方式：

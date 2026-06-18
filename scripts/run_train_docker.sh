@@ -22,14 +22,15 @@ build() {
 }
 
 export_image() {
-    local out="pairec-train.tar.gz"
+    local out="${TRAIN_TAR_PATH:-/home/zcx/pairec-train.tar.gz}"
     echo "=== 导出镜像 ==="
+    mkdir -p "$(dirname "$out")"
     docker save "$IMAGE" | gzip > "$out"
     echo "导出完成: $out ($(du -h "$out" | cut -f1))"
     echo ""
     echo "迁移到目标机器:"
-    echo "  scp $out user@188:/path/"
-    echo "  ssh user@188 'gunzip -c /path/$out | docker load'"
+    echo "  scp $out user@188:/home/zcx/"
+    echo "  ssh user@188 'gunzip -c $out | docker load'"
 }
 
 train() {

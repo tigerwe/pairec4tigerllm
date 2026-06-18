@@ -2,12 +2,13 @@
 set -euo pipefail
 
 IMAGE="${1:-docker.io/library/pairec-brpc-gateway:k8s-arm64-v1}"
-TAR_PATH="${2:-/tmp/pairec-brpc-gateway-k8s-arm64-v1.tar}"
+TAR_PATH="${2:-/home/zcx/pairec-brpc-gateway-k8s-arm64-v1.tar}"
 WORKER="${WORKER:-${3:-root@141.61.91.188}}"
 REMOTE_TAR="${REMOTE_TAR:-$TAR_PATH}"
 IMPORT_CMD="${IMPORT_CMD:-ctr}"
 
 echo "Exporting $IMAGE to $TAR_PATH"
+mkdir -p "$(dirname "$TAR_PATH")"
 docker save "$IMAGE" -o "$TAR_PATH"
 
 echo "Copying $TAR_PATH to $WORKER:$REMOTE_TAR"

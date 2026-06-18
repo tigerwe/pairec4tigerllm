@@ -2,7 +2,7 @@
 set -euo pipefail
 
 IMAGE="${1:-docker.io/library/pairec-inference:k8s-arm64-ds-runtime-v1}"
-TAR_PATH="${2:-/tmp/pairec-inference-k8s-arm64-ds-runtime-v1.tar}"
+TAR_PATH="${2:-/home/zcx/pairec-inference-k8s-arm64-ds-runtime-v1.tar}"
 BASE_IMAGE="${BASE_IMAGE:-${3:-docker.io/library/zcx-pairec-ds-runtime:v1}}"
 
 docker build \
