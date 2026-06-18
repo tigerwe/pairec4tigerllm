@@ -82,7 +82,7 @@ The local workstation currently does not have brpc headers or libraries. Build
 on the ARM master node using a dedicated SDK image:
 
 ```bash
-BASE_IMAGE=docker.io/library/zcx-pairec-image:v1.1 \
+BASE_IMAGE=zcx-pairec-image:v1.1 \
   bash scripts/build_brpc_sdk_image.sh \
     docker.io/library/zcx-pairec-brpc-sdk:v1
 ```
@@ -90,7 +90,7 @@ BASE_IMAGE=docker.io/library/zcx-pairec-image:v1.1 \
 Then build the gateway image from that SDK image:
 
 ```bash
-BASE_IMAGE=docker.io/library/zcx-pairec-brpc-sdk:v1 \
+BASE_IMAGE=zcx-pairec-brpc-sdk:v1 \
   bash scripts/build_brpc_gateway_image.sh
 ```
 
@@ -103,7 +103,7 @@ Build the native brpc inference image with a separate tag to avoid reusing the
 already-imported gateway image:
 
 ```bash
-BASE_IMAGE=docker.io/library/zcx-pairec-brpc-sdk:v1 \
+BASE_IMAGE=zcx-pairec-brpc-sdk:v1 \
   bash scripts/build_brpc_inference_image.sh
 ```
 

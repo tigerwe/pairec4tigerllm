@@ -1,6 +1,10 @@
-ARG BASE_IMAGE=docker.io/library/zcx-pairec-image:v1.1
+ARG BASE_IMAGE=zcx-pairec-brpc-sdk:v1
 
 FROM ${BASE_IMAGE} AS build
+
+# The TRT/DataSystem base images can carry LD_PRELOAD paths from interactive
+# validation containers. brpc image builds should not inherit those paths.
+ENV LD_PRELOAD=""
 
 WORKDIR /src
 
@@ -13,6 +17,8 @@ RUN cmake -S /src/cpp/brpc_gateway -B /tmp/brpc-gateway-build \
  && cmake --install /tmp/brpc-gateway-build --prefix /opt/pairec-brpc
 
 FROM ${BASE_IMAGE}
+
+ENV LD_PRELOAD=""
 
 COPY --from=build /opt/pairec-brpc /opt/pairec-brpc
 

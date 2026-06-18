@@ -3,7 +3,7 @@ set -euo pipefail
 
 IMAGE="${1:-docker.io/library/pairec-brpc-gateway:k8s-arm64-v1}"
 TAR_PATH="${2:-/home/zcx/pairec-brpc-gateway-k8s-arm64-v1.tar}"
-BASE_IMAGE="${BASE_IMAGE:-${3:-docker.io/library/zcx-pairec-image:v1.1}}"
+BASE_IMAGE="${BASE_IMAGE:-${3:-zcx-pairec-brpc-sdk:v1}}"
 
 docker build \
   --build-arg "BASE_IMAGE=$BASE_IMAGE" \

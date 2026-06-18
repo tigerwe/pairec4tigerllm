@@ -302,7 +302,7 @@ brpc client
 构建并导入 worker1：
 
 ```bash
-BASE_IMAGE=docker.io/library/zcx-pairec-brpc-sdk:v1 \
+BASE_IMAGE=zcx-pairec-brpc-sdk:v1 \
   bash scripts/build_brpc_inference_image.sh
 
 WORKER=root@141.61.91.188 \

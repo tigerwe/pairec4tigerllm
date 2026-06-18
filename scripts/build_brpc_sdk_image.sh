@@ -2,7 +2,7 @@
 set -euo pipefail
 
 IMAGE="${1:-docker.io/library/zcx-pairec-brpc-sdk:v1}"
-BASE_IMAGE="${BASE_IMAGE:-${2:-docker.io/library/zcx-pairec-image:v1.1}}"
+BASE_IMAGE="${BASE_IMAGE:-${2:-zcx-pairec-image:v1.1}}"
 BRPC_REPO="${BRPC_REPO:-https://github.com/apache/brpc.git}"
 BRPC_REF="${BRPC_REF:-master}"
 
@@ -13,7 +13,7 @@ cleanup() {
 trap cleanup EXIT
 
 cat > "$TMP_DIR/Dockerfile" <<'EOF'
-ARG BASE_IMAGE=docker.io/library/zcx-pairec-image:v1.1
+ARG BASE_IMAGE=zcx-pairec-image:v1.1
 ARG BRPC_REPO=https://github.com/apache/brpc.git
 ARG BRPC_REF=master
 

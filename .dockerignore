@@ -1,0 +1,11 @@
+.git
+.gitignore
+
+**/__pycache__/
+**/*.pyc
+
+# DataSystem leaves Unix-domain sockets here while it is running. Legacy Docker
+# builder cannot pack sockets into the build context tar.
+datasystem/uds/
+datasystem/uds/**
+**/*.sock

@@ -3,7 +3,7 @@ set -euo pipefail
 
 CONTAINER="${1:-3d25ebe028d6}"
 IMAGE="${2:-docker.io/library/zcx-pairec-ds-runtime:v1}"
-BASE_IMAGE="${3:-docker.io/library/zcx-pairec-image:v1.1}"
+BASE_IMAGE="${3:-zcx-pairec-image:v1.1}"
 
 TMP_DIR="$(mktemp -d /tmp/pairec-ds-runtime-base.XXXXXX)"
 cleanup() {
@@ -27,7 +27,7 @@ echo "Copying patched /TensorRT-LLM from the source container..."
 docker cp "$CONTAINER:/TensorRT-LLM" "$TMP_DIR/TensorRT-LLM"
 
 cat > "$TMP_DIR/Dockerfile" <<'EOF'
-ARG BASE_IMAGE=docker.io/library/zcx-pairec-image:v1.1
+ARG BASE_IMAGE=zcx-pairec-image:v1.1
 FROM ${BASE_IMAGE}
 
 SHELL ["/bin/bash", "-lc"]
