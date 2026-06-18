@@ -1,11 +1,12 @@
 # 工作进度
 
-> 最后更新: 2026-06-18 | 当前状态: F14 brpc phase-1 native brpc/TCP gateway sidecar 已在 K8s smoke 通过：`Health` over brpc 返回 `code=200 status=healthy`，`Recommend` over brpc 返回 `code=200`、5 个 recommendations，brpc client latency `267ms`、inference `trace.total_ms=264.52ms`，说明 brpc gateway 到现有 Flask/TRT `/recommend` 闭环可用 | 下一步: 用同批请求做 HTTP `/recommend` vs brpc `Recommend` 延迟/结果等价对比，再决定 PaiRec 侧走 brpc proxy 还是继续保持 HTTP 回退
+> 最后更新: 2026-06-18 | 当前状态: F14 已从单独 brpc gateway smoke 推进到推荐系统接入代码：新增 PaiRec 侧 `brpc_http_proxy` sidecar，PaiRec 仍用原 HTTP client 调 `127.0.0.1:18090`，proxy 再用 native brpc/TCP 调 `inference:18100`；`RecommendRequest.raw_json` 支持原样透传 PaiRec `/recommend` JSON，避免 proxy 重写业务字段 | 下一步: 在 master 重建并导入 `docker.io/library/pairec-brpc-gateway:k8s-arm64-v2`，依次 apply inference brpc gateway 和 PaiRec brpc proxy manifest，执行 gateway smoke 与 PaiRec `/api/recommend` E2E smoke
 
 ## 时间线
 
 | 日期 | 进度 |
 |------|------|
+| **6/18** | **F14 brpc 引入推荐系统代码已完成第一版：`proto/recommend.proto` 的 `RecommendRequest` 增加 `raw_json`，inference 侧 `brpc_gateway` 收到 `raw_json` 时原样转发到 Flask `/recommend`；新增 `cpp/brpc_gateway/brpc_http_proxy.cpp`，在 PaiRec Pod 内监听 HTTP `:18090`，接收 PaiRec 现有 `/recommend` JSON 后通过 `RecommendService` native brpc/`baidu_std` 调 `inference:18100`；`docker/Dockerfile.brpc.gateway` 与 CMake 安装新增 `brpc_http_proxy`，`scripts/build_brpc_gateway_image.sh` 的 `ldd` 校验覆盖三个二进制；brpc 镜像默认 tag 升为 `docker.io/library/pairec-brpc-gateway:k8s-arm64-v2`，避免复用缺少 proxy 的旧 v1 镜像；新增 `k8s/configmap-pairec-brpc.yaml`、`k8s/deployment-pairec-brpc-hostpath.yaml`、`scripts/k8s_apply_pairec_brpc_hostpath.sh` 与 `scripts/test_pairec_brpc_e2e.sh`。下一步远程重建/导入 v2 镜像并跑 PaiRec E2E smoke** |
 | **6/18** | **F14 brpc phase-1 K8s smoke 验证通过：基于 `docker.io/library/pairec-brpc-gateway:k8s-arm64-v1` sidecar，`scripts/test_brpc_gateway_smoke.sh` 输出 `health ok latency_ms=2 code=200 status=healthy`；`Recommend` 输出 `recommend ok index=1 latency_ms=267 code=200 user_id=brpc_smoke_1 items=5 inference_ms=264.52`，返回 5 个推荐 item，trace 显示 `backend=trt-qwen3`、`runner_calls=1`、`runner_generate_ms=212.35ms`、`total_ms=264.52ms`、`result_cache_source=disabled`。这证明 native brpc/`baidu_std` over TCP -> brpc-gateway sidecar -> localhost Flask `/recommend` -> TRT-LLM 的 phase-1 闭环已跑通；该结果暂不代表最终性能收益，因为 gateway 内部仍转发 HTTP，下一步需要同批 HTTP vs brpc 延迟和结果等价对比** |
 | **6/16** | **补强 F14 brpc gateway 镜像构建防线：`scripts/build_brpc_gateway_image.sh` 在 docker build 后自动进入最终镜像，对 `/opt/pairec-brpc/bin/brpc_gateway` 与 `/opt/pairec-brpc/bin/brpc_recommend_client` 执行 `ldd`，若出现 `not found` 立即失败，避免再次出现编译成功但 K8s sidecar 运行时缺 `libbrpc.so`/Abseil/protobuf 等动态库导致 CrashLoopBackOff 的问题；`docs/F14_BRPC_GATEWAY_DESIGN.md` 已同步说明该校验。下一步重新构建 gateway 镜像时应先看到 ldd 全部解析成功，再执行 worker1 导入和 K8s smoke** |
 | **6/16** | **F14 brpc 环境搭建流程已固化：新增 `scripts/build_brpc_sdk_image.sh`，基于 `zcx-pairec-image:v1.1` 构建 `docker.io/library/zcx-pairec-brpc-sdk:v1`，在专用 SDK base image 中安装编译依赖并构建/安装 Apache brpc headers/libs；新增 `scripts/ship_brpc_gateway_to_worker.sh`，固化 master 构建 gateway 镜像后的 `docker save`、`scp` 到 worker1、`ctr -n k8s.io images import` 或 `docker load` 导入流程；更新 `docs/F14_BRPC_GATEWAY_DESIGN.md` 为当前 master 构建、worker1 导入的实际 K8s 镜像流转方式。新增脚本本机 `bash -n` 通过，`feature_list.json` JSON parse 和 `git diff --check` 通过。下一步在远程 master 运行 `BASE_IMAGE=docker.io/library/zcx-pairec-image:v1.1 bash scripts/build_brpc_sdk_image.sh docker.io/library/zcx-pairec-brpc-sdk:v1`、`BASE_IMAGE=docker.io/library/zcx-pairec-brpc-sdk:v1 bash scripts/build_brpc_gateway_image.sh`、`WORKER=root@141.61.91.188 bash scripts/ship_brpc_gateway_to_worker.sh`，再 apply/smoke** |
@@ -65,7 +66,7 @@
 - **PaiRec 对接**: ✅ Kafka 实时特征、生成式召回、TRT 推理和 item 映射链路已打通
 - **时延分析**: ✅ 第一版端到端 trace 和冷请求分解已验证；✅ C++ DataSystem Set/Get 阶段性统计已完成；✅ 关闭结果缓存后的 E2E pressure/replay 最终报告已生成；✅ 远端 DS Get 到本地中等样本已完成；🔄 remote H2D 与 pinned DRAM A/B 待补充
 - **K8s 部署**: ✅ ARM worker1 HTTP/TRT 基线闭环已通过：正式 inference runtime 镜像 `/health` + `/recommend` 和 PaiRec `/ping` + `/api/recommend` 均已验证；🔄 仍需将模型/数据 hostPath 替换为 PVC，并单独修 DataSystem Python/C++ KV 路径
-- **brpc 改造**: 🔄 F14 phase-1 native brpc/TCP gateway sidecar 已在 K8s smoke 通过；下一步做同批 HTTP `/recommend` vs brpc `Recommend` 延迟/结果等价对比，并设计 PaiRec 侧 `transport=http|brpc_proxy` 接入与回退策略
+- **brpc 改造**: 🔄 F14 已完成 PaiRec 侧 `brpc_http_proxy` sidecar 接入代码；待远程重建 `pairec-brpc-gateway:k8s-arm64-v2` 并在 K8s 中验证 PaiRec `/api/recommend` 经 brpc proxy 返回 `code=200`
 
 ## 6/1 探索：推理命中率优化 (5个bug修复)
 

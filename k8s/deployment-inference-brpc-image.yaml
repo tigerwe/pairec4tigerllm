@@ -102,7 +102,7 @@ spec:
             failureThreshold: 3
 
         - name: brpc-gateway
-          image: docker.io/library/pairec-brpc-gateway:k8s-arm64-v1
+          image: docker.io/library/pairec-brpc-gateway:k8s-arm64-v2
           imagePullPolicy: IfNotPresent
           args:
             - --listen_port=18100

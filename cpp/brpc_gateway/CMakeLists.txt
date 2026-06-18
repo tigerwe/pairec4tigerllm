@@ -125,4 +125,16 @@ target_link_libraries(
     Threads::Threads
 )
 
-install(TARGETS brpc_gateway brpc_recommend_client RUNTIME DESTINATION bin)
+add_executable(brpc_http_proxy brpc_http_proxy.cpp)
+target_include_directories(brpc_http_proxy PRIVATE ${BRPC_INCLUDE_DIR})
+target_link_libraries(
+  brpc_http_proxy
+  PRIVATE
+    pairec_recommend_proto
+    ${BRPC_LIBRARY}
+    ${ABSL_EXTRA_LIBS}
+    ${BRPC_EXTRA_LIBS}
+    Threads::Threads
+)
+
+install(TARGETS brpc_gateway brpc_recommend_client brpc_http_proxy RUNTIME DESTINATION bin)

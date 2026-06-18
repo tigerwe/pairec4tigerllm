@@ -15,6 +15,7 @@ message RecommendRequest {
   optional double temperature = 4 [default = 1.0];
   optional int32 beam_width = 5 [default = 1];
   optional string request_id = 6;
+  optional string raw_json = 100;
 }
 
 message TraceInfo {

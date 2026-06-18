@@ -1,0 +1,142 @@
+# ============================================
+# PaiRec Deployment + local HTTP->brpc proxy sidecar
+# ============================================
+#
+# F14 recommendation-system integration:
+# - PaiRec keeps the existing Go HTTP client and calls 127.0.0.1:18090.
+# - brpc-http-proxy sidecar receives /recommend over HTTP.
+# - brpc-http-proxy forwards over native brpc/TCP to inference:18100.
+# - inference:18100 is provided by k8s/deployment-inference-brpc-image.yaml.
+#
+# This keeps the validated PaiRec business code unchanged while introducing
+# brpc on the inter-service hop between PaiRec and inference.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pairec
+  namespace: pairec
+  labels:
+    app: pairec
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pairec
+  template:
+    metadata:
+      labels:
+        app: pairec
+    spec:
+      # The current PaiRec and brpc images are imported only on worker1.
+      nodeSelector:
+        pairec/gpu: "true"
+      containers:
+        - name: pairec
+          image: docker.io/library/pairec-server:k8s-arm64-static
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command:
+            - /app/pairec-server
+          ports:
+            - containerPort: 18080
+              name: http
+          env:
+            - name: CONFIG_PATH
+              value: /app/configs/pairec_config.json
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "8Gi"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/configs
+              readOnly: true
+            - name: data-volume
+              mountPath: /data
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 18080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 18080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+        - name: brpc-proxy
+          image: docker.io/library/pairec-brpc-gateway:k8s-arm64-v2
+          imagePullPolicy: IfNotPresent
+          command:
+            - /opt/pairec-brpc/bin/brpc_http_proxy
+          args:
+            - --listen_port=18090
+            - --brpc_server=inference:18100
+            - --brpc_timeout_ms=5000
+            - --brpc_max_retry=1
+          ports:
+            - containerPort: 18090
+              name: proxy
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          startupProbe:
+            tcpSocket:
+              port: 18090
+            periodSeconds: 5
+            failureThreshold: 24
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 18090
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 18090
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: config-volume
+          configMap:
+            name: pairec-config
+        - name: data-volume
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/data
+            type: Directory
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: pairec
+  namespace: pairec
+  labels:
+    app: pairec
+spec:
+  selector:
+    app: pairec
+  ports:
+    - name: http
+      port: 18080
+      targetPort: 18080
+  type: ClusterIP

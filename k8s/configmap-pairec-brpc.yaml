@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pairec-config
+  namespace: pairec
+data:
+  datasystem_host: "127.0.0.1"
+  datasystem_port: "31501"
+  trt_num_samples: "1"
+  trt_result_cache_enabled: "1"
+  trt_max_kv_tokens: "1024"
+  trt_scheduler_policy: "max_utilization"
+  trt_max_input_len: "64"
+
+  # F14 brpc path:
+  # PaiRec keeps its existing HTTP client, but calls a local brpc_http_proxy
+  # sidecar. The sidecar forwards over native brpc/TCP to inference:18100.
+  pairec_config.json: |
+    {
+      "RunMode": "daily",
+      "ListenConf": {
+        "HttpAddr": "0.0.0.0",
+        "HttpPort": 18080
+      },
+      "SceneConfs": {
+        "home_feed": {
+          "default": {
+            "RecallNames": ["generative_recall"]
+          }
+        }
+      },
+      "SortNames": {
+        "home_feed": ["boost_score_sort"]
+      },
+      "RecallConfs": [
+        {
+          "Name": "generative_recall",
+          "RecallType": "GenerativeRecall",
+          "RecallCount": 50,
+          "CacheTime": 300,
+          "CachePrefix": "gen_recall_",
+          "RecallAlgo": "{\"server_url\":\"http://127.0.0.1:18090\",\"timeout_ms\":5000,\"max_retries\":1,\"topk\":10,\"temperature\":1.0,\"beam_width\":1,\"history_from\":\"user_feature\",\"history_feature_name\":\"click_history\",\"history_delimiter\":\",\",\"history_max_length\":20}"
+        }
+      ],
+      "SortConfs": [
+        {
+          "Name": "boost_score_sort",
+          "SortType": "BoostScoreSort"
+        }
+      ]
+    }

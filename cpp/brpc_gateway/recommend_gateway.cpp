@@ -108,6 +108,10 @@ std::string JsonEscape(const std::string& input) {
 }
 
 std::string BuildRecommendJson(const pairec::inference::RecommendRequest& request) {
+  if (request.has_raw_json() && !request.raw_json().empty()) {
+    return request.raw_json();
+  }
+
   std::ostringstream out;
   out << "{\"user_id\":\"" << JsonEscape(request.user_id()) << "\",";
   out << "\"history\":[";
