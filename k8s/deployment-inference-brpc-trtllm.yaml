@@ -60,9 +60,11 @@ spec:
             - --trt_num_samples=1
             - --trt_top_k=50
             - --trt_temperature=0.7
-            - --trt_max_kv_tokens=1024
-            - --trt_kv_cache_host_cache_size=104857600
-            - --trt_scheduler_policy=max_utilization
+            - --trt_max_batch_size=1
+            - --trt_max_num_tokens=96
+            - --trt_max_kv_tokens=256
+            - --trt_kv_cache_host_cache_size=0
+            - --trt_scheduler_policy=guaranteed_no_evict
             - --trt_request_timeout_ms=30000
           ports:
             - containerPort: 18100
@@ -70,10 +72,10 @@ spec:
           resources:
             requests:
               cpu: "2"
-              memory: "12Gi"
+              memory: "64Gi"
             limits:
               cpu: "4"
-              memory: "24Gi"
+              memory: "128Gi"
               nvidia.com/gpu: 1
           volumeMounts:
             - name: trt-engines

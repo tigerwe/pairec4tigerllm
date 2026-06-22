@@ -44,9 +44,11 @@ struct ServerConfig {
   int trt_num_samples = 1;
   int trt_top_k = 50;
   double trt_temperature = 0.7;
-  int trt_max_kv_tokens = 1024;
+  int trt_max_batch_size = 1;
+  int trt_max_num_tokens = 96;
+  int trt_max_kv_tokens = 256;
   size_t trt_kv_cache_host_cache_size = 0;
-  std::string trt_scheduler_policy = "max_utilization";
+  std::string trt_scheduler_policy = "guaranteed_no_evict";
   int trt_request_timeout_ms = 30000;
 };
 
@@ -78,9 +80,11 @@ void PrintUsage(const char* argv0) {
       << "  --trt_num_samples=1\n"
       << "  --trt_top_k=50\n"
       << "  --trt_temperature=0.7\n"
-      << "  --trt_max_kv_tokens=1024\n"
+      << "  --trt_max_batch_size=1\n"
+      << "  --trt_max_num_tokens=96\n"
+      << "  --trt_max_kv_tokens=256\n"
       << "  --trt_kv_cache_host_cache_size=0\n"
-      << "  --trt_scheduler_policy=max_utilization|guaranteed_no_evict\n"
+      << "  --trt_scheduler_policy=guaranteed_no_evict|max_utilization\n"
       << "  --trt_request_timeout_ms=30000\n"
       << "  --idle_timeout_sec=-1\n";
 }
@@ -108,6 +112,10 @@ bool ParseArgs(int argc, char** argv, ServerConfig* config) {
       config->trt_top_k = std::atoi(value.c_str());
     } else if (ConsumeArgValue(argv[i], "trt_temperature", &value)) {
       config->trt_temperature = std::atof(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "trt_max_batch_size", &value)) {
+      config->trt_max_batch_size = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "trt_max_num_tokens", &value)) {
+      config->trt_max_num_tokens = std::atoi(value.c_str());
     } else if (ConsumeArgValue(argv[i], "trt_max_kv_tokens", &value)) {
       config->trt_max_kv_tokens = std::atoi(value.c_str());
     } else if (ConsumeArgValue(argv[i], "trt_kv_cache_host_cache_size", &value)) {
@@ -547,6 +555,14 @@ class TrtllmCppBackend final : public InferenceBackend {
           host_cache_size,
           true);
       texec::ExecutorConfig executor_config(1, scheduler_config, kv_cache_config);
+      if (config_.trt_max_batch_size > 0) {
+        executor_config.setMaxBatchSize(
+            static_cast<texec::SizeType32>(config_.trt_max_batch_size));
+      }
+      if (config_.trt_max_num_tokens > 0) {
+        executor_config.setMaxNumTokens(
+            static_cast<texec::SizeType32>(config_.trt_max_num_tokens));
+      }
       executor_.reset(new texec::Executor(
           std::filesystem::path(config_.trt_engine_dir),
           texec::ModelType::kDECODER_ONLY,
@@ -563,6 +579,8 @@ class TrtllmCppBackend final : public InferenceBackend {
               << " semantic_token_ids=" << tokenizer_.id_to_semantic.size()
               << " max_input_len=" << config_.trt_max_input_len
               << " max_new_tokens=" << config_.trt_max_new_tokens
+              << " max_batch_size=" << config_.trt_max_batch_size
+              << " max_num_tokens=" << config_.trt_max_num_tokens
               << " num_samples=" << config_.trt_num_samples
               << std::endl;
     return true;
