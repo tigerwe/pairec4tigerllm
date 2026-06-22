@@ -35,19 +35,38 @@ env -u LD_PRELOAD docker build \
   -t "$IMAGE" .
 
 echo "Checking runtime dynamic library dependencies ..."
-docker run --rm --entrypoint /bin/bash "$IMAGE" -lc '
-  set -euo pipefail
-  for bin in \
-      /opt/pairec-brpc/bin/brpc_inference_server \
-      /opt/pairec-brpc/bin/brpc_recommend_client; do
-    echo "== ldd $bin =="
-    ldd "$bin" | tee "/tmp/$(basename "$bin").ldd"
-    if grep -q "not found" "/tmp/$(basename "$bin").ldd"; then
-      echo "ERROR: missing runtime libraries for $bin" >&2
+if [ "$ENABLE_TRTLLM_CPP" = "ON" ] || [ "$ENABLE_TRTLLM_CPP" = "1" ]; then
+  docker run --rm --entrypoint /bin/bash -e LD_PRELOAD= "$IMAGE" -lc '
+    set -euo pipefail
+    unset LD_PRELOAD || true
+
+    echo "== ldd /opt/pairec-brpc/bin/brpc_recommend_client =="
+    ldd /opt/pairec-brpc/bin/brpc_recommend_client | tee /tmp/brpc_recommend_client.ldd
+    if grep -q "not found" /tmp/brpc_recommend_client.ldd; then
+      echo "ERROR: missing runtime libraries for brpc_recommend_client" >&2
       exit 1
     fi
-  done
-'
+
+    echo "== readelf -d /opt/pairec-brpc/bin/brpc_inference_server =="
+    readelf -d /opt/pairec-brpc/bin/brpc_inference_server | grep NEEDED || true
+    echo "TRT-LLM server ldd is deferred to the GPU pod because non-GPU build containers can carry placeholder libcuda/libnvidia-ml files."
+  '
+else
+  docker run --rm --entrypoint /bin/bash -e LD_PRELOAD= "$IMAGE" -lc '
+    set -euo pipefail
+    unset LD_PRELOAD || true
+    for bin in \
+        /opt/pairec-brpc/bin/brpc_inference_server \
+        /opt/pairec-brpc/bin/brpc_recommend_client; do
+      echo "== ldd $bin =="
+      ldd "$bin" | tee "/tmp/$(basename "$bin").ldd"
+      if grep -q "not found" "/tmp/$(basename "$bin").ldd"; then
+        echo "ERROR: missing runtime libraries for $bin" >&2
+        exit 1
+      fi
+    done
+  '
+fi
 
 echo "Built $IMAGE"
 echo "Base image: $BASE_IMAGE"
