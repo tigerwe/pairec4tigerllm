@@ -9,6 +9,7 @@ TRTLLM_INCLUDE_DIR="${TRTLLM_INCLUDE_DIR:-}"
 TRTLLM_LIBRARY="${TRTLLM_LIBRARY:-}"
 TRTLLM_EXTRA_LIBS="${TRTLLM_EXTRA_LIBS:-}"
 TRTLLM_CUDA_INCLUDE_DIR="${TRTLLM_CUDA_INCLUDE_DIR:-}"
+CUDA_DRIVER_LIBRARY="${CUDA_DRIVER_LIBRARY:-}"
 
 echo "Building brpc inference image"
 echo "  image:             $IMAGE"
@@ -19,15 +20,17 @@ if [ "$ENABLE_TRTLLM_CPP" = "ON" ] || [ "$ENABLE_TRTLLM_CPP" = "1" ]; then
   echo "  trtllm library:    ${TRTLLM_LIBRARY:-<auto>}"
   echo "  trtllm extra libs: ${TRTLLM_EXTRA_LIBS:-<none>}"
   echo "  cuda include:      ${TRTLLM_CUDA_INCLUDE_DIR:-<auto>}"
+  echo "  cuda driver lib:   ${CUDA_DRIVER_LIBRARY:-<auto>}"
 fi
 
-docker build \
+env -u LD_PRELOAD docker build \
   --build-arg "BASE_IMAGE=$BASE_IMAGE" \
   --build-arg "ENABLE_TRTLLM_CPP=$ENABLE_TRTLLM_CPP" \
   --build-arg "TRTLLM_INCLUDE_DIR=$TRTLLM_INCLUDE_DIR" \
   --build-arg "TRTLLM_LIBRARY=$TRTLLM_LIBRARY" \
   --build-arg "TRTLLM_EXTRA_LIBS=$TRTLLM_EXTRA_LIBS" \
   --build-arg "TRTLLM_CUDA_INCLUDE_DIR=$TRTLLM_CUDA_INCLUDE_DIR" \
+  --build-arg "CUDA_DRIVER_LIBRARY=$CUDA_DRIVER_LIBRARY" \
   -f docker/Dockerfile.brpc.gateway \
   -t "$IMAGE" .
 

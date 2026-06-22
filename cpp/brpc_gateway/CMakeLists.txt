@@ -109,10 +109,17 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     CACHE PATH
     "CUDA include directory that contains cuda_fp16.h"
   )
+  set(
+    CUDA_DRIVER_LIBRARY
+    ""
+    CACHE FILEPATH
+    "Path to libcuda.so or CUDA driver stub library"
+  )
 
   set(PAIREC_TRTLLM_INCLUDE_DIR "${TRTLLM_INCLUDE_DIR}")
   set(PAIREC_TRTLLM_LIBRARY "${TRTLLM_LIBRARY}")
   set(PAIREC_TRTLLM_CUDA_INCLUDE_DIR "${TRTLLM_CUDA_INCLUDE_DIR}")
+  set(PAIREC_CUDA_DRIVER_LIBRARY "${CUDA_DRIVER_LIBRARY}")
 
   if(NOT PAIREC_TRTLLM_INCLUDE_DIR)
     find_path(
@@ -155,6 +162,21 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     )
   endif()
 
+  if(NOT PAIREC_CUDA_DRIVER_LIBRARY)
+    find_library(
+      PAIREC_CUDA_DRIVER_LIBRARY
+      NAMES cuda
+      HINTS
+        ENV CUDA_DRIVER_LIBRARY_DIR
+        /usr/local/cuda/lib64/stubs
+        /usr/local/cuda/targets/aarch64-linux/lib/stubs
+        /usr/local/cuda/targets/x86_64-linux/lib/stubs
+        /usr/local/cuda/lib64
+        /usr/local/nvidia/lib64
+        /usr/lib64
+    )
+  endif()
+
   if(NOT PAIREC_TRTLLM_INCLUDE_DIR OR NOT EXISTS "${PAIREC_TRTLLM_INCLUDE_DIR}/tensorrt_llm/executor/executor.h")
     message(FATAL_ERROR
       "TensorRT-LLM C++ headers were not found. Set TRTLLM_INCLUDE_DIR.")
@@ -167,11 +189,16 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     message(FATAL_ERROR
       "CUDA headers were not found. Set TRTLLM_CUDA_INCLUDE_DIR.")
   endif()
+  if(NOT PAIREC_CUDA_DRIVER_LIBRARY OR NOT EXISTS "${PAIREC_CUDA_DRIVER_LIBRARY}")
+    message(FATAL_ERROR
+      "CUDA driver library was not found. Set CUDA_DRIVER_LIBRARY to libcuda.so or the CUDA stub library.")
+  endif()
 
   message(STATUS "TensorRT-LLM C++ backend enabled")
   message(STATUS "  TRTLLM_INCLUDE_DIR=${PAIREC_TRTLLM_INCLUDE_DIR}")
   message(STATUS "  TRTLLM_LIBRARY=${PAIREC_TRTLLM_LIBRARY}")
   message(STATUS "  TRTLLM_CUDA_INCLUDE_DIR=${PAIREC_TRTLLM_CUDA_INCLUDE_DIR}")
+  message(STATUS "  CUDA_DRIVER_LIBRARY=${PAIREC_CUDA_DRIVER_LIBRARY}")
 endif()
 
 set(PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/../../proto/recommend.proto)
@@ -242,6 +269,7 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     brpc_inference_server
     PRIVATE
       ${PAIREC_TRTLLM_LIBRARY}
+      ${PAIREC_CUDA_DRIVER_LIBRARY}
       ${TRTLLM_EXTRA_LIBS}
   )
   set_property(
