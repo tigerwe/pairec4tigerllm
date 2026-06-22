@@ -115,11 +115,18 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     CACHE FILEPATH
     "Path to libcuda.so or CUDA driver stub library"
   )
+  set(
+    NVML_LIBRARY
+    ""
+    CACHE FILEPATH
+    "Path to libnvidia-ml.so"
+  )
 
   set(PAIREC_TRTLLM_INCLUDE_DIR "${TRTLLM_INCLUDE_DIR}")
   set(PAIREC_TRTLLM_LIBRARY "${TRTLLM_LIBRARY}")
   set(PAIREC_TRTLLM_CUDA_INCLUDE_DIR "${TRTLLM_CUDA_INCLUDE_DIR}")
   set(PAIREC_CUDA_DRIVER_LIBRARY "${CUDA_DRIVER_LIBRARY}")
+  set(PAIREC_NVML_LIBRARY "${NVML_LIBRARY}")
 
   if(NOT PAIREC_TRTLLM_INCLUDE_DIR)
     find_path(
@@ -177,6 +184,34 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     )
   endif()
 
+  if(NOT PAIREC_NVML_LIBRARY)
+    find_library(
+      PAIREC_NVML_LIBRARY
+      NAMES nvidia-ml
+      HINTS
+        ENV NVML_LIBRARY_DIR
+        /usr/local/nvidia/lib64
+        /usr/lib64
+        /usr/lib/aarch64-linux-gnu
+        /usr/lib/x86_64-linux-gnu
+    )
+  endif()
+  if(NOT PAIREC_NVML_LIBRARY)
+    find_file(
+      PAIREC_NVML_LIBRARY
+      NAMES
+        libnvidia-ml.so
+        libnvidia-ml.so.1
+        libnvidia-ml.so.570.124.06
+      HINTS
+        ENV NVML_LIBRARY_DIR
+        /usr/local/nvidia/lib64
+        /usr/lib64
+        /usr/lib/aarch64-linux-gnu
+        /usr/lib/x86_64-linux-gnu
+    )
+  endif()
+
   if(NOT PAIREC_TRTLLM_INCLUDE_DIR OR NOT EXISTS "${PAIREC_TRTLLM_INCLUDE_DIR}/tensorrt_llm/executor/executor.h")
     message(FATAL_ERROR
       "TensorRT-LLM C++ headers were not found. Set TRTLLM_INCLUDE_DIR.")
@@ -193,12 +228,17 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     message(FATAL_ERROR
       "CUDA driver library was not found. Set CUDA_DRIVER_LIBRARY to libcuda.so or the CUDA stub library.")
   endif()
+  if(NOT PAIREC_NVML_LIBRARY OR NOT EXISTS "${PAIREC_NVML_LIBRARY}")
+    message(FATAL_ERROR
+      "NVML library was not found. Set NVML_LIBRARY to libnvidia-ml.so.")
+  endif()
 
   message(STATUS "TensorRT-LLM C++ backend enabled")
   message(STATUS "  TRTLLM_INCLUDE_DIR=${PAIREC_TRTLLM_INCLUDE_DIR}")
   message(STATUS "  TRTLLM_LIBRARY=${PAIREC_TRTLLM_LIBRARY}")
   message(STATUS "  TRTLLM_CUDA_INCLUDE_DIR=${PAIREC_TRTLLM_CUDA_INCLUDE_DIR}")
   message(STATUS "  CUDA_DRIVER_LIBRARY=${PAIREC_CUDA_DRIVER_LIBRARY}")
+  message(STATUS "  NVML_LIBRARY=${PAIREC_NVML_LIBRARY}")
 endif()
 
 set(PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/../../proto/recommend.proto)
@@ -270,6 +310,7 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     PRIVATE
       ${PAIREC_TRTLLM_LIBRARY}
       ${PAIREC_CUDA_DRIVER_LIBRARY}
+      ${PAIREC_NVML_LIBRARY}
       ${TRTLLM_EXTRA_LIBS}
   )
   set_property(

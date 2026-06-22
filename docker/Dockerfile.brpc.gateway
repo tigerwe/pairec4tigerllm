@@ -5,6 +5,7 @@ ARG TRTLLM_LIBRARY=
 ARG TRTLLM_EXTRA_LIBS=
 ARG TRTLLM_CUDA_INCLUDE_DIR=
 ARG CUDA_DRIVER_LIBRARY=
+ARG NVML_LIBRARY=
 
 FROM ${BASE_IMAGE} AS build
 
@@ -14,6 +15,7 @@ ARG TRTLLM_LIBRARY
 ARG TRTLLM_EXTRA_LIBS
 ARG TRTLLM_CUDA_INCLUDE_DIR
 ARG CUDA_DRIVER_LIBRARY
+ARG NVML_LIBRARY
 
 # The TRT/DataSystem base images can carry LD_PRELOAD paths from interactive
 # validation containers. brpc image builds should not inherit those paths.
@@ -33,6 +35,7 @@ RUN unset LD_PRELOAD \
       -DTRTLLM_EXTRA_LIBS="${TRTLLM_EXTRA_LIBS}" \
       -DTRTLLM_CUDA_INCLUDE_DIR="${TRTLLM_CUDA_INCLUDE_DIR}" \
       -DCUDA_DRIVER_LIBRARY="${CUDA_DRIVER_LIBRARY}" \
+      -DNVML_LIBRARY="${NVML_LIBRARY}" \
  && cmake --build /tmp/brpc-gateway-build -j"$(nproc)" \
  && cmake --install /tmp/brpc-gateway-build --prefix /opt/pairec-brpc
 

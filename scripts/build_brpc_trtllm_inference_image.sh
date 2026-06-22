@@ -10,6 +10,7 @@ export TRTLLM_INCLUDE_DIR="${TRTLLM_INCLUDE_DIR:-/TensorRT-LLM/cpp/include}"
 export TRTLLM_LIBRARY="${TRTLLM_LIBRARY:-/TensorRT-LLM/cpp/build/tensorrt_llm/libtensorrt_llm.so}"
 export TRTLLM_CUDA_INCLUDE_DIR="${TRTLLM_CUDA_INCLUDE_DIR:-/usr/local/cuda/include}"
 export CUDA_DRIVER_LIBRARY="${CUDA_DRIVER_LIBRARY:-/usr/local/cuda/lib64/stubs/libcuda.so}"
+export NVML_LIBRARY="${NVML_LIBRARY:-/usr/lib64/libnvidia-ml.so.570.124.06}"
 
 echo "Building native brpc TensorRT-LLM inference image"
 echo "  image:      $IMAGE"
