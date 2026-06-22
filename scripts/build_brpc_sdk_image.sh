@@ -5,6 +5,18 @@ IMAGE="${1:-docker.io/library/zcx-pairec-brpc-sdk:v1}"
 BASE_IMAGE="${BASE_IMAGE:-${2:-zcx-pairec-image:v1.1}}"
 BRPC_REPO="${BRPC_REPO:-https://github.com/apache/brpc.git}"
 BRPC_REF="${BRPC_REF:-master}"
+IP="${IP:-}"
+
+if [ -n "$IP" ]; then
+  HTTP_PROXY="${HTTP_PROXY:-http://$IP:3128}"
+  HTTPS_PROXY="${HTTPS_PROXY:-http://$IP:3128}"
+  http_proxy="${http_proxy:-http://$IP:3128}"
+  https_proxy="${https_proxy:-http://$IP:3128}"
+  NO_PROXY="${NO_PROXY:-127.0.0.1,localhost,local,.local}"
+  no_proxy="${no_proxy:-127.0.0.1,localhost,local,.local}"
+  GIT_HTTP_PROXY="${GIT_HTTP_PROXY:-http://$IP:3128}"
+  GIT_HTTPS_PROXY="${GIT_HTTPS_PROXY:-https://$IP:3128}"
+fi
 
 TMP_DIR="$(mktemp -d /tmp/pairec-brpc-sdk.XXXXXX)"
 cleanup() {
@@ -22,6 +34,8 @@ ARG NO_PROXY=
 ARG http_proxy=
 ARG https_proxy=
 ARG no_proxy=
+ARG GIT_HTTP_PROXY=
+ARG GIT_HTTPS_PROXY=
 
 FROM ${BASE_IMAGE}
 
@@ -35,6 +49,8 @@ ARG NO_PROXY
 ARG http_proxy
 ARG https_proxy
 ARG no_proxy
+ARG GIT_HTTP_PROXY
+ARG GIT_HTTPS_PROXY
 ENV LD_PRELOAD=""
 ENV HTTP_PROXY="${HTTP_PROXY}" \
     HTTPS_PROXY="${HTTPS_PROXY}" \
@@ -42,6 +58,13 @@ ENV HTTP_PROXY="${HTTP_PROXY}" \
     http_proxy="${http_proxy}" \
     https_proxy="${https_proxy}" \
     no_proxy="${no_proxy}"
+
+RUN if [ -n "${GIT_HTTP_PROXY}" ]; then \
+      git config --global http.proxy "${GIT_HTTP_PROXY}"; \
+    fi && \
+    if [ -n "${GIT_HTTPS_PROXY}" ]; then \
+      git config --global https.proxy "${GIT_HTTPS_PROXY}"; \
+    fi
 
 RUN if command -v dnf >/dev/null 2>&1; then \
       dnf install -y git gcc gcc-c++ make cmake openssl-devel gflags-devel protobuf-devel protobuf-compiler leveldb-devel zlib-devel && dnf clean all; \
@@ -78,6 +101,9 @@ echo "  brpc repo:  $BRPC_REPO"
 echo "  brpc ref:   $BRPC_REF"
 if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}${http_proxy:-}${https_proxy:-}" ]; then
   echo "  proxy:      enabled"
+  if [ -n "$IP" ]; then
+    echo "  proxy ip:   $IP"
+  fi
 fi
 
 docker build \
@@ -90,6 +116,8 @@ docker build \
   --build-arg "http_proxy=${http_proxy:-}" \
   --build-arg "https_proxy=${https_proxy:-}" \
   --build-arg "no_proxy=${no_proxy:-}" \
+  --build-arg "GIT_HTTP_PROXY=${GIT_HTTP_PROXY:-}" \
+  --build-arg "GIT_HTTPS_PROXY=${GIT_HTTPS_PROXY:-}" \
   -f "$TMP_DIR/Dockerfile" \
   -t "$IMAGE" \
   "$TMP_DIR"
