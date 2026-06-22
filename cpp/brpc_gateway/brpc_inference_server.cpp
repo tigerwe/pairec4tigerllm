@@ -25,6 +25,7 @@
 #include "recommend.pb.h"
 
 #if defined(PAIREC_ENABLE_TRTLLM_CPP) && PAIREC_ENABLE_TRTLLM_CPP
+#include <NvInferRuntime.h>
 #include <tensorrt_llm/executor/executor.h>
 #include <tensorrt_llm/executor/types.h>
 #include <tensorrt_llm/plugins/api/tllmPlugin.h>
@@ -51,6 +52,7 @@ struct ServerConfig {
   size_t trt_kv_cache_host_cache_size = 0;
   std::string trt_scheduler_policy = "guaranteed_no_evict";
   int trt_request_timeout_ms = 30000;
+  bool trt_plugin_preflight_only = false;
 };
 
 struct Candidate {
@@ -87,7 +89,14 @@ void PrintUsage(const char* argv0) {
       << "  --trt_kv_cache_host_cache_size=0\n"
       << "  --trt_scheduler_policy=guaranteed_no_evict|max_utilization\n"
       << "  --trt_request_timeout_ms=30000\n"
+      << "  --trt_plugin_preflight_only=0\n"
       << "  --idle_timeout_sec=-1\n";
+}
+
+bool ParseBoolFlag(const std::string& value) {
+  return value == "1" || value == "true" || value == "TRUE" ||
+         value == "on" || value == "ON" || value == "yes" ||
+         value == "YES";
 }
 
 bool ParseArgs(int argc, char** argv, ServerConfig* config) {
@@ -126,6 +135,10 @@ bool ParseArgs(int argc, char** argv, ServerConfig* config) {
       config->trt_scheduler_policy = value;
     } else if (ConsumeArgValue(argv[i], "trt_request_timeout_ms", &value)) {
       config->trt_request_timeout_ms = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "trt_plugin_preflight_only", &value)) {
+      config->trt_plugin_preflight_only = ParseBoolFlag(value);
+    } else if (std::string(argv[i]) == "--trt_plugin_preflight_only") {
+      config->trt_plugin_preflight_only = true;
     } else if (ConsumeArgValue(argv[i], "idle_timeout_sec", &value)) {
       config->idle_timeout_sec = std::atoi(value.c_str());
     } else if (std::string(argv[i]) == "--help") {
@@ -192,6 +205,75 @@ uint64_t StableRequestHash(const pairec::inference::RecommendRequest& request) {
   }
   return h;
 }
+
+#if defined(PAIREC_ENABLE_TRTLLM_CPP) && PAIREC_ENABLE_TRTLLM_CPP
+bool RunTrtLlmPluginPreflight(std::string* error) {
+  if (!initTrtLlmPlugins()) {
+    *error = "failed to initialize TensorRT-LLM plugins";
+    return false;
+  }
+
+  std::int32_t legacy_creator_count = 0;
+  auto legacy_creators = getPluginCreators(legacy_creator_count);
+  std::int32_t v3_creator_count = 0;
+  getCreators(v3_creator_count);
+
+  std::ostringstream names;
+  std::unordered_set<std::string> creator_names;
+  for (std::int32_t i = 0; i < legacy_creator_count; ++i) {
+    const auto* creator = legacy_creators[i];
+    if (creator == nullptr) {
+      continue;
+    }
+    const std::string name = creator->getPluginName();
+    creator_names.insert(name);
+    if (i != 0) {
+      names << ",";
+    }
+    names << name << ":v" << creator->getPluginVersion();
+  }
+
+  const int total_creator_count = legacy_creator_count + v3_creator_count;
+  std::cout << "[brpc-inference] trtllm plugin preflight ok"
+            << " namespace=tensorrt_llm"
+            << " legacy_creators=" << legacy_creator_count
+            << " v3_creators=" << v3_creator_count
+            << " creators=" << names.str()
+            << std::endl;
+
+  if (total_creator_count <= 0) {
+    *error = "TensorRT-LLM plugin library registered zero plugin creators";
+    return false;
+  }
+
+  std::vector<std::string> missing_required;
+  const char* required_creators[] = {"Gemm", "GPTAttention", "GemmSwiglu"};
+  for (const char* required : required_creators) {
+    if (creator_names.find(required) == creator_names.end()) {
+      missing_required.emplace_back(required);
+    }
+  }
+  if (!missing_required.empty()) {
+    std::ostringstream missing;
+    for (size_t i = 0; i < missing_required.size(); ++i) {
+      if (i != 0) {
+        missing << ",";
+      }
+      missing << missing_required[i];
+    }
+    *error = "TensorRT-LLM plugin registry is missing required creators: " +
+             missing.str();
+    return false;
+  }
+  return true;
+}
+#else
+bool RunTrtLlmPluginPreflight(std::string* error) {
+  *error = "trtllm_cpp backend is not linked; rebuild with "
+           "-DPAIREC_ENABLE_TRTLLM_CPP=ON";
+  return false;
+}
+#endif
 
 class SemanticMapParser {
  public:
@@ -537,8 +619,7 @@ class TrtllmCppBackend final : public InferenceBackend {
     }
 
     try {
-      if (!initTrtLlmPlugins()) {
-        *error = "failed to initialize TensorRT-LLM plugins";
+      if (!RunTrtLlmPluginPreflight(error)) {
         return false;
       }
 
@@ -1000,6 +1081,15 @@ int main(int argc, char** argv) {
   ServerConfig config;
   if (!ParseArgs(argc, argv, &config)) {
     return 2;
+  }
+
+  if (config.trt_plugin_preflight_only) {
+    std::string error;
+    if (!RunTrtLlmPluginPreflight(&error)) {
+      std::cerr << "TensorRT-LLM plugin preflight failed: " << error << std::endl;
+      return 1;
+    }
+    return 0;
   }
 
   std::unique_ptr<InferenceBackend> backend = CreateBackend(config.backend);
