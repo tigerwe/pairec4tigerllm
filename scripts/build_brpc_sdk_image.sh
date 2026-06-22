@@ -17,6 +17,9 @@ if [ -n "$IP" ]; then
   GIT_HTTP_PROXY="${GIT_HTTP_PROXY:-http://$IP:3128}"
   GIT_HTTPS_PROXY="${GIT_HTTPS_PROXY:-https://$IP:3128}"
 fi
+GIT_HTTP_PROXY="${GIT_HTTP_PROXY:-${HTTP_PROXY:-${http_proxy:-}}}"
+GIT_HTTPS_PROXY="${GIT_HTTPS_PROXY:-${HTTPS_PROXY:-${https_proxy:-}}}"
+DOCKER_BUILD_NETWORK="${DOCKER_BUILD_NETWORK:-host}"
 
 TMP_DIR="$(mktemp -d /tmp/pairec-brpc-sdk.XXXXXX)"
 cleanup() {
@@ -59,14 +62,16 @@ ENV HTTP_PROXY="${HTTP_PROXY}" \
     https_proxy="${https_proxy}" \
     no_proxy="${no_proxy}"
 
-RUN if [ -n "${GIT_HTTP_PROXY}" ]; then \
+RUN unset LD_PRELOAD && \
+    if [ -n "${GIT_HTTP_PROXY}" ]; then \
       git config --global http.proxy "${GIT_HTTP_PROXY}"; \
     fi && \
     if [ -n "${GIT_HTTPS_PROXY}" ]; then \
       git config --global https.proxy "${GIT_HTTPS_PROXY}"; \
     fi
 
-RUN if command -v dnf >/dev/null 2>&1; then \
+RUN unset LD_PRELOAD && \
+    if command -v dnf >/dev/null 2>&1; then \
       dnf install -y git gcc gcc-c++ make cmake openssl-devel gflags-devel protobuf-devel protobuf-compiler leveldb-devel zlib-devel && dnf clean all; \
     elif command -v yum >/dev/null 2>&1; then \
       yum install -y git gcc gcc-c++ make cmake openssl-devel gflags-devel protobuf-devel protobuf-compiler leveldb-devel zlib-devel && yum clean all; \
@@ -76,9 +81,11 @@ RUN if command -v dnf >/dev/null 2>&1; then \
       echo "No supported package manager found" >&2; exit 1; \
     fi
 
-RUN git clone --depth=1 --branch "${BRPC_REF}" "${BRPC_REPO}" /tmp/brpc
+RUN unset LD_PRELOAD && \
+    env -u LD_PRELOAD git clone --depth=1 --branch "${BRPC_REF}" "${BRPC_REPO}" /tmp/brpc
 
-RUN cmake -S /tmp/brpc -B /tmp/brpc/build \
+RUN unset LD_PRELOAD && \
+    cmake -S /tmp/brpc -B /tmp/brpc/build \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=ON \
       -DBUILD_BRPC_TOOLS=OFF \
@@ -99,6 +106,7 @@ echo "  image:      $IMAGE"
 echo "  base image: $BASE_IMAGE"
 echo "  brpc repo:  $BRPC_REPO"
 echo "  brpc ref:   $BRPC_REF"
+echo "  network:    $DOCKER_BUILD_NETWORK"
 if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}${http_proxy:-}${https_proxy:-}" ]; then
   echo "  proxy:      enabled"
   if [ -n "$IP" ]; then
@@ -106,7 +114,8 @@ if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}${http_proxy:-}${https_proxy:-}" ]; then
   fi
 fi
 
-docker build \
+env -u LD_PRELOAD docker build \
+  --network "$DOCKER_BUILD_NETWORK" \
   --build-arg "BASE_IMAGE=$BASE_IMAGE" \
   --build-arg "BRPC_REPO=$BRPC_REPO" \
   --build-arg "BRPC_REF=$BRPC_REF" \
