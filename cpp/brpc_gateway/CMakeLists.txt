@@ -98,6 +98,12 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     "Path to libtensorrt_llm.so"
   )
   set(
+    TRTLLM_PLUGIN_LIBRARY
+    ""
+    CACHE FILEPATH
+    "Path to libnvinfer_plugin_tensorrt_llm.so"
+  )
+  set(
     TRTLLM_EXTRA_LIBS
     ""
     CACHE STRING
@@ -124,6 +130,7 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
 
   set(PAIREC_TRTLLM_INCLUDE_DIR "${TRTLLM_INCLUDE_DIR}")
   set(PAIREC_TRTLLM_LIBRARY "${TRTLLM_LIBRARY}")
+  set(PAIREC_TRTLLM_PLUGIN_LIBRARY "${TRTLLM_PLUGIN_LIBRARY}")
   set(PAIREC_TRTLLM_CUDA_INCLUDE_DIR "${TRTLLM_CUDA_INCLUDE_DIR}")
   set(PAIREC_CUDA_DRIVER_LIBRARY "${CUDA_DRIVER_LIBRARY}")
 
@@ -149,6 +156,21 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
         /TensorRT-LLM/cpp/build/tensorrt_llm
         /home/TensorRT-LLM/cpp/build/tensorrt_llm
         /home/zcx/TensorRT-LLM/cpp/build/tensorrt_llm
+        /usr/local/lib
+        /usr/local/lib64
+        /usr/lib64
+    )
+  endif()
+
+  if(NOT PAIREC_TRTLLM_PLUGIN_LIBRARY)
+    find_library(
+      PAIREC_TRTLLM_PLUGIN_LIBRARY
+      NAMES nvinfer_plugin_tensorrt_llm
+      HINTS
+        ENV TRTLLM_PLUGIN_LIBRARY_DIR
+        /TensorRT-LLM/cpp/build/tensorrt_llm/plugins
+        /home/TensorRT-LLM/cpp/build/tensorrt_llm/plugins
+        /home/zcx/TensorRT-LLM/cpp/build/tensorrt_llm/plugins
         /usr/local/lib
         /usr/local/lib64
         /usr/lib64
@@ -191,6 +213,10 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     message(FATAL_ERROR
       "libtensorrt_llm.so was not found. Set TRTLLM_LIBRARY.")
   endif()
+  if(NOT PAIREC_TRTLLM_PLUGIN_LIBRARY OR NOT EXISTS "${PAIREC_TRTLLM_PLUGIN_LIBRARY}")
+    message(FATAL_ERROR
+      "libnvinfer_plugin_tensorrt_llm.so was not found. Set TRTLLM_PLUGIN_LIBRARY.")
+  endif()
   if(NOT PAIREC_TRTLLM_CUDA_INCLUDE_DIR OR NOT EXISTS "${PAIREC_TRTLLM_CUDA_INCLUDE_DIR}/cuda_fp16.h")
     message(FATAL_ERROR
       "CUDA headers were not found. Set TRTLLM_CUDA_INCLUDE_DIR.")
@@ -203,6 +229,7 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
   message(STATUS "TensorRT-LLM C++ backend enabled")
   message(STATUS "  TRTLLM_INCLUDE_DIR=${PAIREC_TRTLLM_INCLUDE_DIR}")
   message(STATUS "  TRTLLM_LIBRARY=${PAIREC_TRTLLM_LIBRARY}")
+  message(STATUS "  TRTLLM_PLUGIN_LIBRARY=${PAIREC_TRTLLM_PLUGIN_LIBRARY}")
   message(STATUS "  TRTLLM_CUDA_INCLUDE_DIR=${PAIREC_TRTLLM_CUDA_INCLUDE_DIR}")
   message(STATUS "  CUDA_DRIVER_LIBRARY=${PAIREC_CUDA_DRIVER_LIBRARY}")
   message(STATUS "  TRTLLM_ALLOW_SHLIB_UNDEFINED=${TRTLLM_ALLOW_SHLIB_UNDEFINED}")
@@ -265,6 +292,7 @@ target_link_libraries(
 
 if(PAIREC_ENABLE_TRTLLM_CPP)
   get_filename_component(PAIREC_TRTLLM_LIBRARY_DIR "${PAIREC_TRTLLM_LIBRARY}" DIRECTORY)
+  get_filename_component(PAIREC_TRTLLM_PLUGIN_LIBRARY_DIR "${PAIREC_TRTLLM_PLUGIN_LIBRARY}" DIRECTORY)
   target_compile_definitions(brpc_inference_server PRIVATE PAIREC_ENABLE_TRTLLM_CPP=1)
   target_include_directories(
     brpc_inference_server
@@ -276,6 +304,7 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     brpc_inference_server
     PRIVATE
       ${PAIREC_TRTLLM_LIBRARY}
+      ${PAIREC_TRTLLM_PLUGIN_LIBRARY}
       ${PAIREC_CUDA_DRIVER_LIBRARY}
       ${TRTLLM_EXTRA_LIBS}
   )
@@ -285,7 +314,7 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
   set_property(
     TARGET brpc_inference_server
     PROPERTY INSTALL_RPATH
-      "$ORIGIN/../lib;${PAIREC_TRTLLM_LIBRARY_DIR}"
+      "$ORIGIN/../lib;${PAIREC_TRTLLM_LIBRARY_DIR};${PAIREC_TRTLLM_PLUGIN_LIBRARY_DIR}"
   )
 endif()
 

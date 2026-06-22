@@ -27,6 +27,7 @@
 #if defined(PAIREC_ENABLE_TRTLLM_CPP) && PAIREC_ENABLE_TRTLLM_CPP
 #include <tensorrt_llm/executor/executor.h>
 #include <tensorrt_llm/executor/types.h>
+#include <tensorrt_llm/plugins/api/tllmPlugin.h>
 #endif
 
 namespace {
@@ -536,6 +537,11 @@ class TrtllmCppBackend final : public InferenceBackend {
     }
 
     try {
+      if (!initTrtLlmPlugins()) {
+        *error = "failed to initialize TensorRT-LLM plugins";
+        return false;
+      }
+
       namespace texec = tensorrt_llm::executor;
       texec::SchedulerConfig scheduler_config(ParseSchedulerPolicy(config_.trt_scheduler_policy));
       std::optional<texec::SizeType32> max_kv_tokens = std::nullopt;

@@ -7,6 +7,7 @@ BASE_IMAGE="${BASE_IMAGE:-${3:-zcx-pairec-brpc-sdk:v1}}"
 ENABLE_TRTLLM_CPP="${ENABLE_TRTLLM_CPP:-OFF}"
 TRTLLM_INCLUDE_DIR="${TRTLLM_INCLUDE_DIR:-}"
 TRTLLM_LIBRARY="${TRTLLM_LIBRARY:-}"
+TRTLLM_PLUGIN_LIBRARY="${TRTLLM_PLUGIN_LIBRARY:-}"
 TRTLLM_EXTRA_LIBS="${TRTLLM_EXTRA_LIBS:-}"
 TRTLLM_CUDA_INCLUDE_DIR="${TRTLLM_CUDA_INCLUDE_DIR:-}"
 CUDA_DRIVER_LIBRARY="${CUDA_DRIVER_LIBRARY:-}"
@@ -18,6 +19,7 @@ echo "  trtllm cpp:        $ENABLE_TRTLLM_CPP"
 if [ "$ENABLE_TRTLLM_CPP" = "ON" ] || [ "$ENABLE_TRTLLM_CPP" = "1" ]; then
   echo "  trtllm include:    ${TRTLLM_INCLUDE_DIR:-<auto>}"
   echo "  trtllm library:    ${TRTLLM_LIBRARY:-<auto>}"
+  echo "  trtllm plugin:     ${TRTLLM_PLUGIN_LIBRARY:-<auto>}"
   echo "  trtllm extra libs: ${TRTLLM_EXTRA_LIBS:-<none>}"
   echo "  cuda include:      ${TRTLLM_CUDA_INCLUDE_DIR:-<auto>}"
   echo "  cuda driver lib:   ${CUDA_DRIVER_LIBRARY:-<auto>}"
@@ -28,6 +30,7 @@ env -u LD_PRELOAD docker build \
   --build-arg "ENABLE_TRTLLM_CPP=$ENABLE_TRTLLM_CPP" \
   --build-arg "TRTLLM_INCLUDE_DIR=$TRTLLM_INCLUDE_DIR" \
   --build-arg "TRTLLM_LIBRARY=$TRTLLM_LIBRARY" \
+  --build-arg "TRTLLM_PLUGIN_LIBRARY=$TRTLLM_PLUGIN_LIBRARY" \
   --build-arg "TRTLLM_EXTRA_LIBS=$TRTLLM_EXTRA_LIBS" \
   --build-arg "TRTLLM_CUDA_INCLUDE_DIR=$TRTLLM_CUDA_INCLUDE_DIR" \
   --build-arg "CUDA_DRIVER_LIBRARY=$CUDA_DRIVER_LIBRARY" \
