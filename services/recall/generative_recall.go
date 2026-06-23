@@ -66,6 +66,10 @@ type GenerativeRecall struct {
 // recallConfigJSON 用于从 RecallAlgo 字段解析配置
 type recallConfigJSON struct {
 	ServerURL          string              `json:"server_url"`
+	Protocol           string              `json:"protocol"`
+	BRPCEndpoint       string              `json:"brpc_endpoint"`
+	BRPCServiceName    string              `json:"brpc_service_name"`
+	BRPCFallbackToHTTP *bool               `json:"brpc_fallback_to_http"`
 	TimeoutMs          int                 `json:"timeout_ms"`
 	MaxRetries         int                 `json:"max_retries"`
 	TopK               int                 `json:"topk"`
@@ -90,10 +94,18 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 
 	if conf.RecallAlgo != "" {
 		if err := json.Unmarshal([]byte(conf.RecallAlgo), &algoConf); err == nil {
-			writeDebugLog(" Parsed RecallAlgo: server_url=%s, history_feature_name=%s\n",
-				algoConf.ServerURL, algoConf.HistoryFeatureName)
+			brpcFallback := true
+			if algoConf.BRPCFallbackToHTTP != nil {
+				brpcFallback = *algoConf.BRPCFallbackToHTTP
+			}
+			writeDebugLog(" Parsed RecallAlgo: protocol=%s, server_url=%s, brpc_endpoint=%s, history_feature_name=%s\n",
+				algoConf.Protocol, algoConf.ServerURL, algoConf.BRPCEndpoint, algoConf.HistoryFeatureName)
 			genConfig = &config.GenerativeRecallConfig{
 				ServerURL:          algoConf.ServerURL,
+				Protocol:           algoConf.Protocol,
+				BRPCEndpoint:       algoConf.BRPCEndpoint,
+				BRPCServiceName:    algoConf.BRPCServiceName,
+				BRPCFallbackToHTTP: brpcFallback,
 				Timeout:            time.Duration(algoConf.TimeoutMs) * time.Millisecond,
 				MaxRetries:         algoConf.MaxRetries,
 				TopK:               algoConf.TopK,
@@ -133,7 +145,8 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 	}
 
 	// 创建客户端
-	writeDebugLog(" Creating TRTLLMClient with server_url=%s\n", genConfig.ServerURL)
+	writeDebugLog(" Creating TRTLLMClient with protocol=%s server_url=%s brpc_endpoint=%s\n",
+		genConfig.Protocol, genConfig.ServerURL, genConfig.BRPCEndpoint)
 	client, err := NewTRTLLMClient(genConfig)
 	if err != nil {
 		// 客户端创建失败时 panic，在服务启动时就能发现问题

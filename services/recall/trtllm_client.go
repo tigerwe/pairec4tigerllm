@@ -70,6 +70,7 @@ type RecommendResponse struct {
 type TRTLLMClient struct {
 	config     *config.GenerativeRecallConfig
 	httpClient *http.Client
+	brpcClient *BRPCRecommendClient
 }
 
 // NewTRTLLMClient 创建客户端.
@@ -78,16 +79,26 @@ func NewTRTLLMClient(cfg *config.GenerativeRecallConfig) (*TRTLLMClient, error) 
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
+	var brpcClient *BRPCRecommendClient
+	if cfg.Protocol == "brpc" {
+		client, err := NewBRPCRecommendClient(cfg.BRPCEndpoint, cfg.BRPCServiceName, cfg.Timeout, cfg.MaxRetries)
+		if err != nil {
+			return nil, fmt.Errorf("create brpc client failed: %w", err)
+		}
+		brpcClient = client
+	}
+
 	return &TRTLLMClient{
 		config: cfg,
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
 		},
+		brpcClient: brpcClient,
 	}, nil
 }
 
 // Recommend 获取推荐.
-// traceID 用于端到端追踪，会通过 HTTP Header 透传给推理服务.
+// traceID 用于端到端追踪，HTTP 通过 Header 透传，brpc 通过 request_id 字段透传.
 func (c *TRTLLMClient) Recommend(req *RecommendRequest, traceID string) (*RecommendResponse, error) {
 	// 设置默认值
 	if req.Topk == 0 {
@@ -100,6 +111,26 @@ func (c *TRTLLMClient) Recommend(req *RecommendRequest, traceID string) (*Recomm
 		req.BeamWidth = c.config.BeamWidth
 	}
 
+	if c.config.Protocol == "brpc" {
+		resp, err := c.brpcClient.Recommend(context.Background(), req, traceID)
+		if err == nil {
+			return resp, nil
+		}
+		if !c.config.BRPCFallbackToHTTP {
+			return nil, fmt.Errorf("brpc request failed: %w", err)
+		}
+
+		httpResp, httpErr := c.recommendHTTP(req, traceID)
+		if httpErr != nil {
+			return nil, fmt.Errorf("brpc request failed: %v; http fallback failed: %w", err, httpErr)
+		}
+		return httpResp, nil
+	}
+
+	return c.recommendHTTP(req, traceID)
+}
+
+func (c *TRTLLMClient) recommendHTTP(req *RecommendRequest, traceID string) (*RecommendResponse, error) {
 	// 序列化请求
 	jsonData, err := json.Marshal(req)
 	if err != nil {
@@ -168,6 +199,18 @@ func (c *TRTLLMClient) Recommend(req *RecommendRequest, traceID string) (*Recomm
 
 // HealthCheck 健康检查.
 func (c *TRTLLMClient) HealthCheck() bool {
+	if c.config.Protocol == "brpc" && c.brpcClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		resp, err := c.brpcClient.HealthCheck(ctx)
+		cancel()
+		if err == nil && resp.Code == 200 {
+			return true
+		}
+		if !c.config.BRPCFallbackToHTTP {
+			return false
+		}
+	}
+
 	url := c.config.ServerURL + "/health"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
