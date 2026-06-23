@@ -1,0 +1,18 @@
+# Build a PaiRec runtime image from a prebuilt static Go binary.
+#
+# This path avoids pulling golang/alpine builder images. It is useful on the
+# ARM master node where docker registry mirrors can return corrupt layers.
+#
+# Usage:
+#   bash scripts/build_pairec_binary_image.sh docker.io/library/pairec-server:k8s-arm64-brpc-v1
+
+ARG RUNTIME_BASE=docker.io/library/pairec-server:k8s-arm64-static
+FROM ${RUNTIME_BASE}
+
+WORKDIR /app
+
+COPY .docker-build/pairec-server /app/pairec-server
+COPY configs/ /app/configs/
+COPY docker/entrypoint-pairec.sh /app/entrypoint.sh
+
+RUN chmod +x /app/pairec-server /app/entrypoint.sh
