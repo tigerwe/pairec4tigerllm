@@ -17,6 +17,8 @@ const (
 	brpcMagic          = "PRPC"
 	brpcHeaderSize     = 12
 	brpcNoCompression  = int32(0)
+	brpcContentTypePB  = int32(0)
+	brpcChecksumNone   = int32(0)
 	brpcMaxBodySize    = 32 << 20
 	brpcRetrySleepBase = 50 * time.Millisecond
 )
@@ -111,7 +113,9 @@ func (c *BRPCRecommendClient) callOnce(ctx context.Context, method string, reque
 	meta := &brpcRPCMeta{
 		CompressType:   proto.Int32(brpcNoCompression),
 		CorrelationID:  proto.Int64(correlationID),
-		AttachmentSize: proto.Int64(0),
+		AttachmentSize: proto.Int32(0),
+		ContentType:    proto.Int32(brpcContentTypePB),
+		ChecksumType:   proto.Int32(brpcChecksumNone),
 		Request: &brpcRequestMeta{
 			ServiceName: proto.String(c.service),
 			MethodName:  proto.String(method),
@@ -206,7 +210,7 @@ func readBRPCResponse(reader io.Reader, expectedCorrelationID int64) ([]byte, er
 		return nil, fmt.Errorf("brpc server error %d: %s", int32Value(meta.Response.ErrorCode), stringValue(meta.Response.ErrorText))
 	}
 
-	attachmentSize := int64Value(meta.AttachmentSize)
+	attachmentSize := int64(int32Value(meta.AttachmentSize))
 	if attachmentSize < 0 || uint64(attachmentSize) > uint64(bodySize-metaSize) {
 		return nil, fmt.Errorf("invalid brpc attachment size: attachment=%d body=%d meta=%d", attachmentSize, bodySize, metaSize)
 	}

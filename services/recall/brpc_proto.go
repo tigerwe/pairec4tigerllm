@@ -5,11 +5,13 @@ import proto "github.com/gogo/protobuf/proto"
 const brpcDefaultServiceName = "pairec.inference.RecommendService"
 
 type brpcRPCMeta struct {
-	CompressType   *int32            `protobuf:"varint,1,opt,name=compress_type,json=compressType,def=0" json:"compress_type,omitempty"`
-	CorrelationID  *int64            `protobuf:"varint,2,opt,name=correlation_id,json=correlationId" json:"correlation_id,omitempty"`
-	AttachmentSize *int64            `protobuf:"varint,3,opt,name=attachment_size,json=attachmentSize" json:"attachment_size,omitempty"`
-	Request        *brpcRequestMeta  `protobuf:"bytes,7,opt,name=request" json:"request,omitempty"`
-	Response       *brpcResponseMeta `protobuf:"bytes,8,opt,name=response" json:"response,omitempty"`
+	Request        *brpcRequestMeta  `protobuf:"bytes,1,opt,name=request" json:"request,omitempty"`
+	Response       *brpcResponseMeta `protobuf:"bytes,2,opt,name=response" json:"response,omitempty"`
+	CompressType   *int32            `protobuf:"varint,3,opt,name=compress_type,json=compressType,def=0" json:"compress_type,omitempty"`
+	CorrelationID  *int64            `protobuf:"varint,4,opt,name=correlation_id,json=correlationId" json:"correlation_id,omitempty"`
+	AttachmentSize *int32            `protobuf:"varint,5,opt,name=attachment_size,json=attachmentSize" json:"attachment_size,omitempty"`
+	ContentType    *int32            `protobuf:"varint,10,opt,name=content_type,json=contentType,def=0" json:"content_type,omitempty"`
+	ChecksumType   *int32            `protobuf:"varint,11,opt,name=checksum_type,json=checksumType,def=0" json:"checksum_type,omitempty"`
 }
 
 func (m *brpcRPCMeta) Reset()         { *m = brpcRPCMeta{} }

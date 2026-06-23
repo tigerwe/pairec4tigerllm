@@ -73,7 +73,9 @@ func TestBRPCFrameRoundTrip(t *testing.T) {
 	meta := &brpcRPCMeta{
 		CompressType:   proto.Int32(brpcNoCompression),
 		CorrelationID:  proto.Int64(42),
-		AttachmentSize: proto.Int64(0),
+		AttachmentSize: proto.Int32(0),
+		ContentType:    proto.Int32(brpcContentTypePB),
+		ChecksumType:   proto.Int32(brpcChecksumNone),
 		Response:       &brpcResponseMeta{ErrorCode: proto.Int32(0)},
 	}
 	metaBytes, err := proto.Marshal(meta)
@@ -99,7 +101,9 @@ func TestBRPCFrameServerError(t *testing.T) {
 	meta := &brpcRPCMeta{
 		CompressType:   proto.Int32(brpcNoCompression),
 		CorrelationID:  proto.Int64(42),
-		AttachmentSize: proto.Int64(0),
+		AttachmentSize: proto.Int32(0),
+		ContentType:    proto.Int32(brpcContentTypePB),
+		ChecksumType:   proto.Int32(brpcChecksumNone),
 		Response: &brpcResponseMeta{
 			ErrorCode: proto.Int32(1001),
 			ErrorText: proto.String("method not found"),
