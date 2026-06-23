@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # pairec Go 推荐服务启动脚本
 # 在容器启动时将环境变量注入配置文件
 
@@ -39,12 +39,14 @@ echo "Injected inference URL: http://${INFERENCE_HOST}:${INFERENCE_PORT}"
 
 # 等待推理服务就绪
 echo "Waiting for inference service at http://${INFERENCE_HOST}:${INFERENCE_PORT} ..."
-for i in $(seq 1 120); do
-    if curl -fsS "http://${INFERENCE_HOST}:${INFERENCE_PORT}/health" > /dev/null 2>&1; then
+i=1
+while [ "$i" -le 120 ]; do
+    if wget -q -O /dev/null "http://${INFERENCE_HOST}:${INFERENCE_PORT}/health" > /dev/null 2>&1; then
         echo "Inference service ready after ${i}s"
         break
     fi
     sleep 1
+    i=$((i + 1))
 done
 
 echo ""
