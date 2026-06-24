@@ -1,0 +1,224 @@
+diff --git a/cpp/tensorrt_llm/batch_manager/kvCacheManager.cpp b/cpp/tensorrt_llm/batch_manager/kvCacheManager.cpp
+--- a/cpp/tensorrt_llm/batch_manager/kvCacheManager.cpp
++++ b/cpp/tensorrt_llm/batch_manager/kvCacheManager.cpp
+@@ -33,9 +33,15 @@
+ #include "tensorrt_llm/runtime/utils/mpiUtils.h"
+ #include "tensorrt_llm/runtime/worldConfig.h"
+ 
++#include <datasystem/utils/service_discovery.h>
++
+ #include <algorithm>
++#include <cctype>
++#include <cstdlib>
++#include <exception>
+ #include <map>
+ #include <optional>
++#include <string>
+ #include <utility>
+ 
+ namespace tc = tensorrt_llm::common;
+@@ -48,6 +54,158 @@ using namespace tensorrt_llm::batch_manager::eviction_policy;
+ 
+ using BlocksPerWindow = std::map<SizeType32, std::tuple<SizeType32, SizeType32>>;
+ 
++namespace
++{
++
++char const* dataSystemEnv(char const* name)
++{
++    auto const* value = std::getenv(name);
++    return value != nullptr && value[0] != '\0' ? value : nullptr;
++}
++
++std::string dataSystemEnvString(char const* name, char const* defaultValue = "")
++{
++    auto const* value = dataSystemEnv(name);
++    return value != nullptr ? std::string(value) : std::string(defaultValue);
++}
++
++std::string normalizedDataSystemEnv(char const* name)
++{
++    auto value = dataSystemEnvString(name);
++    std::transform(value.begin(), value.end(), value.begin(),
++        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
++    return value;
++}
++
++int32_t dataSystemEnvInt(char const* name, int32_t defaultValue)
++{
++    auto const* value = dataSystemEnv(name);
++    if (value == nullptr)
++    {
++        return defaultValue;
++    }
++    try
++    {
++        return std::stoi(value);
++    }
++    catch (std::exception const& e)
++    {
++        TLLM_LOG_WARNING(
++            "[TensorRT-LLM][Datasystem] Ignore invalid integer env %s=%s: %s", name, value, e.what());
++        return defaultValue;
++    }
++}
++
++uint64_t dataSystemEnvUInt64(char const* name, uint64_t defaultValue)
++{
++    auto const* value = dataSystemEnv(name);
++    if (value == nullptr)
++    {
++        return defaultValue;
++    }
++    try
++    {
++        return std::stoull(value);
++    }
++    catch (std::exception const& e)
++    {
++        TLLM_LOG_WARNING(
++            "[TensorRT-LLM][Datasystem] Ignore invalid uint64 env %s=%s: %s", name, value, e.what());
++        return defaultValue;
++    }
++}
++
++bool dataSystemEnvBool(char const* name, bool defaultValue)
++{
++    auto value = normalizedDataSystemEnv(name);
++    if (value.empty())
++    {
++        return defaultValue;
++    }
++    if (value == "1" || value == "true" || value == "yes" || value == "on")
++    {
++        return true;
++    }
++    if (value == "0" || value == "false" || value == "no" || value == "off")
++    {
++        return false;
++    }
++    TLLM_LOG_WARNING("[TensorRT-LLM][Datasystem] Ignore invalid bool env %s=%s", name, value.c_str());
++    return defaultValue;
++}
++
++datasystem::ServiceAffinityPolicy dataSystemAffinityPolicy()
++{
++    auto value = normalizedDataSystemEnv("DATASYSTEM_AFFINITY_POLICY");
++    if (value.empty() || value == "preferred_same_node" || value == "preferred")
++    {
++        return datasystem::ServiceAffinityPolicy::PREFERRED_SAME_NODE;
++    }
++    if (value == "required_same_node" || value == "required")
++    {
++        return datasystem::ServiceAffinityPolicy::REQUIRED_SAME_NODE;
++    }
++    if (value == "random")
++    {
++        return datasystem::ServiceAffinityPolicy::RANDOM;
++    }
++    TLLM_LOG_WARNING(
++        "[TensorRT-LLM][Datasystem] Ignore invalid DATASYSTEM_AFFINITY_POLICY=%s", value.c_str());
++    return datasystem::ServiceAffinityPolicy::PREFERRED_SAME_NODE;
++}
++
++char const* dataSystemAffinityPolicyName(datasystem::ServiceAffinityPolicy policy)
++{
++    switch (policy)
++    {
++    case datasystem::ServiceAffinityPolicy::REQUIRED_SAME_NODE: return "REQUIRED_SAME_NODE";
++    case datasystem::ServiceAffinityPolicy::RANDOM: return "RANDOM";
++    case datasystem::ServiceAffinityPolicy::PREFERRED_SAME_NODE:
++    default: return "PREFERRED_SAME_NODE";
++    }
++}
++
++datasystem::ConnectOptions makeDataSystemConnectOptions(char const* role, char const* fallbackHost)
++{
++    datasystem::ConnectOptions connOpts;
++    connOpts.SetAkSkAuth("", "", "");
++    connOpts.connectTimeoutMs = dataSystemEnvInt("DATASYSTEM_CONNECT_TIMEOUT_MS", 60000);
++    connOpts.requestTimeoutMs = dataSystemEnvInt("DATASYSTEM_REQUEST_TIMEOUT_MS", 10000);
++    connOpts.enableExclusiveConnection = dataSystemEnvBool("DATASYSTEM_ENABLE_EXCLUSIVE_CONNECTION", false);
++    connOpts.enableRemoteH2D = dataSystemEnvBool("DATASYSTEM_ENABLE_REMOTE_H2D", false);
++    connOpts.fastTransportMemSize = dataSystemEnvUInt64("DATASYSTEM_FAST_TRANSPORT_MEM_SIZE", connOpts.fastTransportMemSize);
++    connOpts.deviceId = dataSystemEnvString("DATASYSTEM_DEVICE_ID");
++
++    auto const etcdAddress = dataSystemEnvString("DATASYSTEM_ETCD_ADDRESS");
++    if (!etcdAddress.empty())
++    {
++        datasystem::ServiceDiscoveryOptions sdOpts;
++        sdOpts.etcdAddress = etcdAddress;
++        sdOpts.clusterName = dataSystemEnvString("DATASYSTEM_CLUSTER_NAME");
++        sdOpts.hostIdEnvName = dataSystemEnvString("DATASYSTEM_HOST_ID_ENV_NAME");
++        sdOpts.username = dataSystemEnvString("DATASYSTEM_ETCD_USERNAME");
++        sdOpts.password = dataSystemEnvString("DATASYSTEM_ETCD_PASSWORD");
++        sdOpts.affinityPolicy = dataSystemAffinityPolicy();
++        connOpts.serviceDiscovery = std::make_shared<datasystem::ServiceDiscovery>(sdOpts);
++        connOpts.enableCrossNodeConnection = dataSystemEnvBool("DATASYSTEM_ENABLE_CROSS_NODE_CONNECTION", true);
++
++        TLLM_LOG_INFO("[TensorRT-LLM][Datasystem] Init KvCache %s DataSystem with ServiceDiscovery. etcd=%s cluster=%s host_id_env=%s affinity=%s cross_node=%d fast_transport_mem_size=%llu.",
++            role, sdOpts.etcdAddress.c_str(), sdOpts.clusterName.c_str(), sdOpts.hostIdEnvName.c_str(),
++            dataSystemAffinityPolicyName(sdOpts.affinityPolicy), connOpts.enableCrossNodeConnection ? 1 : 0,
++            static_cast<unsigned long long>(connOpts.fastTransportMemSize));
++        return connOpts;
++    }
++
++    connOpts.host = dataSystemEnvString("DATASYSTEM_HOST", fallbackHost);
++    connOpts.port = dataSystemEnvInt("DATASYSTEM_PORT", 31501);
++    connOpts.enableCrossNodeConnection = dataSystemEnvBool("DATASYSTEM_ENABLE_CROSS_NODE_CONNECTION", false);
++    TLLM_LOG_INFO("[TensorRT-LLM][Datasystem] Init KvCache %s DataSystem with host endpoint. host=%s port=%d cross_node=%d.",
++        role, connOpts.host.c_str(), connOpts.port, connOpts.enableCrossNodeConnection ? 1 : 0);
++    return connOpts;
++}
++
++} // namespace
++
+ namespace
+ {
+ 
+@@ -1688,20 +1829,8 @@ KvCacheManagerDataSystem& KvCacheManagerDataSystem::getInstance() {
+ 
+ KvCacheManagerDataSystem::KvCacheManagerDataSystem()
+ {
+-    datasystem::ConnectOptions conn_opts;
+-    conn_opts.SetAkSkAuth("", "", "");
+-    // 核心：集群地址（优先从环境变量读取，便于部署）
+-    conn_opts.host = std::getenv("DATASYSTEM_HOST") ? std::getenv("DATASYSTEM_HOST") : "127.0.0.1";
+-    conn_opts.port = std::getenv("DATASYSTEM_PORT") ? std::stoi(std::getenv("DATASYSTEM_PORT")) : 31501;
+-    TLLM_LOG_INFO("[TensorRT-LLM][Datasystem] Init KvCache Manager DataSystem. host = %s, ip = %u.", conn_opts.host.c_str(), conn_opts.port);
+-    // 超时配置
+-    conn_opts.connectTimeoutMs = 60000; // 保留默认60s
+-    conn_opts.requestTimeoutMs = 10000; // 单次请求10s超时
+-    // 连接模式（单节点本地DRAM加载）
+-    conn_opts.enableCrossNodeConnection = false; // 单节点
+-    conn_opts.enableExclusiveConnection = false; // 复用连接池
+-    conn_opts.enableRemoteH2D = false; // 本地DRAM
+-    mkvClientPtr = std::make_shared<datasystem::KVClient>(conn_opts);
++    auto connOpts = makeDataSystemConnectOptions("primary", "127.0.0.1");
++    mkvClientPtr = std::make_shared<datasystem::KVClient>(connOpts);
+     TLLM_LOG_INFO("[TensorRT-LLM][Datasystem] Init KvCache Manager DataSystem success.");
+ }
+ 
+@@ -1734,20 +1863,8 @@ KvCacheManagerDataSystemTmp& KvCacheManagerDataSystemTmp::getInstance() {
+ 
+ KvCacheManagerDataSystemTmp::KvCacheManagerDataSystemTmp()
+ {
+-    datasystem::ConnectOptions conn_opts;
+-    conn_opts.SetAkSkAuth("", "", "");
+-    // 核心：集群地址（优先从环境变量读取，便于部署）
+-    conn_opts.host = std::getenv("DATASYSTEM_HOST") ? std::getenv("DATASYSTEM_HOST") : "127.0.0.2";
+-    conn_opts.port = std::getenv("DATASYSTEM_PORT") ? std::stoi(std::getenv("DATASYSTEM_PORT")) : 31501;
+-    TLLM_LOG_INFO("[TensorRT-LLM][Datasystem] Init KvCache TMP Manager DataSystem. host = %s, ip = %u.", conn_opts.host.c_str(), conn_opts.port);
+-    // 超时配置
+-    conn_opts.connectTimeoutMs = 60000; // 保留默认60s
+-    conn_opts.requestTimeoutMs = 10000; // 单次请求10s超时
+-    // 连接模式（单节点本地DRAM加载）
+-    conn_opts.enableCrossNodeConnection = false; // 单节点
+-    conn_opts.enableExclusiveConnection = false; // 复用连接池
+-    conn_opts.enableRemoteH2D = false; // 本地DRAM
+-    mkvClientPtr = std::make_shared<datasystem::KVClient>(conn_opts);
++    auto connOpts = makeDataSystemConnectOptions("tmp", "127.0.0.2");
++    mkvClientPtr = std::make_shared<datasystem::KVClient>(connOpts);
+     TLLM_LOG_INFO("[TensorRT-LLM][Datasystem] Init KvCache Manager DataSystem success.");
+ }
+ 

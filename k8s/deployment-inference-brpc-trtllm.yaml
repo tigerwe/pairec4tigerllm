@@ -39,10 +39,28 @@ spec:
           env:
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: compute,utility
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
             - name: DATASYSTEM_HOST
               value: "141.61.91.188"
             - name: DATASYSTEM_PORT
               value: "18481"
+            - name: DATASYSTEM_ETCD_ADDRESS
+              value: "141.61.91.188:12379"
+            - name: DATASYSTEM_CLUSTER_NAME
+              value: "pairec"
+            - name: DATASYSTEM_HOST_ID_ENV_NAME
+              value: "HOST_IP"
+            - name: DATASYSTEM_AFFINITY_POLICY
+              value: "PREFERRED_SAME_NODE"
+            - name: DATASYSTEM_ENABLE_CROSS_NODE_CONNECTION
+              value: "true"
+            - name: DATASYSTEM_CONNECT_TIMEOUT_MS
+              value: "60000"
+            - name: DATASYSTEM_REQUEST_TIMEOUT_MS
+              value: "10000"
             - name: LD_LIBRARY_PATH
               value: "/opt/openEuler/gcc-toolset-14/root/usr/lib64:/TensorRT-LLM/cpp/build/tensorrt_llm:/TensorRT-LLM/cpp/build/tensorrt_llm/plugins:/home/TensorRT-LLM/cpp/build/tensorrt_llm:/home/TensorRT-LLM/cpp/build/tensorrt_llm/plugins:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/local/cuda/lib64:/usr/lib64:/usr/local/lib:/usr/local/lib64"
             - name: LD_PRELOAD

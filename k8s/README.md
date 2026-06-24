@@ -53,6 +53,12 @@ datasystem_port: "31501"
 
 如果 DataSystem 在集群外部，`datasystem_host` 应改为远端可访问 IP 或 DNS。
 
+DataSystem 多 worker 池化流程见
+`docs/DATASYSTEM_WORKER_POOLING.md`。该流程使用共享 ETCD +
+worker DaemonSet，并要求 TensorRT-LLM C++ runtime 编入
+`trtllm-datasystem-service-discovery.patch` 后才能让推理进程真正通过
+ServiceDiscovery 选 worker。
+
 ## 部署顺序
 
 ```bash

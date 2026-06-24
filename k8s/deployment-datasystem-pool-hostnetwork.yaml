@@ -1,0 +1,243 @@
+# ============================================
+# DataSystem worker pool with shared ETCD
+# ============================================
+#
+# This replaces the single-worker verification Deployment. It runs one shared
+# ETCD instance and one DataSystem worker per node via hostNetwork. Workers
+# register into the same ETCD table and report HOST_IP as host_id, so clients
+# can use ServiceDiscovery with same-node affinity.
+#
+# Defaults match the current ARM K8s lab:
+#   ETCD:      141.61.91.188:12379
+#   workers:   <node-host-ip>:18481
+#   cluster:   pairec
+#
+# Before applying, stop the legacy `datasystem` Deployment because it uses the
+# same host ports 12379/12380/18481.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datasystem-pool-etcd
+  namespace: pairec
+  labels:
+    app: datasystem-pool-etcd
+    app.kubernetes.io/part-of: datasystem-pool
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: datasystem-pool-etcd
+  template:
+    metadata:
+      labels:
+        app: datasystem-pool-etcd
+        app.kubernetes.io/part-of: datasystem-pool
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        pairec/gpu: "true"
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: etcd
+          image: docker.io/library/zcx-pairec-image:v1.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: ETCD_CLIENT_PORT
+              value: "12379"
+            - name: ETCD_PEER_PORT
+              value: "12380"
+            - name: LD_PRELOAD
+              value: ""
+            - name: ETCD_BIN
+              value: /host-etcd/etcd
+            - name: ETCDCTL_BIN
+              value: /host-etcd/etcdctl
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              unset LD_PRELOAD
+
+              : "${HOST_IP:?HOST_IP is required}"
+              ETCD_DATA_DIR=/tmp/etcd-yuanrong-pool
+
+              if [ ! -x "$ETCD_BIN" ]; then
+                echo "ERROR: etcd binary not found or not executable: $ETCD_BIN" >&2
+                exit 1
+              fi
+
+              rm -rf "$ETCD_DATA_DIR"
+
+              exec "$ETCD_BIN" \
+                --name etcd-yuanrong-pool \
+                --data-dir "$ETCD_DATA_DIR" \
+                --listen-client-urls "http://0.0.0.0:${ETCD_CLIENT_PORT}" \
+                --advertise-client-urls "http://${HOST_IP}:${ETCD_CLIENT_PORT}" \
+                --listen-peer-urls "http://0.0.0.0:${ETCD_PEER_PORT}" \
+                --initial-advertise-peer-urls "http://${HOST_IP}:${ETCD_PEER_PORT}" \
+                --initial-cluster "etcd-yuanrong-pool=http://${HOST_IP}:${ETCD_PEER_PORT}"
+          ports:
+            - name: etcd-client
+              containerPort: 12379
+              hostPort: 12379
+            - name: etcd-peer
+              containerPort: 12380
+              hostPort: 12380
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          volumeMounts:
+            - name: etcd-bin
+              mountPath: /host-etcd
+              readOnly: true
+      volumes:
+        - name: etcd-bin
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/etcd-v3.5.10-linux-arm64
+            type: Directory
+
+---
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: datasystem-pool-worker
+  namespace: pairec
+  labels:
+    app: datasystem-pool-worker
+    app.kubernetes.io/part-of: datasystem-pool
+spec:
+  selector:
+    matchLabels:
+      app: datasystem-pool-worker
+  template:
+    metadata:
+      labels:
+        app: datasystem-pool-worker
+        app.kubernetes.io/part-of: datasystem-pool
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 20
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: datasystem-worker
+          image: docker.io/library/zcx-pairec-image:v1.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: ETCD_ADDRESS
+              value: "141.61.91.188:12379"
+            - name: CLUSTER_NAME
+              value: "pairec"
+            - name: HOST_ID_ENV_NAME
+              value: "HOST_IP"
+            - name: DS_WORKER_PORT
+              value: "18481"
+            - name: SHARED_MEMORY_SIZE_MB
+              value: "5120"
+            - name: ENABLE_WORKER_WORKER_BATCH_GET
+              value: "true"
+            - name: LD_PRELOAD
+              value: ""
+            - name: DS_WORKER_BIN
+              value: ""
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              unset LD_PRELOAD
+
+              : "${HOST_IP:?HOST_IP is required}"
+              DS_LOG_DIR=/tmp/datasystem-yuanrong-pool/log
+
+              if [ -n "${DS_WORKER_BIN:-}" ] && [ ! -x "$DS_WORKER_BIN" ]; then
+                echo "Configured DS_WORKER_BIN is not executable: $DS_WORKER_BIN"
+                DS_WORKER_BIN=""
+              fi
+              if [ -z "${DS_WORKER_BIN:-}" ]; then
+                DS_WORKER_BIN="$(command -v datasystem_worker 2>/dev/null || true)"
+              fi
+              if [ -z "${DS_WORKER_BIN:-}" ]; then
+                DS_WORKER_BIN="$(find /usr/local /usr /opt /root \
+                  -path '*datasystem*' -name datasystem_worker -type f \
+                  2>/dev/null | head -1 || true)"
+              fi
+              if [ -n "${DS_WORKER_BIN:-}" ] && [ ! -x "$DS_WORKER_BIN" ]; then
+                chmod +x "$DS_WORKER_BIN" 2>/dev/null || true
+              fi
+              if [ ! -x "$DS_WORKER_BIN" ]; then
+                echo "ERROR: datasystem_worker not found or not executable." >&2
+                echo "dscli path: $(command -v dscli 2>/dev/null || true)" >&2
+                echo "DataSystem candidates:" >&2
+                find /usr/local /usr /opt /root \
+                  \( -name 'datasystem_worker*' -o -name dscli -o -path '*yr/datasystem*' \) \
+                  2>/dev/null | head -200 >&2 || true
+                exit 1
+              fi
+
+              mkdir -p "$DS_LOG_DIR"
+              ETCD_HOST="${ETCD_ADDRESS%:*}"
+              ETCD_PORT="${ETCD_ADDRESS##*:}"
+              ETCD_READY=0
+              for _ in $(seq 1 60); do
+                if : >"/dev/tcp/${ETCD_HOST}/${ETCD_PORT}" 2>/dev/null; then
+                  ETCD_READY=1
+                  break
+                fi
+                sleep 1
+              done
+              if [ "$ETCD_READY" != "1" ]; then
+                echo "ERROR: ETCD not reachable: ${ETCD_ADDRESS}" >&2
+                exit 1
+              fi
+
+              echo "Starting DataSystem worker ${HOST_IP}:${DS_WORKER_PORT}, etcd=${ETCD_ADDRESS}, cluster=${CLUSTER_NAME}"
+              exec "$DS_WORKER_BIN" \
+                --worker_address="${HOST_IP}:${DS_WORKER_PORT}" \
+                --etcd_address="${ETCD_ADDRESS}" \
+                --cluster_name="${CLUSTER_NAME}" \
+                --host_id_env_name="${HOST_ID_ENV_NAME}" \
+                --shared_memory_size_mb="${SHARED_MEMORY_SIZE_MB}" \
+                --enable_worker_worker_batch_get="${ENABLE_WORKER_WORKER_BATCH_GET}" \
+                --log_dir="$DS_LOG_DIR"
+          ports:
+            - name: ds-worker
+              containerPort: 18481
+              hostPort: 18481
+          resources:
+            requests:
+              cpu: "1"
+              memory: "6Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 6Gi
