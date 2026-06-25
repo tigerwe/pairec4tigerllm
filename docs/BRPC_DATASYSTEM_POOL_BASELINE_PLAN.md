@@ -93,6 +93,33 @@ kubectl -n pairec logs deploy/inference-brpc-trtllm \
 
 ## 摸测步骤
 
+单请求阶段先用：
+
+```bash
+bash scripts/trace_single_brpc_datasystem_request.sh
+```
+
+默认 `USER_ID=6312 SIZE=1`，只发一次请求，并输出：
+
+- client E2E latency。
+- brpc `Recommend` 调用次数和 server `latency_ms`。
+- PaiRec `GenerativeRecall` 阶段耗时，如果能从 stdout 或 glog 文件按 `request_id` 抓到。
+- DataSystem/KV `offload/onboard` 访问次数。
+- 每次 KVC `Create/D2H/Set`、`Get/H2D`、`total_ms`。
+
+常用参数：
+
+```bash
+USER_ID=6312 SIZE=1 bash scripts/trace_single_brpc_datasystem_request.sh
+USER_ID=6312 SIZE=10 bash scripts/trace_single_brpc_datasystem_request.sh
+```
+
+输出目录默认在：
+
+```text
+/tmp/pairec_single_request_trace/<run_id>
+```
+
 推荐直接执行一键脚本：
 
 ```bash
