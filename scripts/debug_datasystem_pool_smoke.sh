@@ -44,9 +44,23 @@ log "python import"
 run_kubectl -n "$NAMESPACE" exec -i "$POD" -c datasystem-worker -- \
   python - <<'PY'
 print("python-start", flush=True)
-import yr.datasystem
+import pkgutil
+import yr.datasystem as ds
 print("datasystem-import-ok", flush=True)
-from yr.datasystem import KVClient, ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
+print("datasystem-file=", getattr(ds, "__file__", "<unknown>"), flush=True)
+try:
+    from yr.datasystem import KVClient, ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
+except ImportError as first_error:
+    print("top-level-service-discovery-import-failed=", repr(first_error), flush=True)
+    try:
+        from yr.datasystem import KVClient
+        from yr.datasystem.service_discovery import ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
+    except Exception as second_error:
+        print("service-discovery-submodule-import-failed=", repr(second_error), flush=True)
+        print("service-discovery-symbols=", [name for name in dir(ds) if "Service" in name or "Discovery" in name], flush=True)
+        if hasattr(ds, "__path__"):
+            print("datasystem-submodules=", sorted(m.name for m in pkgutil.iter_modules(ds.__path__)), flush=True)
+        raise
 print("symbols-ok", flush=True)
 PY
 
@@ -69,7 +83,10 @@ run_kubectl -n "$NAMESPACE" exec -i "$POD" -c datasystem-worker -- \
 import os
 
 print("sd-start", flush=True)
-from yr.datasystem import ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
+try:
+    from yr.datasystem import ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
+except ImportError:
+    from yr.datasystem.service_discovery import ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
 
 policy_name = os.environ["AFFINITY_POLICY"].upper()
 policy = {
@@ -120,7 +137,11 @@ import time
 import uuid
 
 print("kv-start", flush=True)
-from yr.datasystem import KVClient, ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
+try:
+    from yr.datasystem import KVClient, ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
+except ImportError:
+    from yr.datasystem import KVClient
+    from yr.datasystem.service_discovery import ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
 
 policy_name = os.environ["AFFINITY_POLICY"].upper()
 policy = {

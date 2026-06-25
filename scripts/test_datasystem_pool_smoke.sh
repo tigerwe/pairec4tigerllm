@@ -28,7 +28,11 @@ import os
 import time
 import uuid
 
-from yr.datasystem import KVClient, ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
+try:
+    from yr.datasystem import KVClient, ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
+except ImportError:
+    from yr.datasystem import KVClient
+    from yr.datasystem.service_discovery import ServiceAffinityPolicy, ServiceDiscovery, ServiceDiscoveryOptions
 
 policy_name = os.environ["AFFINITY_POLICY"].upper()
 policy = {
