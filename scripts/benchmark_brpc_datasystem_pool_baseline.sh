@@ -7,6 +7,10 @@ BRPC_TARGET="${BRPC_TARGET:-deployment/inference-brpc-trtllm}"
 BRPC_CONTAINER="${BRPC_CONTAINER:-brpc-inference}"
 BRPC_SERVER="${BRPC_SERVER:-10.96.15.101:18100}"
 
+PAIREC_URL_WAS_SET=0
+if [ "${PAIREC_URL+x}" = "x" ]; then
+  PAIREC_URL_WAS_SET=1
+fi
 LOCAL_PORT="${LOCAL_PORT:-18080}"
 PAIREC_URL="${PAIREC_URL:-http://127.0.0.1:${LOCAL_PORT}/api/recommend}"
 UIDS="${UIDS:-6312,130,2184,7494}"
@@ -72,6 +76,53 @@ require_command() {
   fi
 }
 
+find_free_local_port() {
+  local start_port="$1"
+  python3 - "$start_port" <<'PY'
+import socket
+import sys
+
+start = int(sys.argv[1])
+
+def can_bind(host, port, family):
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+for port in range(start, start + 200):
+    ok4 = can_bind("127.0.0.1", port, socket.AF_INET)
+    try:
+        ok6 = can_bind("::1", port, socket.AF_INET6)
+    except OSError:
+        ok6 = True
+    if ok4 and ok6:
+        print(port)
+        raise SystemExit(0)
+
+raise SystemExit(f"no free local port in range [{start}, {start + 199}]")
+PY
+}
+
+prepare_port_forward_endpoint() {
+  if [ "$PAIREC_URL_WAS_SET" = "1" ]; then
+    return
+  fi
+
+  local selected_port
+  selected_port="$(find_free_local_port "$LOCAL_PORT")"
+  if [ "$selected_port" != "$LOCAL_PORT" ]; then
+    echo "local port ${LOCAL_PORT} is busy; using ${selected_port}"
+    LOCAL_PORT="$selected_port"
+  fi
+  PAIREC_URL="http://127.0.0.1:${LOCAL_PORT}/api/recommend"
+}
+
 start_port_forward() {
   if [ "$START_PORT_FORWARD" != "1" ]; then
     echo "skip port-forward: START_PORT_FORWARD=$START_PORT_FORWARD"
@@ -79,6 +130,7 @@ start_port_forward() {
   fi
 
   log "Start PaiRec port-forward"
+  prepare_port_forward_endpoint
   kubectl -n "$NAMESPACE" port-forward "$PAIREC_TARGET" "${LOCAL_PORT}:18080" \
     >"${OUT_DIR}/pairec_port_forward.log" 2>&1 &
   PORT_FORWARD_PID="$!"
