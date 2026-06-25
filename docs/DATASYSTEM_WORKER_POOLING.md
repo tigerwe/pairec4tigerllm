@@ -64,6 +64,57 @@ available submodules: cli, ds_client, ds_tensor_client, hetero_client, kv_client
 
 当前决策：完整 ServiceDiscovery 接入暂存为阻塞任务；基线摸测先复用 worker1+master pool 已启动的环境，但报告中要明确该阶段不等价于“TRT-LLM 已按 pool 路由 KV”。
 
+## 跨节点固定 endpoint 验证
+
+如果目标是先稳定验证：
+
+```text
+188 PaiRec -> brpc/TCP -> 189 inference -> 188 DataSystem worker
+```
+
+不要走 ServiceDiscovery 选点。当前 189 上也有 `datasystem-pool-worker`，如果启用
+`DATASYSTEM_ETCD_ADDRESS` 且 runtime patch 生效，`PREFERRED_SAME_NODE` 会优先选择 189
+本地 worker，不保证走 188。
+
+本仓库提供独立 manifest：
+
+- `k8s/deployment-inference-brpc-trtllm-cross-node-189-ds188.yaml`
+- `scripts/k8s_apply_inference_brpc_trtllm_cross_node_189_ds188.sh`
+
+该 manifest 保持 Deployment/Service 名称仍为 `inference-brpc-trtllm`，所以 PaiRec 的
+`brpc_endpoint` 不需要变化；区别是：
+
+- `nodeName: master`，把 inference Pod 固定到 189。
+- `DATASYSTEM_HOST=141.61.91.188`、`DATASYSTEM_PORT=18481`，固定访问 188 worker。
+- 不设置 `DATASYSTEM_ETCD_ADDRESS`，避免 ServiceDiscovery 覆盖固定 endpoint。
+
+执行：
+
+```bash
+bash scripts/k8s_apply_inference_brpc_trtllm_cross_node_189_ds188.sh
+```
+
+验证：
+
+```bash
+kubectl -n pairec get pods -l app=inference-brpc-trtllm -o wide
+kubectl -n pairec logs deploy/inference-brpc-trtllm -c brpc-inference --tail=160 \
+  | grep -E 'with host endpoint|with ServiceDiscovery|Init KvCache'
+```
+
+期望：
+
+```text
+NODE=master
+with host endpoint. host=141.61.91.188 port=18481
+```
+
+回滚到默认 inference 部署：
+
+```bash
+bash scripts/k8s_apply_inference_brpc_trtllm.sh
+```
+
 ## 新增内容
 
 - `k8s/deployment-datasystem-pool-hostnetwork.yaml`
