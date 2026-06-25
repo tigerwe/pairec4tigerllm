@@ -129,7 +129,11 @@ E2E_REPEAT_REQUESTS=100 \
 E2E_CONCURRENCY=10 \
 E2E_SIZE=1 \
 bash scripts/benchmark_brpc_datasystem_pool_baseline.sh
+
+E2E_WARMUP=3 bash scripts/benchmark_brpc_datasystem_pool_baseline.sh
 ```
+
+默认 `E2E_WARMUP=0`，目的是让 summary 中的 `brpc_calls`、`offload_per_brpc`、`onboard_per_brpc` 与 pressure/replay 请求数严格对齐。显式打开 warmup 时，summary 会包含 warmup 产生的 brpc/KV 日志。
 
 如果只想手工做单请求确认，可以继续使用：
 

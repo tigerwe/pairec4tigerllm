@@ -24,6 +24,7 @@ E2E_REPEAT_REQUESTS="${E2E_REPEAT_REQUESTS:-50}"
 E2E_CONCURRENCY="${E2E_CONCURRENCY:-10}"
 E2E_SIZE="${E2E_SIZE:-1}"
 E2E_TIMEOUT="${E2E_TIMEOUT:-30}"
+E2E_WARMUP="${E2E_WARMUP:-0}"
 
 RUN_QUALITY="${RUN_QUALITY:-1}"
 QUALITY_SIZE="${QUALITY_SIZE:-10}"
@@ -340,6 +341,7 @@ run_e2e_benchmark() {
     --uids "$UIDS" \
     --requests "$requests" \
     --repeat-requests "$repeat_requests" \
+    --warmup "$E2E_WARMUP" \
     --concurrency "$concurrency" \
     --size "$size" \
     --scene-id "$SCENE_ID" \
