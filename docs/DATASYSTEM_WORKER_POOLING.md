@@ -32,6 +32,38 @@ TRT-LLM C++ KVClient
 
 这里还不是 RH2D。当前 KV block 仍走 host buffer staging 的 `Create/Set/Get` 路径；RH2D 需要后续单独接 `MSetD2H/MGetH2D` 或设备 blob。
 
+## 当前状态与阻塞点
+
+截至 2026-06-25，远端 K8s 已经能把 pool 进程拉起来：
+
+```text
+datasystem-pool-etcd     worker1 141.61.91.188
+datasystem-pool-worker   worker1 141.61.91.188
+datasystem-pool-worker   master  141.61.91.189
+```
+
+这说明 hostNetwork 端口、DaemonSet 形态、master/worker1 双节点进程部署已经基本可用。
+
+当前阻塞点在运行镜像 SDK 版本，不在 K8s 调度：
+
+```text
+image: docker.io/library/zcx-pairec-image:v1.1
+yr.datasystem.__file__: /usr/local/lib/python3.11/site-packages/yr/datasystem/__init__.py
+missing: ServiceAffinityPolicy
+missing: yr.datasystem.service_discovery
+available submodules: cli, ds_client, ds_tensor_client, hetero_client, kv_client, object_client, stream_client, util
+```
+
+因此：
+
+- `scripts/test_datasystem_pool_smoke.sh` 依赖的 Python ServiceDiscovery API 在当前镜像里不可用。
+- TensorRT-LLM C++ 侧的 ServiceDiscovery patch 即使写好，也必须等 runtime 内 DataSystem SDK/C++ headers/libs 更新后才能真实验证。
+- 当前 `inference-brpc-trtllm` 仍应按固定 endpoint 风险看待，除非日志明确出现 `with ServiceDiscovery`。
+
+后续恢复完整池化接入时，优先用 `/home/vivwimp/workspace/yuanrong-datasystem` 重建 DataSystem SDK/runtime，再重建 `zcx-pairec-trtllm-brpc-sdk:v1` 与 `pairec-brpc-inference:k8s-arm64-trtllm-v1`。
+
+当前决策：完整 ServiceDiscovery 接入暂存为阻塞任务；基线摸测先复用 worker1+master pool 已启动的环境，但报告中要明确该阶段不等价于“TRT-LLM 已按 pool 路由 KV”。
+
 ## 新增内容
 
 - `k8s/deployment-datasystem-pool-hostnetwork.yaml`
@@ -78,6 +110,8 @@ kubectl -n pairec get pods -l app.kubernetes.io/part-of=datasystem-pool -o wide
 ```bash
 EXPECT_MIN_WORKERS=2 bash scripts/test_datasystem_pool_smoke.sh
 ```
+
+注意：当前 `zcx-pairec-image:v1.1` 会在该步骤失败，因为镜像内 DataSystem Python SDK 缺少 `ServiceAffinityPolicy` 和 `yr.datasystem.service_discovery`。该命令用于更新 SDK/runtime 后复验。
 
 如果 smoke 没有输出或卡住，先跑分段诊断：
 
