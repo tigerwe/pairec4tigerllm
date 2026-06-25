@@ -35,6 +35,21 @@ func writeDebugLog(format string, args ...interface{}) {
 	}
 }
 
+func traceStdoutEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("PAIREC_TRACE_STDOUT"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func writeTraceStdout(format string, args ...interface{}) {
+	if traceStdoutEnabled() {
+		fmt.Printf("[PAIREC_TRACE] "+format+"\n", args...)
+	}
+}
+
 // semanticIDMap 全局语义 ID 映射缓存
 var (
 	semanticIDMap     map[int][]int
@@ -278,6 +293,10 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 			// 结构化全链路耗时日志
 			log.Info(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tfrom=cache\tname=%s\tcount=%d\tcost=%d\tcache_ms=%d",
 				ctx.RecommendId, r.modelName, len(items), utils.CostTime(stageStart), stageCache.Milliseconds()))
+			writeTraceStdout(
+				"requestId=%s request_id=%s module=GenerativeRecall from=cache name=%s user=%s count=%d cost=%d cache_ms=%d",
+				ctx.RecommendId, traceID, r.modelName, user.Id, len(items), utils.CostTime(stageStart), stageCache.Milliseconds(),
+			)
 			return items
 		}
 	}
@@ -288,13 +307,17 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 	// 获取用户历史行为
 	historyStart := time.Now()
 	history, err := r.getUserHistory(user, ctx)
+	stageHistory = time.Since(historyStart)
 	if err != nil {
 		writeDebugLog(" getUserHistory error: %v\n", err)
 		log.Error(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tname=%s\terr=get_user_history:%v",
 			ctx.RecommendId, r.modelName, err))
+		writeTraceStdout(
+			"requestId=%s request_id=%s module=GenerativeRecall from=error stage=history name=%s user=%s cost=%d cache_ms=%d history_ms=%d err=get_user_history",
+			ctx.RecommendId, traceID, r.modelName, user.Id, utils.CostTime(stageStart), stageCache.Milliseconds(), stageHistory.Milliseconds(),
+		)
 		return nil
 	}
-	stageHistory = time.Since(historyStart)
 
 	writeDebugLog(" Got history, len=%d\n", len(history))
 
@@ -307,6 +330,10 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 	if len(history) == 0 {
 		log.Info(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tname=%s\tmsg=empty_history",
 			ctx.RecommendId, r.modelName))
+		writeTraceStdout(
+			"requestId=%s request_id=%s module=GenerativeRecall from=empty_history name=%s user=%s cost=%d cache_ms=%d history_ms=%d",
+			ctx.RecommendId, traceID, r.modelName, user.Id, utils.CostTime(stageStart), stageCache.Milliseconds(), stageHistory.Milliseconds(),
+		)
 		return nil
 	}
 
@@ -317,6 +344,10 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 	if len(semanticHistory) == 0 {
 		log.Error(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tname=%s\terr=convert_history_failed",
 			ctx.RecommendId, r.modelName))
+		writeTraceStdout(
+			"requestId=%s request_id=%s module=GenerativeRecall from=error stage=convert name=%s user=%s cost=%d cache_ms=%d history_ms=%d convert_ms=%d err=convert_history_failed",
+			ctx.RecommendId, traceID, r.modelName, user.Id, utils.CostTime(stageStart), stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
+		)
 		return nil
 	}
 
@@ -341,6 +372,12 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		writeDebugLog(" Inference error: %v\n", err)
 		log.Error(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tname=%s\terr=generative_recommend:%v",
 			ctx.RecommendId, r.modelName, err))
+		writeTraceStdout(
+			"requestId=%s request_id=%s module=GenerativeRecall from=error stage=inference name=%s user=%s protocol=%s cost=%d cache_ms=%d history_ms=%d convert_ms=%d rpc_ms=%d http_ms=%d brpc_ms=%d err=generative_recommend",
+			ctx.RecommendId, traceID, r.modelName, user.Id, r.client.config.Protocol, utils.CostTime(stageStart),
+			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
+			stageHTTP.Milliseconds(), stageHTTP.Milliseconds(), brpcStageMs(r.client.config.Protocol, stageHTTP),
+		)
 		return nil
 	}
 
@@ -396,6 +433,28 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 			response.Trace.ResultCacheDSLookupMs, response.Trace.ResultCacheWriteSubmitMs,
 			httpOverheadMs,
 		))
+		writeTraceStdout(
+			"requestId=%s request_id=%s module=GenerativeRecall from=inference name=%s user=%s protocol=%s count=%d cost=%d"+
+				" cache_ms=%d history_ms=%d convert_ms=%d rpc_ms=%d http_ms=%d brpc_ms=%d items_ms=%d"+
+				" tr_backend=%s tr_total_ms=%.1f tr_prepare_ms=%.1f tr_infer_ms=%.1f tr_forward_ms=%.1f tr_generate_ms=%.1f"+
+				" tr_prompt_ms=%.1f tr_runner_ms=%.1f tr_parse_ms=%.1f tr_pad_ms=%.1f tr_backend_total_ms=%.1f tr_map_ms=%.1f"+
+				" tr_kv_source=%s tr_kv_lookup_ms=%.1f tr_kv_write_ms=%.1f"+
+				" tr_result_cache_source=%s tr_result_cache_lookup_ms=%.1f tr_result_cache_ds_lookup_ms=%.1f"+
+				" tr_result_cache_write_submit_ms=%.1f http_overhead_ms=%d",
+			ctx.RecommendId, traceID, r.modelName, user.Id, r.client.config.Protocol, len(items), totalCost,
+			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
+			stageHTTP.Milliseconds(), stageHTTP.Milliseconds(), brpcStageMs(r.client.config.Protocol, stageHTTP), stageItems.Milliseconds(),
+			response.Trace.Backend, response.Trace.TotalMs,
+			response.Trace.PrepareInputMs, response.Trace.InferMs,
+			response.Trace.ModelForwardMs, response.Trace.GenerateMs,
+			response.Trace.PromptMs, response.Trace.RunnerGenerateMs,
+			response.Trace.ParseComboMs, response.Trace.OutputPadMs,
+			response.Trace.BackendTotalMs, response.Trace.MapItemMs,
+			response.Trace.KvSource, response.Trace.KvLookupMs, response.Trace.KvWriteMs,
+			response.Trace.ResultCacheSource, response.Trace.ResultCacheLookupMs,
+			response.Trace.ResultCacheDSLookupMs, response.Trace.ResultCacheWriteSubmitMs,
+			httpOverheadMs,
+		)
 	} else {
 		// 兼容旧版推理服务（未返回 Trace 信息）
 		log.Info(fmt.Sprintf(
@@ -406,10 +465,25 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 			stageHTTP.Milliseconds(), stageItems.Milliseconds(),
 			response.InferenceTimeMs,
 		))
+		writeTraceStdout(
+			"requestId=%s request_id=%s module=GenerativeRecall from=inference name=%s user=%s protocol=%s count=%d cost=%d"+
+				" cache_ms=%d history_ms=%d convert_ms=%d rpc_ms=%d http_ms=%d brpc_ms=%d items_ms=%d inference_svc_ms=%.0f",
+			ctx.RecommendId, traceID, r.modelName, user.Id, r.client.config.Protocol, len(items), totalCost,
+			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
+			stageHTTP.Milliseconds(), stageHTTP.Milliseconds(), brpcStageMs(r.client.config.Protocol, stageHTTP), stageItems.Milliseconds(),
+			response.InferenceTimeMs,
+		)
 	}
 	// =======================================================
 
 	return items
+}
+
+func brpcStageMs(protocol string, elapsed time.Duration) int64 {
+	if strings.EqualFold(protocol, "brpc") {
+		return elapsed.Milliseconds()
+	}
+	return 0
 }
 
 // getUserHistory 获取用户历史行为.

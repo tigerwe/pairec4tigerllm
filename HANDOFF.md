@@ -2,6 +2,121 @@
 
 > 供 Agent 跨 session 恢复上下文。只记录关键决策和当前任务。
 
+## 最近一次交接 (2026-06-25)
+
+### 当前任务
+
+F14 brpc 推荐链路已经端到端跑通，当前正在做 F12/F14 交叉的单请求与基线摸测：
+
+```text
+HTTP /api/recommend
+  -> PaiRec Go
+  -> Go baidu_std brpc/TCP client
+  -> C++ brpc_inference_server
+  -> TensorRT-LLM C++
+  -> KVC/DataSystem
+```
+
+注意：`brpc_recommend_client` 只是 C++ smoke/probe client，用于隔离 C++ brpc server 和 KVC；当前 PaiRec Go brpc 改造的统计口径应走 `scripts/trace_single_brpc_datasystem_request.sh` 或 PaiRec `/api/recommend`。
+
+### 已完成
+
+- 分支：`datasystem-worker-pooling`
+- 远端：已推送到 `gitcode/datasystem-worker-pooling`
+- 最新提交：`29bf205 feat: add single request brpc kvc trace`
+- DataSystem pool Pod 已 Running：worker1 `141.61.91.188` 和 master `141.61.91.189` 均有 `datasystem-pool-worker`，但完整 ServiceDiscovery 接入阻塞。
+- 阻塞原因：当前运行镜像 `docker.io/library/zcx-pairec-image:v1.1` 内的 `yr.datasystem` SDK 没有 `ServiceAffinityPolicy`，也没有 `yr.datasystem.service_discovery` 子模块；因此 TRT-LLM C++ 当前报告必须标注“可能仍走固定 DataSystem endpoint”。
+- 基线脚本已固化：
+  - `scripts/benchmark_brpc_datasystem_pool_baseline.sh`
+  - `scripts/trace_single_brpc_datasystem_request.sh`
+  - 文档入口：`docs/BRPC_DATASYSTEM_POOL_BASELINE_PLAN.md`
+- 本地已补 PaiRec Go stdout 观测增强：
+  - `services/recall/generative_recall.go` 支持 `PAIREC_TRACE_STDOUT=1`
+  - 开启后输出 `[PAIREC_TRACE] requestId=... request_id=... module=GenerativeRecall ...`
+  - `scripts/trace_single_brpc_datasystem_request.sh` 已展示 `from/protocol/rpc_ms/brpc_ms/inference_svc_ms`
+  - 本机验证：`gofmt`、`bash -n scripts/trace_single_brpc_datasystem_request.sh`、`go test -mod=vendor ./services/...`、`go build -mod=vendor ./...`、`git diff --check` 通过
+
+### 最近单请求结果
+
+用户已跑过两次 `scripts/trace_single_brpc_datasystem_request.sh`，结果稳定：
+
+```text
+Run 1:
+  E2E client_ms=114.158
+  brpc_calls=1
+  brpc server latency_ms=107
+  KVC offload=2 onboard=0
+  offload total_ms=14.479, 8.010
+  derived non_brpc_client_overhead_ms=7.158
+
+Run 2:
+  E2E client_ms=117.509
+  brpc_calls=1
+  brpc server latency_ms=107
+  KVC offload=2 onboard=0
+  offload total_ms=16.816, 7.427
+  derived non_brpc_client_overhead_ms=10.509
+```
+
+解释口径：
+
+- 一次 PaiRec 请求当前只触发 1 次 brpc `Recommend`。
+- `E2E - brpc` 的 7-10ms 是残差，不是纯 brpc 协议耗时；它包含脚本 HTTP client、`kubectl port-forward`、PaiRec HTTP/JSON、Go brpc client 序列化/网络、item 转换和计时粒度。
+- 这两次没有 onboard，是当前请求没有命中可 onboard 的历史 KV block；KVC 实际访问数以 `offload_count + onboard_count` 为准。
+
+### 当前缺口
+
+本地代码已经补了 stdout trace，但远端 PaiRec 镜像还没重建，也还没在 Pod 环境开启 `PAIREC_TRACE_STDOUT=1` 复测。因此最近一次远端结果里，`trace_single_brpc_datasystem_request.sh` 仍没有抓到 PaiRec Go 内部阶段日志：
+
+```text
+PaiRec GenerativeRecall stages: not found in captured logs
+PaiRec RecommendTrace stages: not found in captured logs
+```
+
+大概率是当前 K8s 直接运行 `/app/pairec-server`，而已有 `log.Info/glog` 没有稳定进入 `kubectl logs`。本地新增的 stdout trace 在环境变量 `PAIREC_TRACE_STDOUT=1` 时输出：
+
+```text
+[PAIREC_TRACE] request_id=... module=GenerativeRecall history_ms=... convert_ms=... brpc_ms=... items_ms=...
+```
+
+然后重建并导入 `pairec-server:k8s-arm64-brpc-v1`，重跑单请求脚本，拿到完整：
+
+```text
+E2E
+PaiRec Go GenerativeRecall stages
+brpc/TCP server latency
+TensorRT-LLM/KVC offload/onboard stages
+```
+
+### 建议下一步
+
+1. 远端构建小镜像并导入 worker1：
+
+```bash
+bash scripts/build_pairec_binary_image.sh docker.io/library/pairec-server:k8s-arm64-brpc-v1
+docker save docker.io/library/pairec-server:k8s-arm64-brpc-v1 -o /home/zcx/pairec-server-k8s-arm64-brpc-v1.tar
+scp /home/zcx/pairec-server-k8s-arm64-brpc-v1.tar root@141.61.91.188:/home/zcx/
+ssh root@141.61.91.188 'sudo ctr -n k8s.io images import /home/zcx/pairec-server-k8s-arm64-brpc-v1.tar'
+kubectl -n pairec rollout restart deploy/pairec
+kubectl -n pairec rollout status deploy/pairec --timeout=5m
+```
+
+2. 给 PaiRec Deployment 增加环境变量 `PAIREC_TRACE_STDOUT=1`，rollout 后重跑：
+
+```bash
+bash scripts/trace_single_brpc_datasystem_request.sh
+```
+
+### 工作区注意
+
+当前工作区存在一个未提交删除：
+
+```text
+D architecture_analysis.md
+```
+
+这个不是本轮改动，不要还原、不要提交，除非用户明确要求。
+
 ## 最近一次交接 (2026-06-02)
 
 ### 当前任务
