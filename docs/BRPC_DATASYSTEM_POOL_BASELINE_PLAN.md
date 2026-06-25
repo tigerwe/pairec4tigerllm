@@ -93,7 +93,41 @@ kubectl -n pairec logs deploy/inference-brpc-trtllm \
 
 ## 摸测步骤
 
-第一步先做单请求确认：
+推荐直接执行一键脚本：
+
+```bash
+bash scripts/benchmark_brpc_datasystem_pool_baseline.sh
+```
+
+默认会做：
+
+- K8s Pod/Service/配置检查。
+- PaiRec `/api/recommend` 功能 smoke。
+- C++ brpc/TCP 串行 smoke。
+- `size=1, concurrency=10` 的系统 E2E 基线。
+- `size=10, concurrency=10` 的召回质量基线。
+- 每轮单独采集 PaiRec 与 brpc TRT-LLM 日志。
+- 自动统计 brpc 调用数、KV offload/onboard 次数、per brpc KV 访问次数、brpc server latency 分位数、item 数量分布和 DataSystem Set/Get p99/p9999。
+
+输出目录默认在：
+
+```text
+/tmp/pairec_brpc_datasystem_pool_baseline/<run_id>
+```
+
+常用参数：
+
+```bash
+RUN_QUALITY=0 bash scripts/benchmark_brpc_datasystem_pool_baseline.sh
+
+E2E_REQUESTS=300 \
+E2E_REPEAT_REQUESTS=100 \
+E2E_CONCURRENCY=10 \
+E2E_SIZE=1 \
+bash scripts/benchmark_brpc_datasystem_pool_baseline.sh
+```
+
+如果只想手工做单请求确认，可以继续使用：
 
 ```bash
 TARGET=deployment/inference-brpc-trtllm \
@@ -103,14 +137,6 @@ REQUESTS=1 \
 TOPK=10 \
 bash scripts/test_brpc_native_inference_smoke.sh
 ```
-
-第二步再做 E2E 小并发，固定并发 10、payload 约 100KB 的配置另开报告记录。若压测脚本需要补字段，优先复用 `scripts/benchmark_e2e_latency.py`，不要手工拼散乱日志。
-
-第三步收集 DataSystem/KV 指标：
-
-- 从 `brpc_inference_server` 日志统计 `method=Recommend` 次数和 `latency_ms`。
-- 从 TensorRT-LLM DataSystem trace 统计 `op=offload`、`op=onboard`、`set_ms`、`get_ms`。
-- 如果当前镜像没有 ServiceDiscovery 日志，则把 worker 选择标记为 `fixed_endpoint`。
 
 ## 输出要求
 
