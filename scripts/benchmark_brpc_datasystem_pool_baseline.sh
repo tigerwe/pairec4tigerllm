@@ -151,11 +151,13 @@ start_log_collectors() {
   : >"$CURRENT_PAIREC_LOG"
   : >"$CURRENT_TRT_LOG"
 
-  kubectl -n "$NAMESPACE" logs -f "$PAIREC_TARGET" \
+  # --tail=0 is important: kubectl logs -f otherwise dumps historical logs first,
+  # which would inflate brpc/KV call counts for this benchmark run.
+  kubectl -n "$NAMESPACE" logs --tail=0 -f "$PAIREC_TARGET" \
     >"$CURRENT_PAIREC_LOG" 2>&1 &
   PAIREC_LOG_PID="$!"
 
-  kubectl -n "$NAMESPACE" logs -f "$BRPC_TARGET" -c "$BRPC_CONTAINER" \
+  kubectl -n "$NAMESPACE" logs --tail=0 -f "$BRPC_TARGET" -c "$BRPC_CONTAINER" \
     >"$CURRENT_TRT_LOG" 2>&1 &
   TRT_LOG_PID="$!"
 

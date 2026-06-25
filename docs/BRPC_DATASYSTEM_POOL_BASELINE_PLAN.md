@@ -115,6 +115,8 @@ bash scripts/benchmark_brpc_datasystem_pool_baseline.sh
 /tmp/pairec_brpc_datasystem_pool_baseline/<run_id>
 ```
 
+日志采集使用 `kubectl logs --tail=0 -f`，只统计脚本启动后的新日志，避免历史 brpc/KV 记录混入本次 baseline。
+
 脚本默认从本地 `18080` 开始找空闲端口做 `kubectl port-forward`。如果 `18080` 已被旧进程占用，会自动换到后续空闲端口并同步更新 benchmark URL。需要固定端口或复用已有入口时，可以显式设置 `LOCAL_PORT` 或 `PAIREC_URL`。
 
 常用参数：
