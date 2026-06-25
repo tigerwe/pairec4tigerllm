@@ -6,7 +6,7 @@ ETCD_ADDRESS="${ETCD_ADDRESS:-141.61.91.188:12379}"
 CLUSTER_NAME="${CLUSTER_NAME:-pairec}"
 HOST_ID_ENV_NAME="${HOST_ID_ENV_NAME:-HOST_IP}"
 AFFINITY_POLICY="${AFFINITY_POLICY:-RANDOM}"
-EXPECT_MIN_WORKERS="${EXPECT_MIN_WORKERS:-2}"
+EXPECT_MIN_WORKERS="${EXPECT_MIN_WORKERS:-${EXPECT_MIN_WORKKERS:-2}}"
 KUBECTL_TIMEOUT="${KUBECTL_TIMEOUT:-20s}"
 POD="${POD:-}"
 
@@ -38,10 +38,10 @@ kubectl -n "$NAMESPACE" get pod "$POD" -o wide
 
 log "exec channel"
 run_kubectl -n "$NAMESPACE" exec "$POD" -c datasystem-worker -- \
-  bash -lc 'echo exec-ok; hostname; env | grep -E "^(HOST_IP|ETCD|CLUSTER|LD_PRELOAD)=" || true'
+  bash -lc 'echo exec-ok; cat /etc/hostname 2>/dev/null || true; env | grep -E "^(HOST_IP|ETCD|CLUSTER|LD_PRELOAD)=" || true'
 
 log "python import"
-run_kubectl -n "$NAMESPACE" exec "$POD" -c datasystem-worker -- \
+run_kubectl -n "$NAMESPACE" exec -i "$POD" -c datasystem-worker -- \
   python - <<'PY'
 print("python-start", flush=True)
 import yr.datasystem
@@ -58,7 +58,7 @@ run_kubectl -n "$NAMESPACE" exec "$POD" -c datasystem-worker -- \
   bash -lc 'bash -c "</dev/tcp/${ETCD_HOST}/${ETCD_PORT}" && echo etcd-port-ok || { echo etcd-port-fail; exit 1; }'
 
 log "service discovery"
-run_kubectl -n "$NAMESPACE" exec "$POD" -c datasystem-worker -- \
+run_kubectl -n "$NAMESPACE" exec -i "$POD" -c datasystem-worker -- \
   env \
     ETCD_ADDRESS="$ETCD_ADDRESS" \
     CLUSTER_NAME="$CLUSTER_NAME" \
@@ -108,7 +108,7 @@ if len(workers) < expect_min:
 PY
 
 log "kv set/get"
-run_kubectl -n "$NAMESPACE" exec "$POD" -c datasystem-worker -- \
+run_kubectl -n "$NAMESPACE" exec -i "$POD" -c datasystem-worker -- \
   env \
     ETCD_ADDRESS="$ETCD_ADDRESS" \
     CLUSTER_NAME="$CLUSTER_NAME" \

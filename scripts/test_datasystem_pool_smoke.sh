@@ -6,7 +6,7 @@ ETCD_ADDRESS="${ETCD_ADDRESS:-141.61.91.188:12379}"
 CLUSTER_NAME="${CLUSTER_NAME:-pairec}"
 HOST_ID_ENV_NAME="${HOST_ID_ENV_NAME:-HOST_IP}"
 AFFINITY_POLICY="${AFFINITY_POLICY:-RANDOM}"
-EXPECT_MIN_WORKERS="${EXPECT_MIN_WORKERS:-2}"
+EXPECT_MIN_WORKERS="${EXPECT_MIN_WORKERS:-${EXPECT_MIN_WORKKERS:-2}}"
 
 POD="$(kubectl -n "$NAMESPACE" get pod -l app=datasystem-pool-worker \
   -o jsonpath='{.items[0].metadata.name}')"
@@ -16,7 +16,7 @@ if [ -z "$POD" ]; then
   exit 1
 fi
 
-kubectl -n "$NAMESPACE" exec "$POD" -c datasystem-worker -- \
+kubectl -n "$NAMESPACE" exec -i "$POD" -c datasystem-worker -- \
   env \
     ETCD_ADDRESS="$ETCD_ADDRESS" \
     CLUSTER_NAME="$CLUSTER_NAME" \
