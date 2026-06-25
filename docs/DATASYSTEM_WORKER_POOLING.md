@@ -79,6 +79,14 @@ kubectl -n pairec get pods -l app.kubernetes.io/part-of=datasystem-pool -o wide
 EXPECT_MIN_WORKERS=2 bash scripts/test_datasystem_pool_smoke.sh
 ```
 
+如果 smoke 没有输出或卡住，先跑分段诊断：
+
+```bash
+EXPECT_MIN_WORKERS=2 bash scripts/debug_datasystem_pool_smoke.sh
+```
+
+诊断脚本会依次检查 Pod/exec 通道、Python `yr.datasystem` import、ETCD 端口连通、ServiceDiscovery worker 选择和 KV `set/get`。最后一条已打印的阶段就是当前卡点。
+
 ## 让 TRT-LLM 真正使用池化
 
 只 apply K8s 清单还不够。`brpc_inference_server` 里调用的是 TensorRT-LLM C++ 动态库，必须把 patch 编进当前 runtime 里的 TensorRT-LLM。
