@@ -7,6 +7,7 @@ BRPC_PORT="${BRPC_PORT:-18100}"
 ENDPOINT="${ENDPOINT:-}"
 USER_ID="${USER_ID:-go_brpc_probe}"
 TOPK="${TOPK:-10}"
+REQUESTS="${REQUESTS:-1}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
 
@@ -23,6 +24,7 @@ echo "Go brpc client probe"
 echo "  endpoint: ${ENDPOINT}"
 echo "  user_id:  ${USER_ID}"
 echo "  topk:     ${TOPK}"
+echo "  requests: ${REQUESTS}"
 echo
 
 GOPROXY="${GOPROXY:-off}" \
@@ -40,5 +42,6 @@ go run -mod=vendor ./scripts/probe_go_brpc_client.go \
   --method=recommend \
   --user_id="$USER_ID" \
   --topk="$TOPK" \
+  --requests="$REQUESTS" \
   --timeout_ms="$TIMEOUT_MS" \
   --max_retries="$MAX_RETRIES"

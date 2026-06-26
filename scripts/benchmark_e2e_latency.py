@@ -34,6 +34,8 @@ RECALL_TRACE_FIELDS = [
     "cache_ms",
     "history_ms",
     "convert_ms",
+    "rpc_ms",
+    "brpc_ms",
     "http_ms",
     "items_ms",
     "tr_total_ms",

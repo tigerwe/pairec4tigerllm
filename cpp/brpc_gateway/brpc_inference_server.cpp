@@ -1054,6 +1054,7 @@ class NativeInferenceServiceImpl final : public pairec::inference::RecommendServ
     }
 
     std::cout << "[brpc-inference] method=Recommend user=" << request->user_id()
+              << " request_id=" << request->request_id()
               << " code=" << response->code()
               << " items=" << response->recommendations_size()
               << " latency_ms=" << timer.m_elapsed()
