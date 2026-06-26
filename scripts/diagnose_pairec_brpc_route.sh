@@ -134,6 +134,8 @@ cat <<EOF
 - If Service endpoints are empty, inference is not Ready or selector is wrong.
 - If nslookup fails in PaiRec, use the Service ClusterIP in brpc_endpoint or fix CoreDNS.
 - If direct brpc smoke succeeds but PaiRec request does not produce method=Recommend, the break is PaiRec config/client/DNS/TCP.
+- If TCP is open but PaiRec still does not produce method=Recommend, run:
+  bash scripts/test_go_brpc_client_probe.sh
 - If inference logs show method=Recommend but PaiRec returns code=299, the issue is recommendation quality/item count, not brpc routing.
 - If inference logs show Init KvCache host=141.61.91.189, the current inference -> DataSystem endpoint is 189.
 EOF
