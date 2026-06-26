@@ -212,6 +212,10 @@ for probe_event, server_event in paired:
 
 offloads = [event for event in ds_events if event.get("op") == "offload"]
 onboards = [event for event in ds_events if event.get("op") == "onboard"]
+probe_count = len(probe_events)
+offload_per_probe = (len(offloads) / probe_count) if probe_count else None
+onboard_per_probe = (len(onboards) / probe_count) if probe_count else None
+datasystem_per_probe = (len(ds_events) / probe_count) if probe_count else None
 
 def values(events, key):
     return [as_float(event.get(key)) for event in events]
@@ -232,6 +236,18 @@ comm_stats = print_metric("brpc_comm_est_ms", comm_est_ms, 3)
 print("  note: brpc_comm_est_ms = Go probe brpc RPC wall-clock - C++ server method latency.")
 print("        It includes Go encode/decode, brpc framing, TCP/CNI/kube-proxy, and server-side time outside the measured method.")
 
+print("\n== call counts per brpc request ==")
+print("  brpc_calls_per_probe          1.000")
+if offload_per_probe is None:
+    print("  offload_set_per_probe         (no samples)")
+    print("  onboard_get_per_probe         (no samples)")
+    print("  datasystem_access_per_probe   (no samples)")
+else:
+    print(f"  offload_set_per_probe         {offload_per_probe:.3f}")
+    print(f"  onboard_get_per_probe         {onboard_per_probe:.3f}")
+    print(f"  datasystem_access_per_probe   {datasystem_per_probe:.3f}")
+print("  note: onboard_get_per_probe is the observed KVC Get count per brpc Recommend request.")
+
 print("\n== KVC/DataSystem per block ==")
 offload_total = print_metric("offload.total_ms", values(offloads, "total_ms"), 3)
 offload_set = print_metric("offload.set_ms", values(offloads, "set_ms"), 3)
@@ -247,6 +263,10 @@ summary = {
         "datasystem_events": len(ds_events),
         "offload_events": len(offloads),
         "onboard_events": len(onboards),
+        "brpc_calls_per_probe": 1.0 if probe_count else None,
+        "offload_set_per_probe": offload_per_probe,
+        "onboard_get_per_probe": onboard_per_probe,
+        "datasystem_access_per_probe": datasystem_per_probe,
     },
     "pairing_mode": pairing_mode,
     "brpc": {
