@@ -62,9 +62,7 @@ set +e
 echo "-- /etc/resolv.conf --"
 cat /etc/resolv.conf || true
 
-endpoint=$(grep -o "\"brpc_endpoint\":\"[^\"]*\"" /app/configs/pairec_config.json | head -1)
-endpoint=${endpoint#*\"brpc_endpoint\":\"}
-endpoint=${endpoint%\"}
+endpoint=$(sed -n '\''s/.*\\*"brpc_endpoint\\*"[[:space:]]*:[[:space:]]*\\*"\([^"\\]*\).*/\1/p'\'' /app/configs/pairec_config.json | head -1)
 host=${endpoint%:*}
 port=${endpoint##*:}
 

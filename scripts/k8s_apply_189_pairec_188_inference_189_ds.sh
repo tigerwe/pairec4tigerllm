@@ -43,3 +43,6 @@ echo "  kubectl -n ${NAMESPACE} logs deploy/${INFERENCE_DEPLOYMENT} -c brpc-infe
 echo
 echo "Verify PaiRec request:"
 echo "  kubectl -n ${NAMESPACE} exec deploy/${PAIREC_DEPLOYMENT} -- wget -q -O - --header='Content-Type: application/json' --post-data='{\"scene_id\":\"home_feed\",\"uid\":\"6312\",\"size\":10}' http://127.0.0.1:18080/api/recommend"
+echo
+echo "If PaiRec Pod DNS cannot resolve ${INFERENCE_DEPLOYMENT}, bypass DNS with:"
+echo "  bash scripts/k8s_patch_pairec_brpc_endpoint_to_cluster_ip.sh"
