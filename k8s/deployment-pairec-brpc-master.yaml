@@ -1,0 +1,111 @@
+# ============================================
+# PaiRec brpc Deployment pinned to master/189
+# ============================================
+#
+# Purpose:
+#
+#   189 PaiRec
+#     -> brpc/TCP service inference-brpc-trtllm:18100
+#   188 inference-brpc-trtllm
+#
+# PaiRec is CPU-only. This manifest pins it to master/189 for cross-node
+# verification and uses the brpc-enabled PaiRec image.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pairec
+  namespace: pairec
+  labels:
+    app: pairec
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pairec
+  template:
+    metadata:
+      labels:
+        app: pairec
+    spec:
+      nodeName: master
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: pairec
+          image: docker.io/library/pairec-server:k8s-arm64-brpc-v1
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command:
+            - /app/pairec-server
+          ports:
+            - containerPort: 18080
+              name: http
+          env:
+            - name: CONFIG_PATH
+              value: /app/configs/pairec_config.json
+            - name: PAIREC_TRACE_STDOUT
+              value: "1"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "8Gi"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/configs
+              readOnly: true
+            - name: data-volume
+              mountPath: /data
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 18080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 18080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config-volume
+          configMap:
+            name: pairec-config
+        - name: data-volume
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/data
+            type: Directory
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: pairec
+  namespace: pairec
+  labels:
+    app: pairec
+spec:
+  selector:
+    app: pairec
+  ports:
+    - name: http
+      port: 18080
+      targetPort: 18080
+  type: ClusterIP
