@@ -111,6 +111,9 @@ func (c *TRTLLMClient) Recommend(req *RecommendRequest, traceID string) (*Recomm
 	if req.BeamWidth == 0 {
 		req.BeamWidth = c.config.BeamWidth
 	}
+	if req.PayloadPaddingBytes == 0 && c.config.Protocol == "brpc" && c.config.BRPCPayloadBytes > 0 {
+		req.PayloadPaddingBytes = c.config.BRPCPayloadBytes
+	}
 
 	if c.config.Protocol == "brpc" {
 		resp, err := c.brpcClient.Recommend(context.Background(), req, traceID)

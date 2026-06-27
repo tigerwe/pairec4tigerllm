@@ -331,7 +331,7 @@ for index, event in enumerate(brpc_events, start=1):
 if generative_trace:
     print("PaiRec GenerativeRecall stages:")
     for key in (
-        "from", "protocol", "cost", "cache_ms", "history_ms", "convert_ms",
+        "from", "protocol", "brpc_payload_bytes", "cost", "cache_ms", "history_ms", "convert_ms",
         "rpc_ms", "brpc_ms", "http_ms", "items_ms", "http_overhead_ms",
         "inference_svc_ms", "tr_total_ms", "tr_infer_ms", "tr_prompt_ms",
         "tr_runner_ms", "tr_parse_ms", "tr_pad_ms", "tr_backend_total_ms",

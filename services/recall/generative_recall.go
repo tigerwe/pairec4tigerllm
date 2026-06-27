@@ -85,6 +85,7 @@ type recallConfigJSON struct {
 	BRPCEndpoint       string              `json:"brpc_endpoint"`
 	BRPCServiceName    string              `json:"brpc_service_name"`
 	BRPCFallbackToHTTP *bool               `json:"brpc_fallback_to_http"`
+	BRPCPayloadBytes   int                 `json:"brpc_payload_bytes"`
 	TimeoutMs          int                 `json:"timeout_ms"`
 	MaxRetries         int                 `json:"max_retries"`
 	TopK               int                 `json:"topk"`
@@ -121,6 +122,7 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 				BRPCEndpoint:       algoConf.BRPCEndpoint,
 				BRPCServiceName:    algoConf.BRPCServiceName,
 				BRPCFallbackToHTTP: brpcFallback,
+				BRPCPayloadBytes:   algoConf.BRPCPayloadBytes,
 				Timeout:            time.Duration(algoConf.TimeoutMs) * time.Millisecond,
 				MaxRetries:         algoConf.MaxRetries,
 				TopK:               algoConf.TopK,
@@ -352,12 +354,17 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 	}
 
 	// 调用生成式推理服务
+	brpcPayloadBytes := 0
+	if strings.EqualFold(r.client.config.Protocol, "brpc") {
+		brpcPayloadBytes = r.client.config.BRPCPayloadBytes
+	}
 	request := &RecommendRequest{
-		UserID:      string(user.Id),
-		History:     semanticHistory,
-		Topk:        r.topK,
-		Temperature: r.temperature,
-		BeamWidth:   r.beamWidth,
+		UserID:              string(user.Id),
+		History:             semanticHistory,
+		Topk:                r.topK,
+		Temperature:         r.temperature,
+		BeamWidth:           r.beamWidth,
+		PayloadPaddingBytes: brpcPayloadBytes,
 	}
 
 	writeDebugLog(" Calling inference service, history=%v\n", semanticHistory)
@@ -373,8 +380,8 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		log.Error(fmt.Sprintf("requestId=%s\tmodule=GenerativeRecall\tname=%s\terr=generative_recommend:%v",
 			ctx.RecommendId, r.modelName, err))
 		writeTraceStdout(
-			"requestId=%s request_id=%s module=GenerativeRecall from=error stage=inference name=%s user=%s protocol=%s cost=%d cache_ms=%d history_ms=%d convert_ms=%d rpc_ms=%d http_ms=%d brpc_ms=%d err=generative_recommend",
-			ctx.RecommendId, traceID, r.modelName, user.Id, r.client.config.Protocol, utils.CostTime(stageStart),
+			"requestId=%s request_id=%s module=GenerativeRecall from=error stage=inference name=%s user=%s protocol=%s brpc_payload_bytes=%d cost=%d cache_ms=%d history_ms=%d convert_ms=%d rpc_ms=%d http_ms=%d brpc_ms=%d err=generative_recommend",
+			ctx.RecommendId, traceID, r.modelName, user.Id, r.client.config.Protocol, request.PayloadPaddingBytes, utils.CostTime(stageStart),
 			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
 			stageHTTP.Milliseconds(), stageHTTP.Milliseconds(), brpcStageMs(r.client.config.Protocol, stageHTTP),
 		)
@@ -435,14 +442,14 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		))
 		writeTraceStdout(
 			"requestId=%s request_id=%s module=GenerativeRecall from=inference name=%s user=%s protocol=%s count=%d cost=%d"+
-				" cache_ms=%d history_ms=%d convert_ms=%d rpc_ms=%d http_ms=%d brpc_ms=%d items_ms=%d"+
+				" brpc_payload_bytes=%d cache_ms=%d history_ms=%d convert_ms=%d rpc_ms=%d http_ms=%d brpc_ms=%d items_ms=%d"+
 				" tr_backend=%s tr_total_ms=%.1f tr_prepare_ms=%.1f tr_infer_ms=%.1f tr_forward_ms=%.1f tr_generate_ms=%.1f"+
 				" tr_prompt_ms=%.1f tr_runner_ms=%.1f tr_parse_ms=%.1f tr_pad_ms=%.1f tr_backend_total_ms=%.1f tr_map_ms=%.1f"+
 				" tr_kv_source=%s tr_kv_lookup_ms=%.1f tr_kv_write_ms=%.1f"+
 				" tr_result_cache_source=%s tr_result_cache_lookup_ms=%.1f tr_result_cache_ds_lookup_ms=%.1f"+
 				" tr_result_cache_write_submit_ms=%.1f http_overhead_ms=%d",
 			ctx.RecommendId, traceID, r.modelName, user.Id, r.client.config.Protocol, len(items), totalCost,
-			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
+			request.PayloadPaddingBytes, stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
 			stageHTTP.Milliseconds(), stageHTTP.Milliseconds(), brpcStageMs(r.client.config.Protocol, stageHTTP), stageItems.Milliseconds(),
 			response.Trace.Backend, response.Trace.TotalMs,
 			response.Trace.PrepareInputMs, response.Trace.InferMs,
@@ -467,9 +474,9 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		))
 		writeTraceStdout(
 			"requestId=%s request_id=%s module=GenerativeRecall from=inference name=%s user=%s protocol=%s count=%d cost=%d"+
-				" cache_ms=%d history_ms=%d convert_ms=%d rpc_ms=%d http_ms=%d brpc_ms=%d items_ms=%d inference_svc_ms=%.0f",
+				" brpc_payload_bytes=%d cache_ms=%d history_ms=%d convert_ms=%d rpc_ms=%d http_ms=%d brpc_ms=%d items_ms=%d inference_svc_ms=%.0f",
 			ctx.RecommendId, traceID, r.modelName, user.Id, r.client.config.Protocol, len(items), totalCost,
-			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
+			request.PayloadPaddingBytes, stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
 			stageHTTP.Milliseconds(), stageHTTP.Milliseconds(), brpcStageMs(r.client.config.Protocol, stageHTTP), stageItems.Milliseconds(),
 			response.InferenceTimeMs,
 		)

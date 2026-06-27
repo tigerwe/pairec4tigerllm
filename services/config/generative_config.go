@@ -26,6 +26,7 @@ type GenerativeRecallConfig struct {
 	BRPCEndpoint       string        `json:"brpc_endpoint" yaml:"brpc_endpoint"`                 // brpc/TCP 服务地址, 例如 inference-brpc-trtllm:18100
 	BRPCServiceName    string        `json:"brpc_service_name" yaml:"brpc_service_name"`         // brpc service full name
 	BRPCFallbackToHTTP bool          `json:"brpc_fallback_to_http" yaml:"brpc_fallback_to_http"` // brpc 失败时是否回退 HTTP
+	BRPCPayloadBytes   int           `json:"brpc_payload_bytes" yaml:"brpc_payload_bytes"`       // brpc 压测用额外 payload 字节数, 默认 0
 	Timeout            time.Duration `json:"timeout" yaml:"timeout"`                             // 请求超时
 	MaxRetries         int           `json:"max_retries" yaml:"max_retries"`                     // 最大重试次数
 	MaxBatchSize       int           `json:"max_batch_size" yaml:"max_batch_size"`               // 最大批次大小
@@ -85,6 +86,9 @@ func (c *GenerativeRecallConfig) Validate() error {
 	}
 	if c.BRPCServiceName == "" {
 		c.BRPCServiceName = "pairec.inference.RecommendService"
+	}
+	if c.BRPCPayloadBytes < 0 {
+		c.BRPCPayloadBytes = 0
 	}
 
 	switch c.Protocol {
