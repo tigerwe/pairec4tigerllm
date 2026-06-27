@@ -10,6 +10,12 @@ TOPK="${TOPK:-10}"
 REQUESTS="${REQUESTS:-1}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
+HISTORY_SOURCE="${HISTORY_SOURCE:-synthetic}"
+UIDS="${UIDS:-}"
+USER_FEATURES_PATH="${USER_FEATURES_PATH:-data/user_features.json}"
+SEMANTIC_MAP_PATH="${SEMANTIC_MAP_PATH:-data/tenrec/processed/semantic_id_map.json}"
+HISTORY_MAX_LENGTH="${HISTORY_MAX_LENGTH:-20}"
+VARY_USER_ID="${VARY_USER_ID:-true}"
 
 if [ -z "$ENDPOINT" ]; then
   service_ip="$(kubectl -n "$NAMESPACE" get svc "$INFERENCE_SERVICE" -o jsonpath='{.spec.clusterIP}')"
@@ -25,6 +31,7 @@ echo "  endpoint: ${ENDPOINT}"
 echo "  user_id:  ${USER_ID}"
 echo "  topk:     ${TOPK}"
 echo "  requests: ${REQUESTS}"
+echo "  history:  ${HISTORY_SOURCE}"
 echo
 
 GOPROXY="${GOPROXY:-off}" \
@@ -44,4 +51,10 @@ go run -mod=vendor ./scripts/probe_go_brpc_client.go \
   --topk="$TOPK" \
   --requests="$REQUESTS" \
   --timeout_ms="$TIMEOUT_MS" \
-  --max_retries="$MAX_RETRIES"
+  --max_retries="$MAX_RETRIES" \
+  --history_source="$HISTORY_SOURCE" \
+  --uids="$UIDS" \
+  --user_features_path="$USER_FEATURES_PATH" \
+  --semantic_map_path="$SEMANTIC_MAP_PATH" \
+  --history_max_length="$HISTORY_MAX_LENGTH" \
+  --vary_user_id="$VARY_USER_ID"

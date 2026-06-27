@@ -13,6 +13,12 @@ TOPK="${TOPK:-1}"
 REQUESTS="${REQUESTS:-20}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
+HISTORY_SOURCE="${HISTORY_SOURCE:-synthetic}"
+UIDS="${UIDS:-}"
+USER_FEATURES_PATH="${USER_FEATURES_PATH:-data/user_features.json}"
+SEMANTIC_MAP_PATH="${SEMANTIC_MAP_PATH:-data/tenrec/processed/semantic_id_map.json}"
+HISTORY_MAX_LENGTH="${HISTORY_MAX_LENGTH:-20}"
+VARY_USER_ID="${VARY_USER_ID:-true}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT_DIR="${OUT_DIR:-/tmp/go_brpc_probe_kvc_latency/${RUN_ID}}"
@@ -81,6 +87,12 @@ run_probe() {
     --requests="$REQUESTS" \
     --timeout_ms="$TIMEOUT_MS" \
     --max_retries="$MAX_RETRIES" \
+    --history_source="$HISTORY_SOURCE" \
+    --uids="$UIDS" \
+    --user_features_path="$USER_FEATURES_PATH" \
+    --semantic_map_path="$SEMANTIC_MAP_PATH" \
+    --history_max_length="$HISTORY_MAX_LENGTH" \
+    --vary_user_id="$VARY_USER_ID" \
     >"$PROBE_LOG" 2>&1
   local code="$?"
   set -e
@@ -305,6 +317,13 @@ kubectl -n "$NAMESPACE" get pods -o wide | grep -E 'inference-brpc-trtllm|datasy
 kubectl -n "$NAMESPACE" get svc "$INFERENCE_SERVICE" -o wide \
   | tee "${OUT_DIR}/service.txt"
 echo "endpoint=${ENDPOINT}" | tee "${OUT_DIR}/endpoint.txt"
+{
+  echo "history_source=${HISTORY_SOURCE}"
+  echo "uids=${UIDS}"
+  echo "user_features_path=${USER_FEATURES_PATH}"
+  echo "semantic_map_path=${SEMANTIC_MAP_PATH}"
+  echo "history_max_length=${HISTORY_MAX_LENGTH}"
+} | tee "${OUT_DIR}/request_source.txt"
 
 log "Start inference log collector"
 start_server_log_collector
