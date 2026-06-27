@@ -8,6 +8,7 @@ ENDPOINT="${ENDPOINT:-}"
 USER_ID="${USER_ID:-go_brpc_probe}"
 TOPK="${TOPK:-10}"
 REQUESTS="${REQUESTS:-1}"
+CONCURRENCY="${CONCURRENCY:-1}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
 PAYLOAD_BYTES="${PAYLOAD_BYTES:-0}"
@@ -32,6 +33,7 @@ echo "  endpoint: ${ENDPOINT}"
 echo "  user_id:  ${USER_ID}"
 echo "  topk:     ${TOPK}"
 echo "  requests: ${REQUESTS}"
+echo "  conc:     ${CONCURRENCY}"
 echo "  payload:  ${PAYLOAD_BYTES} bytes"
 echo "  history:  ${HISTORY_SOURCE}"
 echo
@@ -42,6 +44,7 @@ go run -mod=vendor ./scripts/probe_go_brpc_client.go \
   --endpoint="$ENDPOINT" \
   --method=health \
   --requests="$REQUESTS" \
+  --concurrency="$CONCURRENCY" \
   --payload_bytes="$PAYLOAD_BYTES" \
   --timeout_ms="$TIMEOUT_MS" \
   --max_retries="$MAX_RETRIES"
@@ -54,6 +57,7 @@ go run -mod=vendor ./scripts/probe_go_brpc_client.go \
   --user_id="$USER_ID" \
   --topk="$TOPK" \
   --requests="$REQUESTS" \
+  --concurrency="$CONCURRENCY" \
   --payload_bytes="$PAYLOAD_BYTES" \
   --timeout_ms="$TIMEOUT_MS" \
   --max_retries="$MAX_RETRIES" \

@@ -11,6 +11,7 @@ ENDPOINT="${ENDPOINT:-}"
 USER_ID="${USER_ID:-go_brpc_probe}"
 TOPK="${TOPK:-1}"
 REQUESTS="${REQUESTS:-20}"
+CONCURRENCY="${CONCURRENCY:-1}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
 PAYLOAD_BYTES="${PAYLOAD_BYTES:-0}"
@@ -86,6 +87,7 @@ run_probe() {
     --user_id="$USER_ID" \
     --topk="$TOPK" \
     --requests="$REQUESTS" \
+    --concurrency="$CONCURRENCY" \
     --payload_bytes="$PAYLOAD_BYTES" \
     --timeout_ms="$TIMEOUT_MS" \
     --max_retries="$MAX_RETRIES" \
@@ -202,6 +204,10 @@ server_by_request_id = {
     if event.get("request_id")
 }
 
+probe_rpc_ms = [as_float(event.get("latency_ms")) for event in probe_events]
+probe_inference_ms = [as_float(event.get("inference_ms")) for event in probe_events]
+server_ms = [as_float(event.get("latency_ms")) for event in server_events]
+
 paired = []
 pairing_mode = "none"
 if server_by_request_id:
@@ -209,20 +215,32 @@ if server_by_request_id:
         match = server_by_request_id.get(event.get("request_id"))
         if match:
             paired.append((event, match))
-    pairing_mode = "request_id"
-elif len(probe_events) == len(server_events):
-    paired = list(zip(probe_events, server_events))
-    pairing_mode = "serial_order"
+    if paired:
+        pairing_mode = "request_id"
 
-probe_rpc_ms = [as_float(event.get("latency_ms")) for event in probe_events]
-probe_inference_ms = [as_float(event.get("inference_ms")) for event in probe_events]
-server_ms = [as_float(event.get("latency_ms")) for event in server_events]
 comm_est_ms = []
-for probe_event, server_event in paired:
-    rpc_ms = as_float(probe_event.get("latency_ms"))
-    srv_ms = as_float(server_event.get("latency_ms"))
-    if rpc_ms is not None and srv_ms is not None:
-        comm_est_ms.append(max(0.0, rpc_ms - srv_ms))
+if paired:
+    for probe_event, server_event in paired:
+        rpc_ms = as_float(probe_event.get("latency_ms"))
+        srv_ms = as_float(server_event.get("latency_ms"))
+        if rpc_ms is not None and srv_ms is not None:
+            comm_est_ms.append(max(0.0, rpc_ms - srv_ms))
+else:
+    for event in probe_events:
+        rpc_ms = as_float(event.get("latency_ms"))
+        infer_ms = as_float(event.get("inference_ms"))
+        if rpc_ms is not None and infer_ms is not None:
+            comm_est_ms.append(max(0.0, rpc_ms - infer_ms))
+    if comm_est_ms:
+        pairing_mode = "response_inference_ms"
+    elif len(probe_events) == len(server_events):
+        paired = list(zip(probe_events, server_events))
+        pairing_mode = "serial_order"
+        for probe_event, server_event in paired:
+            rpc_ms = as_float(probe_event.get("latency_ms"))
+            srv_ms = as_float(server_event.get("latency_ms"))
+            if rpc_ms is not None and srv_ms is not None:
+                comm_est_ms.append(max(0.0, rpc_ms - srv_ms))
 
 offloads = [event for event in ds_events if event.get("op") == "offload"]
 onboards = [event for event in ds_events if event.get("op") == "onboard"]
@@ -247,7 +265,11 @@ probe_rpc_stats = print_metric("go_probe_brpc_rpc_ms", probe_rpc_ms, 3)
 probe_inference_stats = print_metric("go_probe_inference_ms", probe_inference_ms, 3)
 server_stats = print_metric("server_method_ms", server_ms, 3)
 comm_stats = print_metric("brpc_comm_est_ms", comm_est_ms, 3)
-print("  note: brpc_comm_est_ms = Go probe brpc RPC wall-clock - C++ server method latency.")
+if pairing_mode == "response_inference_ms":
+    print("  note: brpc_comm_est_ms = Go probe brpc RPC wall-clock - response inference_ms.")
+    print("        It is safe for concurrent runs because both values come from the same brpc response.")
+else:
+    print("  note: brpc_comm_est_ms = Go probe brpc RPC wall-clock - C++ server method latency.")
 print("        It includes Go encode/decode, brpc framing, TCP/CNI/kube-proxy, and server-side time outside the measured method.")
 
 print("\n== call counts per brpc request ==")
@@ -326,6 +348,7 @@ echo "endpoint=${ENDPOINT}" | tee "${OUT_DIR}/endpoint.txt"
   echo "semantic_map_path=${SEMANTIC_MAP_PATH}"
   echo "history_max_length=${HISTORY_MAX_LENGTH}"
   echo "payload_bytes=${PAYLOAD_BYTES}"
+  echo "concurrency=${CONCURRENCY}"
 } | tee "${OUT_DIR}/request_source.txt"
 
 log "Start inference log collector"

@@ -6,6 +6,7 @@ INFERENCE_SERVICE="${INFERENCE_SERVICE:-inference-brpc-trtllm}"
 BRPC_PORT="${BRPC_PORT:-18100}"
 ENDPOINT="${ENDPOINT:-}"
 REQUESTS="${REQUESTS:-200}"
+CONCURRENCY="${CONCURRENCY:-1}"
 PAYLOAD_BYTES="${PAYLOAD_BYTES:-102400}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
@@ -92,12 +93,18 @@ with open(probe_log_path, "r", encoding="utf-8", errors="replace") as handle:
     lines = handle.read().splitlines()
 
 events = [parse_kv(line) for line in lines if line.startswith("health ok ")]
+summary_events = [parse_kv(line) for line in lines if line.startswith("summary ")]
 latencies = [as_float(event.get("latency_ms")) for event in events]
 payloads = sorted({int(event.get("payload_bytes", "0")) for event in events})
+concurrency = None
+if summary_events:
+    concurrency = summary_events[-1].get("concurrency")
 latency_stats = stats(latencies)
 
 print("Go brpc payload latency summary")
 print(f"  health_events={len(events)}")
+if concurrency:
+    print(f"  concurrency={concurrency}")
 print(f"  payload_bytes={','.join(str(v) for v in payloads) if payloads else 'unknown'}")
 if latency_stats:
     print(
@@ -117,6 +124,7 @@ print("        The server ignores the payload field; this is a brpc/TCP + protob
 
 summary = {
     "counts": {"health_events": len(events)},
+    "concurrency": int(concurrency) if concurrency else None,
     "payload_bytes": payloads,
     "brpc": {"health_rpc_ms": latency_stats},
 }
@@ -135,6 +143,7 @@ resolve_endpoint
 echo "Go brpc payload latency benchmark"
 echo "  endpoint:      ${ENDPOINT}"
 echo "  requests:      ${REQUESTS}"
+echo "  concurrency:   ${CONCURRENCY}"
 echo "  payload_bytes: ${PAYLOAD_BYTES}"
 echo "  out_dir:       ${OUT_DIR}"
 echo
@@ -146,6 +155,7 @@ go run -mod=vendor ./scripts/probe_go_brpc_client.go \
   --endpoint="$ENDPOINT" \
   --method=health \
   --requests="$REQUESTS" \
+  --concurrency="$CONCURRENCY" \
   --payload_bytes="$PAYLOAD_BYTES" \
   --timeout_ms="$TIMEOUT_MS" \
   --max_retries="$MAX_RETRIES" \

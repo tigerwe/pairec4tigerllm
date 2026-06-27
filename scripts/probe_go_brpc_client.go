@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	recall "pairec4tigerllm/services/recall"
@@ -26,6 +27,7 @@ func main() {
 	userID := flag.String("user_id", getenv("USER_ID", "go_brpc_probe"), "user id for recommend")
 	topk := flag.Int("topk", getenvInt("TOPK", 10), "recommend topk")
 	requests := flag.Int("requests", getenvInt("REQUESTS", 1), "number of recommend requests")
+	concurrency := flag.Int("concurrency", getenvInt("CONCURRENCY", 1), "number of concurrent in-flight requests")
 	timeoutMs := flag.Int("timeout_ms", getenvInt("TIMEOUT_MS", 5000), "request timeout in ms")
 	maxRetries := flag.Int("max_retries", getenvInt("MAX_RETRIES", 1), "max retries")
 	payloadBytes := flag.Int("payload_bytes", getenvInt("PAYLOAD_BYTES", 0), "extra protobuf payload padding bytes")
@@ -56,23 +58,36 @@ func main() {
 		}
 		okCount := 0
 		totalStart := time.Now()
-		for index := 1; index <= *requests; index++ {
+		results := runIndexed(*requests, *concurrency, func(index int) probeResult {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
 			started := time.Now()
 			resp, err := client.HealthCheckWithPayload(ctx, *payloadBytes)
 			cancel()
 			elapsed := time.Since(started).Milliseconds()
 			if err != nil {
+				return probeResult{index: index, latencyMs: elapsed, err: err}
+			}
+			return probeResult{
+				index:     index,
+				latencyMs: elapsed,
+				code:      resp.Code,
+				status:    resp.Status,
+				backend:   resp.Backend,
+			}
+		})
+		for _, result := range results {
+			if result.err != nil {
 				fmt.Fprintf(os.Stderr, "health failed index=%d endpoint=%s payload_bytes=%d latency_ms=%d error=%v\n",
-					index, *endpoint, *payloadBytes, elapsed, err)
+					result.index, *endpoint, *payloadBytes, result.latencyMs, result.err)
 				continue
 			}
 			okCount++
 			fmt.Printf("health ok index=%d endpoint=%s payload_bytes=%d latency_ms=%d code=%d status=%s backend=%s\n",
-				index, *endpoint, *payloadBytes, elapsed, resp.Code, resp.Status, resp.Backend)
+				result.index, *endpoint, *payloadBytes, result.latencyMs, result.code, result.status, result.backend)
 		}
 		totalElapsed := time.Since(totalStart).Milliseconds()
-		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d\n", okCount, *requests, totalElapsed, *payloadBytes)
+		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d concurrency=%d\n",
+			okCount, *requests, totalElapsed, *payloadBytes, normalizedConcurrency(*requests, *concurrency))
 		if okCount != *requests {
 			os.Exit(1)
 		}
@@ -88,7 +103,7 @@ func main() {
 		}
 		okCount := 0
 		totalStart := time.Now()
-		for index := 1; index <= *requests; index++ {
+		results := runIndexed(*requests, *concurrency, func(index int) probeResult {
 			plan := requestPlans[(index-1)%len(requestPlans)]
 			requestID := fmt.Sprintf("go-brpc-probe-%d", index)
 			req := &recall.RecommendRequest{
@@ -105,21 +120,37 @@ func main() {
 			cancel()
 			elapsed := time.Since(started).Milliseconds()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "recommend failed index=%d endpoint=%s request_id=%s latency_ms=%d error=%v\n",
-					index, *endpoint, requestID, elapsed, err)
-				continue
+				return probeResult{index: index, requestID: requestID, latencyMs: elapsed, err: err}
 			}
-			okCount++
 			inferenceMs := resp.InferenceTimeMs
 			backend := ""
 			if resp.Trace != nil {
 				backend = resp.Trace.Backend
 			}
+			return probeResult{
+				index:       index,
+				requestID:   requestID,
+				latencyMs:   elapsed,
+				code:        resp.Code,
+				userID:      resp.UserID,
+				items:       len(resp.Recommendations),
+				inferenceMs: inferenceMs,
+				backend:     backend,
+			}
+		})
+		for _, result := range results {
+			if result.err != nil {
+				fmt.Fprintf(os.Stderr, "recommend failed index=%d endpoint=%s request_id=%s latency_ms=%d error=%v\n",
+					result.index, *endpoint, result.requestID, result.latencyMs, result.err)
+				continue
+			}
+			okCount++
 			fmt.Printf("recommend ok index=%d endpoint=%s request_id=%s payload_bytes=%d latency_ms=%d code=%d user_id=%s items=%d inference_ms=%.0f backend=%s\n",
-				index, *endpoint, requestID, *payloadBytes, elapsed, resp.Code, resp.UserID, len(resp.Recommendations), inferenceMs, backend)
+				result.index, *endpoint, result.requestID, *payloadBytes, result.latencyMs, result.code, result.userID, result.items, result.inferenceMs, result.backend)
 		}
 		totalElapsed := time.Since(totalStart).Milliseconds()
-		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d\n", okCount, *requests, totalElapsed, *payloadBytes)
+		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d concurrency=%d\n",
+			okCount, *requests, totalElapsed, *payloadBytes, normalizedConcurrency(*requests, *concurrency))
 		if okCount != *requests {
 			os.Exit(1)
 		}
@@ -127,6 +158,51 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unknown method %q\n", *method)
 		os.Exit(2)
 	}
+}
+
+type probeResult struct {
+	index       int
+	requestID   string
+	latencyMs   int64
+	err         error
+	code        int
+	status      string
+	backend     string
+	userID      string
+	items       int
+	inferenceMs float64
+}
+
+func runIndexed(total int, concurrency int, fn func(index int) probeResult) []probeResult {
+	results := make([]probeResult, total)
+	concurrency = normalizedConcurrency(total, concurrency)
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for worker := 0; worker < concurrency; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				results[index-1] = fn(index)
+			}
+		}()
+	}
+	for index := 1; index <= total; index++ {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+	return results
+}
+
+func normalizedConcurrency(total int, concurrency int) int {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if total > 0 && concurrency > total {
+		concurrency = total
+	}
+	return concurrency
 }
 
 func buildProbeRequests(historySource, baseUserID, uids, userFeaturesPath, semanticMapPath string, historyMaxLength int, varyUserID bool, requestCount int) ([]probeRequest, error) {
