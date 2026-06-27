@@ -46,12 +46,13 @@ func (m *semanticIDPB) String() string { return proto.CompactTextString(m) }
 func (*semanticIDPB) ProtoMessage()    {}
 
 type recommendRequestPB struct {
-	UserID      *string         `protobuf:"bytes,1,opt,name=user_id,json=userId" json:"user_id,omitempty"`
-	History     []*semanticIDPB `protobuf:"bytes,2,rep,name=history" json:"history,omitempty"`
-	Topk        *int32          `protobuf:"varint,3,opt,name=topk,def=10" json:"topk,omitempty"`
-	Temperature *float64        `protobuf:"fixed64,4,opt,name=temperature,def=1" json:"temperature,omitempty"`
-	BeamWidth   *int32          `protobuf:"varint,5,opt,name=beam_width,json=beamWidth,def=1" json:"beam_width,omitempty"`
-	RequestID   *string         `protobuf:"bytes,6,opt,name=request_id,json=requestId" json:"request_id,omitempty"`
+	UserID         *string         `protobuf:"bytes,1,opt,name=user_id,json=userId" json:"user_id,omitempty"`
+	History        []*semanticIDPB `protobuf:"bytes,2,rep,name=history" json:"history,omitempty"`
+	Topk           *int32          `protobuf:"varint,3,opt,name=topk,def=10" json:"topk,omitempty"`
+	Temperature    *float64        `protobuf:"fixed64,4,opt,name=temperature,def=1" json:"temperature,omitempty"`
+	BeamWidth      *int32          `protobuf:"varint,5,opt,name=beam_width,json=beamWidth,def=1" json:"beam_width,omitempty"`
+	RequestID      *string         `protobuf:"bytes,6,opt,name=request_id,json=requestId" json:"request_id,omitempty"`
+	PayloadPadding []byte          `protobuf:"bytes,101,opt,name=payload_padding,json=payloadPadding" json:"payload_padding,omitempty"`
 }
 
 func (m *recommendRequestPB) Reset()         { *m = recommendRequestPB{} }
@@ -111,7 +112,9 @@ func (m *recommendResponsePB) Reset()         { *m = recommendResponsePB{} }
 func (m *recommendResponsePB) String() string { return proto.CompactTextString(m) }
 func (*recommendResponsePB) ProtoMessage()    {}
 
-type healthRequestPB struct{}
+type healthRequestPB struct {
+	PayloadPadding []byte `protobuf:"bytes,101,opt,name=payload_padding,json=payloadPadding" json:"payload_padding,omitempty"`
+}
 
 func (m *healthRequestPB) Reset()         { *m = healthRequestPB{} }
 func (m *healthRequestPB) String() string { return proto.CompactTextString(m) }
@@ -154,7 +157,17 @@ func recommendRequestToProto(req *RecommendRequest, requestID string) *recommend
 	if requestID != "" {
 		pb.RequestID = proto.String(requestID)
 	}
+	if req.PayloadPaddingBytes > 0 {
+		pb.PayloadPadding = makePayloadPadding(req.PayloadPaddingBytes)
+	}
 	return pb
+}
+
+func makePayloadPadding(size int) []byte {
+	if size <= 0 {
+		return nil
+	}
+	return make([]byte, size)
 }
 
 func recommendResponseFromProto(pb *recommendResponsePB) *RecommendResponse {

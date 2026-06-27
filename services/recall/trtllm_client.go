@@ -19,11 +19,12 @@ import (
 
 // RecommendRequest 推荐请求.
 type RecommendRequest struct {
-	UserID      string  `json:"user_id"`
-	History     [][]int `json:"history"` // 语义 ID 序列，每个元素是 [num_quantizers]
-	Topk        int     `json:"topk"`
-	Temperature float64 `json:"temperature"`
-	BeamWidth   int     `json:"beam_width"`
+	UserID              string  `json:"user_id"`
+	History             [][]int `json:"history"` // 语义 ID 序列，每个元素是 [num_quantizers]
+	Topk                int     `json:"topk"`
+	Temperature         float64 `json:"temperature"`
+	BeamWidth           int     `json:"beam_width"`
+	PayloadPaddingBytes int     `json:"-"` // probe-only brpc payload padding; ignored by HTTP.
 }
 
 // TraceInfo 推理服务回传的性能追踪信息.

@@ -13,6 +13,7 @@ TOPK="${TOPK:-1}"
 REQUESTS="${REQUESTS:-20}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
+PAYLOAD_BYTES="${PAYLOAD_BYTES:-0}"
 HISTORY_SOURCE="${HISTORY_SOURCE:-synthetic}"
 UIDS="${UIDS:-}"
 USER_FEATURES_PATH="${USER_FEATURES_PATH:-data/user_features.json}"
@@ -85,6 +86,7 @@ run_probe() {
     --user_id="$USER_ID" \
     --topk="$TOPK" \
     --requests="$REQUESTS" \
+    --payload_bytes="$PAYLOAD_BYTES" \
     --timeout_ms="$TIMEOUT_MS" \
     --max_retries="$MAX_RETRIES" \
     --history_source="$HISTORY_SOURCE" \
@@ -323,6 +325,7 @@ echo "endpoint=${ENDPOINT}" | tee "${OUT_DIR}/endpoint.txt"
   echo "user_features_path=${USER_FEATURES_PATH}"
   echo "semantic_map_path=${SEMANTIC_MAP_PATH}"
   echo "history_max_length=${HISTORY_MAX_LENGTH}"
+  echo "payload_bytes=${PAYLOAD_BYTES}"
 } | tee "${OUT_DIR}/request_source.txt"
 
 log "Start inference log collector"

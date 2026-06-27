@@ -28,6 +28,7 @@ func main() {
 	requests := flag.Int("requests", getenvInt("REQUESTS", 1), "number of recommend requests")
 	timeoutMs := flag.Int("timeout_ms", getenvInt("TIMEOUT_MS", 5000), "request timeout in ms")
 	maxRetries := flag.Int("max_retries", getenvInt("MAX_RETRIES", 1), "max retries")
+	payloadBytes := flag.Int("payload_bytes", getenvInt("PAYLOAD_BYTES", 0), "extra protobuf payload padding bytes")
 	historySource := flag.String("history_source", getenv("HISTORY_SOURCE", "synthetic"), "synthetic or user_features")
 	uids := flag.String("uids", getenv("UIDS", ""), "comma-separated user ids for user_features history source")
 	userFeaturesPath := flag.String("user_features_path", getenv("USER_FEATURES_PATH", "data/user_features.json"), "user_features.json path")
@@ -47,19 +48,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	start := time.Now()
 	switch *method {
 	case "health":
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
-		resp, err := client.HealthCheck(ctx)
-		cancel()
-		elapsed := time.Since(start).Milliseconds()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "health failed endpoint=%s latency_ms=%d error=%v\n", *endpoint, elapsed, err)
+		if *requests < 1 {
+			fmt.Fprintln(os.Stderr, "requests must be positive")
+			os.Exit(2)
+		}
+		okCount := 0
+		totalStart := time.Now()
+		for index := 1; index <= *requests; index++ {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
+			started := time.Now()
+			resp, err := client.HealthCheckWithPayload(ctx, *payloadBytes)
+			cancel()
+			elapsed := time.Since(started).Milliseconds()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "health failed index=%d endpoint=%s payload_bytes=%d latency_ms=%d error=%v\n",
+					index, *endpoint, *payloadBytes, elapsed, err)
+				continue
+			}
+			okCount++
+			fmt.Printf("health ok index=%d endpoint=%s payload_bytes=%d latency_ms=%d code=%d status=%s backend=%s\n",
+				index, *endpoint, *payloadBytes, elapsed, resp.Code, resp.Status, resp.Backend)
+		}
+		totalElapsed := time.Since(totalStart).Milliseconds()
+		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d\n", okCount, *requests, totalElapsed, *payloadBytes)
+		if okCount != *requests {
 			os.Exit(1)
 		}
-		fmt.Printf("health ok endpoint=%s latency_ms=%d code=%d status=%s backend=%s\n",
-			*endpoint, elapsed, resp.Code, resp.Status, resp.Backend)
 	case "recommend":
 		if *requests < 1 {
 			fmt.Fprintln(os.Stderr, "requests must be positive")
@@ -76,11 +92,12 @@ func main() {
 			plan := requestPlans[(index-1)%len(requestPlans)]
 			requestID := fmt.Sprintf("go-brpc-probe-%d", index)
 			req := &recall.RecommendRequest{
-				UserID:      plan.userID,
-				History:     plan.history,
-				Topk:        *topk,
-				Temperature: 1.0,
-				BeamWidth:   1,
+				UserID:              plan.userID,
+				History:             plan.history,
+				Topk:                *topk,
+				Temperature:         1.0,
+				BeamWidth:           1,
+				PayloadPaddingBytes: *payloadBytes,
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
 			started := time.Now()
@@ -98,11 +115,11 @@ func main() {
 			if resp.Trace != nil {
 				backend = resp.Trace.Backend
 			}
-			fmt.Printf("recommend ok index=%d endpoint=%s request_id=%s latency_ms=%d code=%d user_id=%s items=%d inference_ms=%.0f backend=%s\n",
-				index, *endpoint, requestID, elapsed, resp.Code, resp.UserID, len(resp.Recommendations), inferenceMs, backend)
+			fmt.Printf("recommend ok index=%d endpoint=%s request_id=%s payload_bytes=%d latency_ms=%d code=%d user_id=%s items=%d inference_ms=%.0f backend=%s\n",
+				index, *endpoint, requestID, *payloadBytes, elapsed, resp.Code, resp.UserID, len(resp.Recommendations), inferenceMs, backend)
 		}
 		totalElapsed := time.Since(totalStart).Milliseconds()
-		fmt.Printf("summary ok=%d total=%d total_ms=%d\n", okCount, *requests, totalElapsed)
+		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d\n", okCount, *requests, totalElapsed, *payloadBytes)
 		if okCount != *requests {
 			os.Exit(1)
 		}

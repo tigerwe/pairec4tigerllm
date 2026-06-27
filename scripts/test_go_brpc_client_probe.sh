@@ -10,6 +10,7 @@ TOPK="${TOPK:-10}"
 REQUESTS="${REQUESTS:-1}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
+PAYLOAD_BYTES="${PAYLOAD_BYTES:-0}"
 HISTORY_SOURCE="${HISTORY_SOURCE:-synthetic}"
 UIDS="${UIDS:-}"
 USER_FEATURES_PATH="${USER_FEATURES_PATH:-data/user_features.json}"
@@ -31,6 +32,7 @@ echo "  endpoint: ${ENDPOINT}"
 echo "  user_id:  ${USER_ID}"
 echo "  topk:     ${TOPK}"
 echo "  requests: ${REQUESTS}"
+echo "  payload:  ${PAYLOAD_BYTES} bytes"
 echo "  history:  ${HISTORY_SOURCE}"
 echo
 
@@ -39,6 +41,8 @@ GOSUMDB="${GOSUMDB:-off}" \
 go run -mod=vendor ./scripts/probe_go_brpc_client.go \
   --endpoint="$ENDPOINT" \
   --method=health \
+  --requests="$REQUESTS" \
+  --payload_bytes="$PAYLOAD_BYTES" \
   --timeout_ms="$TIMEOUT_MS" \
   --max_retries="$MAX_RETRIES"
 
@@ -50,6 +54,7 @@ go run -mod=vendor ./scripts/probe_go_brpc_client.go \
   --user_id="$USER_ID" \
   --topk="$TOPK" \
   --requests="$REQUESTS" \
+  --payload_bytes="$PAYLOAD_BYTES" \
   --timeout_ms="$TIMEOUT_MS" \
   --max_retries="$MAX_RETRIES" \
   --history_source="$HISTORY_SOURCE" \

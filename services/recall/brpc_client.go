@@ -72,8 +72,12 @@ func (c *BRPCRecommendClient) Recommend(ctx context.Context, req *RecommendReque
 }
 
 func (c *BRPCRecommendClient) HealthCheck(ctx context.Context) (*brpcHealthResponse, error) {
+	return c.HealthCheckWithPayload(ctx, 0)
+}
+
+func (c *BRPCRecommendClient) HealthCheckWithPayload(ctx context.Context, payloadBytes int) (*brpcHealthResponse, error) {
 	var responsePB healthResponsePB
-	if err := c.call(ctx, "Health", &healthRequestPB{}, &responsePB); err != nil {
+	if err := c.call(ctx, "Health", &healthRequestPB{PayloadPadding: makePayloadPadding(payloadBytes)}, &responsePB); err != nil {
 		return nil, err
 	}
 	return healthResponseFromProto(&responsePB), nil

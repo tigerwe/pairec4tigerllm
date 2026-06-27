@@ -10,11 +10,12 @@ import (
 
 func TestRecommendProtoRoundTrip(t *testing.T) {
 	req := &RecommendRequest{
-		UserID:      "u1",
-		History:     [][]int{{169, 41, 0, 0}, {20, 53, 0, 0}},
-		Topk:        5,
-		Temperature: 0.7,
-		BeamWidth:   1,
+		UserID:              "u1",
+		History:             [][]int{{169, 41, 0, 0}, {20, 53, 0, 0}},
+		Topk:                5,
+		Temperature:         0.7,
+		BeamWidth:           1,
+		PayloadPaddingBytes: 1024,
 	}
 
 	requestPB := recommendRequestToProto(req, "trace-1")
@@ -38,6 +39,9 @@ func TestRecommendProtoRoundTrip(t *testing.T) {
 	}
 	if got := stringValue(decoded.RequestID); got != "trace-1" {
 		t.Fatalf("request_id=%q", got)
+	}
+	if got := len(decoded.PayloadPadding); got != 1024 {
+		t.Fatalf("payload_padding bytes=%d", got)
 	}
 
 	responsePB := &recommendResponsePB{
