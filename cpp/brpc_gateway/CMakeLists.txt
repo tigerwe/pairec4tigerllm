@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(PAIREC_ENABLE_TRTLLM_CPP "Build brpc_inference_server with TensorRT-LLM C++ Executor backend" OFF)
+option(PAIREC_ENABLE_DATASYSTEM_KV_PROBE "Build brpc_inference_server with DataSystem MSet/MGet probe backend" OFF)
 
 find_package(Protobuf REQUIRED)
 find_package(Threads REQUIRED)
@@ -235,6 +236,59 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
   message(STATUS "  TRTLLM_ALLOW_SHLIB_UNDEFINED=${TRTLLM_ALLOW_SHLIB_UNDEFINED}")
 endif()
 
+if(PAIREC_ENABLE_DATASYSTEM_KV_PROBE)
+  set(
+    DATASYSTEM_INCLUDE_DIR
+    ""
+    CACHE PATH
+    "DataSystem C++ include directory that contains datasystem/kv_client.h"
+  )
+  set(
+    DATASYSTEM_LIBRARY
+    ""
+    CACHE FILEPATH
+    "Path to libdatasystem.so"
+  )
+
+  if(NOT DATASYSTEM_INCLUDE_DIR)
+    find_path(
+      DATASYSTEM_INCLUDE_DIR
+      NAMES datasystem/kv_client.h
+      HINTS
+        ENV DATASYSTEM_INCLUDE_DIR
+        /usr/local/include
+        /usr/include
+        /opt/datasystem/include
+    )
+  endif()
+
+  if(NOT DATASYSTEM_LIBRARY)
+    find_library(
+      DATASYSTEM_LIBRARY
+      NAMES datasystem
+      HINTS
+        ENV DATASYSTEM_LIBRARY_DIR
+        /usr/local/lib/python3.11/site-packages/yr/datasystem/lib
+        /usr/local/lib
+        /usr/local/lib64
+        /usr/lib64
+        /usr/lib
+        /opt/datasystem/lib
+    )
+  endif()
+
+  if(NOT DATASYSTEM_INCLUDE_DIR OR NOT EXISTS "${DATASYSTEM_INCLUDE_DIR}/datasystem/kv_client.h")
+    message(FATAL_ERROR "DataSystem C++ headers were not found. Set DATASYSTEM_INCLUDE_DIR.")
+  endif()
+  if(NOT DATASYSTEM_LIBRARY OR NOT EXISTS "${DATASYSTEM_LIBRARY}")
+    message(FATAL_ERROR "libdatasystem.so was not found. Set DATASYSTEM_LIBRARY.")
+  endif()
+
+  message(STATUS "DataSystem KV probe backend enabled")
+  message(STATUS "  DATASYSTEM_INCLUDE_DIR=${DATASYSTEM_INCLUDE_DIR}")
+  message(STATUS "  DATASYSTEM_LIBRARY=${DATASYSTEM_LIBRARY}")
+endif()
+
 set(PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/../../proto/recommend.proto)
 protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILE})
 
@@ -315,6 +369,18 @@ if(PAIREC_ENABLE_TRTLLM_CPP)
     TARGET brpc_inference_server
     PROPERTY INSTALL_RPATH
       "$ORIGIN/../lib;${PAIREC_TRTLLM_LIBRARY_DIR};${PAIREC_TRTLLM_PLUGIN_LIBRARY_DIR}"
+  )
+endif()
+
+if(PAIREC_ENABLE_DATASYSTEM_KV_PROBE)
+  get_filename_component(DATASYSTEM_LIBRARY_DIR "${DATASYSTEM_LIBRARY}" DIRECTORY)
+  target_compile_definitions(brpc_inference_server PRIVATE PAIREC_ENABLE_DATASYSTEM_KV_PROBE=1)
+  target_include_directories(brpc_inference_server PRIVATE ${DATASYSTEM_INCLUDE_DIR})
+  target_link_libraries(brpc_inference_server PRIVATE ${DATASYSTEM_LIBRARY})
+  set_property(
+    TARGET brpc_inference_server
+    APPEND
+    PROPERTY INSTALL_RPATH "$ORIGIN/../lib;${DATASYSTEM_LIBRARY_DIR}"
   )
 endif()
 

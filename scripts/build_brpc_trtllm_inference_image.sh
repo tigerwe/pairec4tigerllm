@@ -6,6 +6,7 @@ TAR_PATH="${2:-/home/zcx/pairec-brpc-inference-k8s-arm64-trtllm-v1.tar}"
 BASE_IMAGE="${BASE_IMAGE:-${3:-zcx-pairec-trtllm-brpc-sdk:v1}}"
 
 export ENABLE_TRTLLM_CPP="${ENABLE_TRTLLM_CPP:-ON}"
+export ENABLE_DATASYSTEM_KV_PROBE="${ENABLE_DATASYSTEM_KV_PROBE:-ON}"
 export TRTLLM_INCLUDE_DIR="${TRTLLM_INCLUDE_DIR:-/TensorRT-LLM/cpp/include}"
 export TRTLLM_LIBRARY="${TRTLLM_LIBRARY:-/TensorRT-LLM/cpp/build/tensorrt_llm/libtensorrt_llm.so}"
 export TRTLLM_PLUGIN_LIBRARY="${TRTLLM_PLUGIN_LIBRARY:-/TensorRT-LLM/cpp/build/tensorrt_llm/plugins/libnvinfer_plugin_tensorrt_llm.so}"
@@ -22,6 +23,7 @@ echo "  - Apache brpc headers/libs"
 echo "  - TensorRT-LLM C++ headers"
 echo "  - libtensorrt_llm.so and its runtime dependencies"
 echo "  - CUDA/TensorRT runtime libraries"
+echo "  - DataSystem C++ headers/libs when ENABLE_DATASYSTEM_KV_PROBE=ON"
 echo
 
 BASE_IMAGE="$BASE_IMAGE" bash scripts/build_brpc_inference_image.sh "$IMAGE" "$TAR_PATH"

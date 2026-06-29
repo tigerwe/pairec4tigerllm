@@ -1,21 +1,27 @@
 ARG BASE_IMAGE=zcx-pairec-brpc-sdk:v1
 ARG ENABLE_TRTLLM_CPP=OFF
+ARG ENABLE_DATASYSTEM_KV_PROBE=OFF
 ARG TRTLLM_INCLUDE_DIR=
 ARG TRTLLM_LIBRARY=
 ARG TRTLLM_PLUGIN_LIBRARY=
 ARG TRTLLM_EXTRA_LIBS=
 ARG TRTLLM_CUDA_INCLUDE_DIR=
 ARG CUDA_DRIVER_LIBRARY=
+ARG DATASYSTEM_INCLUDE_DIR=
+ARG DATASYSTEM_LIBRARY=
 
 FROM ${BASE_IMAGE} AS build
 
 ARG ENABLE_TRTLLM_CPP
+ARG ENABLE_DATASYSTEM_KV_PROBE
 ARG TRTLLM_INCLUDE_DIR
 ARG TRTLLM_LIBRARY
 ARG TRTLLM_PLUGIN_LIBRARY
 ARG TRTLLM_EXTRA_LIBS
 ARG TRTLLM_CUDA_INCLUDE_DIR
 ARG CUDA_DRIVER_LIBRARY
+ARG DATASYSTEM_INCLUDE_DIR
+ARG DATASYSTEM_LIBRARY
 
 # The TRT/DataSystem base images can carry LD_PRELOAD paths from interactive
 # validation containers. brpc image builds should not inherit those paths.
@@ -30,12 +36,15 @@ RUN unset LD_PRELOAD \
  && cmake -S /src/cpp/brpc_gateway -B /tmp/brpc-gateway-build \
       -DCMAKE_BUILD_TYPE=Release \
       -DPAIREC_ENABLE_TRTLLM_CPP="${ENABLE_TRTLLM_CPP}" \
+      -DPAIREC_ENABLE_DATASYSTEM_KV_PROBE="${ENABLE_DATASYSTEM_KV_PROBE}" \
       -DTRTLLM_INCLUDE_DIR="${TRTLLM_INCLUDE_DIR}" \
       -DTRTLLM_LIBRARY="${TRTLLM_LIBRARY}" \
       -DTRTLLM_PLUGIN_LIBRARY="${TRTLLM_PLUGIN_LIBRARY}" \
       -DTRTLLM_EXTRA_LIBS="${TRTLLM_EXTRA_LIBS}" \
       -DTRTLLM_CUDA_INCLUDE_DIR="${TRTLLM_CUDA_INCLUDE_DIR}" \
       -DCUDA_DRIVER_LIBRARY="${CUDA_DRIVER_LIBRARY}" \
+      -DDATASYSTEM_INCLUDE_DIR="${DATASYSTEM_INCLUDE_DIR}" \
+      -DDATASYSTEM_LIBRARY="${DATASYSTEM_LIBRARY}" \
  && cmake --build /tmp/brpc-gateway-build -j"$(nproc)" \
  && cmake --install /tmp/brpc-gateway-build --prefix /opt/pairec-brpc
 
@@ -46,7 +55,7 @@ ENV LD_PRELOAD=""
 COPY --from=build /opt/pairec-brpc /opt/pairec-brpc
 
 ENV PATH="/opt/pairec-brpc/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:/usr/lib64:/usr/lib:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/lib/python3.11/site-packages/yr/datasystem/lib:/usr/local/lib:/usr/local/lib64:/usr/lib64:/usr/lib:${LD_LIBRARY_PATH}"
 
 EXPOSE 18100
 
