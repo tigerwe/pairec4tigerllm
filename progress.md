@@ -6,6 +6,7 @@
 
 | 日期 | 进度 |
 |------|------|
+| **7/1** | **新增 `scripts/import_pairec_server_image_to_k8s.sh`，用于 master 本地已有 `/home/zcx/pairec-server-k8s-arm64-brpc-v1.tar` 时，一键导入 `docker.io/library/pairec-server:k8s-arm64-brpc-v1` 到 `k8s.io` containerd namespace。脚本会同时用 `ctr`/`crictl` 校验镜像可见性，并支持 `DELETE_NON_RUNNING_PODS=1` 清理当前非 Running 的 PaiRec Pod 触发重建。** |
 | **7/1** | **新增 `scripts/sync_pause_image_to_master.sh`，专门处理 master 新建 Pod 时反复 `failed to get sandbox image docker.io/library/pause-aarch64:3.8` 的问题。脚本默认从 worker1/188 的 `k8s.io` containerd namespace 导出 pause 镜像，复制并导入 master 本机 `k8s.io` namespace，同时用 `ctr`/`crictl` 双视角检查本地是否可见；可选 `RESTART_KUBELET=1`、`RESTART_CONTAINERD=1`、`DELETE_NON_RUNNING_PODS=1` 做运行时刷新和坏 Pod 清理。** |
 | **7/1** | **新增 `scripts/diagnose_node_to_service_network.sh`，用于优先排查 master host 到 worker1 PodIP/ClusterIP 不通的问题。脚本默认只读采集：自动发现目标 Service/Pod/ClusterIP/PodIP，分别检查当前 host 到 PodIP/ClusterIP 的 TCP、路由、Calico 链路、kube-proxy iptables/ipvs 规则、目标 brpc Pod 自测，以及 PaiRec Pod 到目标的 TCP；输出按结果给出下一步判断：Pod 自测通过但 host 失败则定位到 node host dataplane，PodIP 失败优先刷新 Calico，PodIP 通但 ClusterIP 失败优先刷新 kube-proxy。** |
 | **7/1** | **修复 KVC MSet/MGet probe 部署脚本的 DataSystem 预加载链：`scripts/k8s_apply_brpc_kvc_probe.sh` 新增 `KVC_PROBE_LD_PRELOAD`，默认加载 `/opt/pairec/lib/block_ds_consumer.so`、`/opt/pairec/lib/stub_gpu.so` 和 DataSystem `libabseil_dll.so.2407.0.0`，并在 apply 输出中展示该值。该修复复用此前 TRT-LLM DataSystem runtime 的 workaround，避免 DataSystem SDK 在 ARM 上解析空 GPU 标识时触发 `basic_string::substr(4)` 崩溃；如需排障可显式 `KVC_PROBE_LD_PRELOAD=""` 覆盖。** |
