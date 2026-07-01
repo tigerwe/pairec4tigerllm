@@ -11,6 +11,7 @@ KVC_PROBE_OBJECT_COUNT="${KVC_PROBE_OBJECT_COUNT:-4}"
 KVC_PROBE_OBJECT_BYTES="${KVC_PROBE_OBJECT_BYTES:-3670016}"
 KVC_PROBE_TIMEOUT_MS="${KVC_PROBE_TIMEOUT_MS:-5000}"
 KVC_PROBE_TTL_SEC="${KVC_PROBE_TTL_SEC:-120}"
+KVC_PROBE_LD_PRELOAD="${KVC_PROBE_LD_PRELOAD:-/opt/pairec/lib/block_ds_consumer.so /opt/pairec/lib/stub_gpu.so /usr/local/lib/python3.11/site-packages/yr/datasystem/lib/libabseil_dll.so.2407.0.0}"
 
 echo "Applying brpc DataSystem KVC MSet/MGet probe"
 echo "  namespace:       ${NAMESPACE}"
@@ -22,6 +23,7 @@ echo "  object_count:    ${KVC_PROBE_OBJECT_COUNT}"
 echo "  object_bytes:    ${KVC_PROBE_OBJECT_BYTES}"
 echo "  timeout_ms:      ${KVC_PROBE_TIMEOUT_MS}"
 echo "  ttl_sec:         ${KVC_PROBE_TTL_SEC}"
+echo "  ld_preload:      ${KVC_PROBE_LD_PRELOAD:-<empty>}"
 echo
 
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
@@ -71,7 +73,7 @@ spec:
             - name: DATASYSTEM_PORT
               value: "${DATASYSTEM_PORT}"
             - name: LD_PRELOAD
-              value: ""
+              value: "${KVC_PROBE_LD_PRELOAD}"
             - name: LD_LIBRARY_PATH
               value: "/usr/local/lib/python3.11/site-packages/yr/datasystem/lib:/usr/local/lib:/usr/local/lib64:/usr/lib64:/usr/lib:/opt/openEuler/gcc-toolset-14/root/usr/lib64:/usr/local/nvidia/lib64:/usr/local/nvidia/lib"
           resources:
