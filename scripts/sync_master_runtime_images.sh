@@ -7,6 +7,10 @@ PAUSE_IMAGE="${PAUSE_IMAGE:-docker.io/library/pause-aarch64:3.8}"
 SYNC_PAUSE="${SYNC_PAUSE:-1}"
 SYNC_CALICO="${SYNC_CALICO:-1}"
 EXTRA_IMAGES="${EXTRA_IMAGES:-}"
+SYNC_LOCAL_TARS="${SYNC_LOCAL_TARS:-1}"
+LOCAL_IMAGE_TARS="${LOCAL_IMAGE_TARS:-/home/zcx/pairec-server-k8s-arm64-brpc-v1.tar}"
+LOCAL_IMAGE_CHECKS="${LOCAL_IMAGE_CHECKS:-docker.io/library/pairec-server:k8s-arm64-brpc-v1}"
+MISSING_LOCAL_TAR_FATAL="${MISSING_LOCAL_TAR_FATAL:-0}"
 ARCHIVE_REMOTE="${ARCHIVE_REMOTE:-/home/zcx/master-runtime-images.tar}"
 ARCHIVE_LOCAL="${ARCHIVE_LOCAL:-/home/zcx/master-runtime-images.tar}"
 RESTART_KUBELET="${RESTART_KUBELET:-0}"
@@ -37,6 +41,44 @@ add_image() {
   images+=("$image")
 }
 
+add_local_tar() {
+  local image_tar="$1"
+  image_tar="${image_tar//$'\r'/}"
+  if [ -z "$image_tar" ]; then
+    return
+  fi
+  local existing
+  for existing in "${local_image_tars[@]}"; do
+    if [ "$existing" = "$image_tar" ]; then
+      return
+    fi
+  done
+  if [ ! -f "$image_tar" ]; then
+    if [ "$MISSING_LOCAL_TAR_FATAL" = "1" ]; then
+      echo "ERROR: local image tar not found: ${image_tar}" >&2
+      exit 1
+    fi
+    echo "WARN: local image tar not found, skip: ${image_tar}" >&2
+    return
+  fi
+  local_image_tars+=("$image_tar")
+}
+
+add_local_image_check() {
+  local image="$1"
+  image="${image//$'\r'/}"
+  if [ -z "$image" ]; then
+    return
+  fi
+  local existing
+  for existing in "${local_image_checks[@]}"; do
+    if [ "$existing" = "$image" ]; then
+      return
+    fi
+  done
+  local_image_checks+=("$image")
+}
+
 collect_calico_images() {
   require_command kubectl
   while IFS= read -r image; do
@@ -56,6 +98,20 @@ collect_extra_images() {
   while IFS= read -r image; do
     add_image "$image"
   done < <(printf '%s\n' "$EXTRA_IMAGES" | tr ',;' '\n' | awk '{for (i=1; i<=NF; i++) print $i}')
+}
+
+collect_local_tars() {
+  local image_tar
+  while IFS= read -r image_tar; do
+    add_local_tar "$image_tar"
+  done < <(printf '%s\n' "$LOCAL_IMAGE_TARS" | tr ',;' '\n' | awk '{for (i=1; i<=NF; i++) print $i}')
+}
+
+collect_local_image_checks() {
+  local image
+  while IFS= read -r image; do
+    add_local_image_check "$image"
+  done < <(printf '%s\n' "$LOCAL_IMAGE_CHECKS" | tr ',;' '\n' | awk '{for (i=1; i<=NF; i++) print $i}')
 }
 
 delete_master_calico_pods() {
@@ -91,10 +147,9 @@ delete_non_running_namespace_pods() {
   fi
 }
 
-require_command ssh
-require_command scp
-
 images=()
+local_image_tars=()
+local_image_checks=()
 if [ "$SYNC_PAUSE" = "1" ]; then
   add_image "$PAUSE_IMAGE"
 fi
@@ -102,10 +157,19 @@ if [ "$SYNC_CALICO" = "1" ]; then
   collect_calico_images
 fi
 collect_extra_images
+if [ "$SYNC_LOCAL_TARS" = "1" ]; then
+  collect_local_tars
+  collect_local_image_checks
+fi
 
-if [ "${#images[@]}" -eq 0 ]; then
+if [ "${#images[@]}" -eq 0 ] && [ "${#local_image_tars[@]}" -eq 0 ]; then
   echo "ERROR: no images selected for sync" >&2
   exit 1
+fi
+
+if [ "${#images[@]}" -gt 0 ]; then
+  require_command ssh
+  require_command scp
 fi
 
 echo "Sync runtime images to local master"
@@ -113,6 +177,7 @@ echo "  source node:              ${SOURCE_NODE}"
 echo "  master node name:         ${MASTER_NODE_NAME}"
 echo "  sync pause:               ${SYNC_PAUSE}"
 echo "  sync calico:              ${SYNC_CALICO}"
+echo "  sync local tars:          ${SYNC_LOCAL_TARS}"
 echo "  remote archive:           ${ARCHIVE_REMOTE}"
 echo "  local archive:            ${ARCHIVE_LOCAL}"
 echo "  restart containerd:       ${RESTART_CONTAINERD}"
@@ -121,40 +186,69 @@ echo "  delete master calico pods:${DELETE_MASTER_CALICO_PODS}"
 echo "  delete non-running pods:  ${DELETE_NON_RUNNING_PODS}"
 echo
 echo "Images:"
-printf '  %s\n' "${images[@]}"
-echo
-
-quoted_images=""
-for image in "${images[@]}"; do
-  quoted_images="${quoted_images} '${image}'"
-done
-
-echo "== Source node image checks =="
-for image in "${images[@]}"; do
-  ssh "$SOURCE_NODE" "sudo ctr -n k8s.io images ls | grep -F '${image}'"
-done
-
-echo
-echo "== Export images on ${SOURCE_NODE} =="
-ssh "$SOURCE_NODE" "sudo ctr -n k8s.io images export '${ARCHIVE_REMOTE}' ${quoted_images} && ls -lh '${ARCHIVE_REMOTE}'"
-
-echo
-echo "== Copy image archive to local master =="
-if [ "$ARCHIVE_LOCAL" != "$ARCHIVE_REMOTE" ]; then
-  scp "${SOURCE_NODE}:${ARCHIVE_REMOTE}" "$ARCHIVE_LOCAL"
+if [ "${#images[@]}" -gt 0 ]; then
+  printf '  %s\n' "${images[@]}"
 else
-  scp "${SOURCE_NODE}:${ARCHIVE_REMOTE}" "${ARCHIVE_LOCAL}.tmp"
-  mv "${ARCHIVE_LOCAL}.tmp" "$ARCHIVE_LOCAL"
+  echo "  (none)"
 fi
-ls -lh "$ARCHIVE_LOCAL"
-
+echo "Local image tar archives:"
+if [ "${#local_image_tars[@]}" -gt 0 ]; then
+  printf '  %s\n' "${local_image_tars[@]}"
+else
+  echo "  (none)"
+fi
 echo
-echo "== Import images into local k8s.io containerd namespace =="
-sudo ctr -n k8s.io images import "$ARCHIVE_LOCAL"
+
+if [ "${#images[@]}" -gt 0 ]; then
+  quoted_images=""
+  for image in "${images[@]}"; do
+    quoted_images="${quoted_images} '${image}'"
+  done
+
+  echo "== Source node image checks =="
+  for image in "${images[@]}"; do
+    ssh "$SOURCE_NODE" "sudo ctr -n k8s.io images ls | grep -F '${image}'"
+  done
+
+  echo
+  echo "== Export images on ${SOURCE_NODE} =="
+  ssh "$SOURCE_NODE" "sudo ctr -n k8s.io images export '${ARCHIVE_REMOTE}' ${quoted_images} && ls -lh '${ARCHIVE_REMOTE}'"
+
+  echo
+  echo "== Copy image archive to local master =="
+  if [ "$ARCHIVE_LOCAL" != "$ARCHIVE_REMOTE" ]; then
+    scp "${SOURCE_NODE}:${ARCHIVE_REMOTE}" "$ARCHIVE_LOCAL"
+  else
+    scp "${SOURCE_NODE}:${ARCHIVE_REMOTE}" "${ARCHIVE_LOCAL}.tmp"
+    mv "${ARCHIVE_LOCAL}.tmp" "$ARCHIVE_LOCAL"
+  fi
+  ls -lh "$ARCHIVE_LOCAL"
+
+  echo
+  echo "== Import remote images into local k8s.io containerd namespace =="
+  sudo ctr -n k8s.io images import "$ARCHIVE_LOCAL"
+fi
+
+if [ "${#local_image_tars[@]}" -gt 0 ]; then
+  echo
+  echo "== Import local image tar archives into k8s.io containerd namespace =="
+  for image_tar in "${local_image_tars[@]}"; do
+    ls -lh "$image_tar"
+    sudo ctr -n k8s.io images import "$image_tar"
+  done
+fi
 
 echo
 echo "== Local image checks =="
 for image in "${images[@]}"; do
+  sudo ctr -n k8s.io images ls | grep -F "$image" || true
+  if command -v crictl >/dev/null 2>&1; then
+    sudo crictl inspecti "$image" >/dev/null 2>&1 \
+      && echo "crictl inspecti ok: ${image}" \
+      || echo "WARN: crictl inspecti did not find ${image}"
+  fi
+done
+for image in "${local_image_checks[@]}"; do
   sudo ctr -n k8s.io images ls | grep -F "$image" || true
   if command -v crictl >/dev/null 2>&1; then
     sudo crictl inspecti "$image" >/dev/null 2>&1 \
@@ -186,10 +280,12 @@ fi
 echo
 echo "Next checks:"
 echo "  sudo ctr -n k8s.io images ls | grep -E 'pause|calico'"
+echo "  sudo ctr -n k8s.io images ls | grep 'pairec-server.*k8s-arm64-brpc-v1'"
 echo "  kubectl -n kube-system get pods -o wide | grep -E 'calico|tigera'"
 echo "  kubectl -n ${NAMESPACE} get pods -o wide"
 echo
 echo "Examples:"
 echo "  RESTART_KUBELET=1 bash scripts/sync_master_runtime_images.sh"
 echo "  SYNC_PAUSE=0 SYNC_CALICO=1 bash scripts/sync_master_runtime_images.sh"
+echo "  SYNC_PAUSE=0 SYNC_CALICO=0 SYNC_LOCAL_TARS=1 bash scripts/sync_master_runtime_images.sh"
 echo "  EXTRA_IMAGES='nvcr.io/nvidia/k8s-device-plugin:v0.19.2' bash scripts/sync_master_runtime_images.sh"
