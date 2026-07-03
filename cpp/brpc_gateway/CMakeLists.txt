@@ -256,6 +256,8 @@ if(PAIREC_ENABLE_DATASYSTEM_KV_PROBE)
       NAMES datasystem/kv_client.h
       HINTS
         ENV DATASYSTEM_INCLUDE_DIR
+        /usr/local/lib/python3.11/site-packages/yr/datasystem/include
+        /usr/local/lib64/python3.11/site-packages/yr/datasystem/include
         /usr/local/include
         /usr/include
         /opt/datasystem/include
