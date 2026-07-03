@@ -285,6 +285,12 @@ brpc_lines = [
 ]
 brpc_events = [parse_kv_fields(line) for line in brpc_lines]
 
+trt_mget_probe_lines = [
+    line for line in trt_log.splitlines()
+    if "[brpc-inference]" in line and "method=TrtllmDatasystemMSetMGet" in line
+]
+trt_mget_probe_events = [parse_kv_fields(line) for line in trt_mget_probe_lines]
+
 ds_events = []
 for line in trt_log.splitlines():
     if "[Datasystem][TRACE]" not in line:
@@ -304,6 +310,7 @@ summary = {
     "response_size": response.get("size"),
     "brpc_calls": len(brpc_events),
     "brpc_events": brpc_events,
+    "trt_datasystem_mget_probe_events": trt_mget_probe_events,
     "kvc_access": {
         "offload_count": len(offloads),
         "onboard_count": len(onboards),
@@ -326,6 +333,18 @@ for index, event in enumerate(brpc_events, start=1):
     print(
         f"  brpc[{index}] code={event.get('code','')} items={event.get('items','')} "
         f"latency_ms={event.get('latency_ms','')} backend={event.get('backend','')}"
+    )
+
+print(f"trt_datasystem_mget_probe_events={len(trt_mget_probe_events)}")
+for index, event in enumerate(trt_mget_probe_events, start=1):
+    print(
+        f"  mget_probe[{index}] object_count={event.get('object_count','')} "
+        f"set_buffer_count={event.get('set_buffer_count','')} "
+        f"get_key_count={event.get('get_key_count','')} "
+        f"object_bytes={event.get('object_bytes','')} total_bytes={event.get('total_bytes','')} "
+        f"mcreate_ms={event.get('mcreate_ms','')} fill_ms={event.get('fill_ms','')} "
+        f"mset_ms={event.get('mset_ms','')} mget_ms={event.get('mget_ms','')} "
+        f"found={event.get('found','')} backend={event.get('backend','')}"
     )
 
 if generative_trace:

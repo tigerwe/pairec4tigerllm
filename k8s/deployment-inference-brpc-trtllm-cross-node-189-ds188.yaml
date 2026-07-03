@@ -89,6 +89,11 @@ spec:
             - --trt_kv_cache_host_cache_size=0
             - --trt_scheduler_policy=guaranteed_no_evict
             - --trt_request_timeout_ms=30000
+            - --trt_datasystem_mget_probe=1
+            - --kvc_probe_object_count=4
+            - --kvc_probe_object_bytes=3670016
+            - --kvc_probe_timeout_ms=5000
+            - --kvc_probe_ttl_sec=120
           ports:
             - containerPort: 18100
               name: brpc

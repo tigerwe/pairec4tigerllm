@@ -60,6 +60,7 @@ struct ServerConfig {
   std::string trt_scheduler_policy = "guaranteed_no_evict";
   int trt_request_timeout_ms = 30000;
   bool trt_plugin_preflight_only = false;
+  bool trt_datasystem_mget_probe = false;
   std::string datasystem_host;
   int datasystem_port = 0;
   int kvc_probe_object_count = 4;
@@ -103,6 +104,7 @@ void PrintUsage(const char* argv0) {
       << "  --trt_scheduler_policy=guaranteed_no_evict|max_utilization\n"
       << "  --trt_request_timeout_ms=30000\n"
       << "  --trt_plugin_preflight_only=0\n"
+      << "  --trt_datasystem_mget_probe=0\n"
       << "  --datasystem_host=141.61.91.189\n"
       << "  --datasystem_port=18481\n"
       << "  --kvc_probe_object_count=4\n"
@@ -158,6 +160,10 @@ bool ParseArgs(int argc, char** argv, ServerConfig* config) {
       config->trt_plugin_preflight_only = ParseBoolFlag(value);
     } else if (std::string(argv[i]) == "--trt_plugin_preflight_only") {
       config->trt_plugin_preflight_only = true;
+    } else if (ConsumeArgValue(argv[i], "trt_datasystem_mget_probe", &value)) {
+      config->trt_datasystem_mget_probe = ParseBoolFlag(value);
+    } else if (std::string(argv[i]) == "--trt_datasystem_mget_probe") {
+      config->trt_datasystem_mget_probe = true;
     } else if (ConsumeArgValue(argv[i], "datasystem_host", &value)) {
       config->datasystem_host = value;
     } else if (ConsumeArgValue(argv[i], "datasystem_port", &value)) {
@@ -778,6 +784,8 @@ class DataSystemKvProbeBackend final : public InferenceBackend {
               << " request_id=" << request.request_id()
               << " user=" << request.user_id()
               << " object_count=" << keys.size()
+              << " set_buffer_count=" << buffers.size()
+              << " get_key_count=" << keys.size()
               << " object_bytes=" << config_.kvc_probe_object_bytes
               << " total_bytes=" << found_bytes
               << " mcreate_ms=" << mcreate_timer.m_elapsed()
@@ -920,6 +928,19 @@ class TrtllmCppBackend final : public InferenceBackend {
       return false;
     }
 
+#if defined(PAIREC_ENABLE_DATASYSTEM_KV_PROBE) && PAIREC_ENABLE_DATASYSTEM_KV_PROBE
+    if (config_.trt_datasystem_mget_probe &&
+        !InitDatasystemMGetProbe(error)) {
+      return false;
+    }
+#else
+    if (config_.trt_datasystem_mget_probe) {
+      *error = "trt_datasystem_mget_probe requires DataSystem support; rebuild with "
+               "-DPAIREC_ENABLE_DATASYSTEM_KV_PROBE=ON";
+      return false;
+    }
+#endif
+
     std::cout << "[brpc-inference] trtllm_cpp initialized"
               << " engine_dir=" << config_.trt_engine_dir
               << " tokenizer_config=" << config_.trt_tokenizer_config_path
@@ -930,6 +951,7 @@ class TrtllmCppBackend final : public InferenceBackend {
               << " max_batch_size=" << config_.trt_max_batch_size
               << " max_num_tokens=" << config_.trt_max_num_tokens
               << " num_samples=" << config_.trt_num_samples
+              << " datasystem_mget_probe=" << (config_.trt_datasystem_mget_probe ? 1 : 0)
               << std::endl;
     return true;
   }
@@ -991,9 +1013,27 @@ class TrtllmCppBackend final : public InferenceBackend {
     FillRecommendations(request, semantic_candidates, response);
     map_timer.stop();
     trace->set_map_item_ms(map_timer.m_elapsed());
+
+    if (config_.trt_datasystem_mget_probe) {
+#if defined(PAIREC_ENABLE_DATASYSTEM_KV_PROBE) && PAIREC_ENABLE_DATASYSTEM_KV_PROBE
+      std::string kv_error;
+      if (!RunDatasystemMSetMGetProbe(request, trace, &kv_error)) {
+        response->clear_recommendations();
+        response->set_error(kv_error);
+        return;
+      }
+#else
+      response->clear_recommendations();
+      response->set_error(
+          "trt_datasystem_mget_probe requires PAIREC_ENABLE_DATASYSTEM_KV_PROBE");
+      return;
+#endif
+    }
+
     trace->set_backend_total_ms(
         trace->prompt_ms() + trace->runner_generate_ms() +
-        trace->parse_combo_ms() + trace->map_item_ms());
+        trace->parse_combo_ms() + trace->map_item_ms() +
+        trace->kv_write_ms() + trace->kv_lookup_ms());
     trace->set_generate_ms(trace->backend_total_ms());
   }
 
@@ -1247,12 +1287,218 @@ class TrtllmCppBackend final : public InferenceBackend {
     }
   }
 
+#if defined(PAIREC_ENABLE_DATASYSTEM_KV_PROBE) && PAIREC_ENABLE_DATASYSTEM_KV_PROBE
+  bool InitDatasystemMGetProbe(std::string* error) {
+    if (config_.kvc_probe_object_count < 1) {
+      *error = "kvc_probe_object_count must be >= 1";
+      return false;
+    }
+    if (config_.kvc_probe_object_bytes == 0) {
+      *error = "kvc_probe_object_bytes must be > 0";
+      return false;
+    }
+
+    const char* env_host = std::getenv("DATASYSTEM_HOST");
+    const char* env_port = std::getenv("DATASYSTEM_PORT");
+    if (config_.datasystem_host.empty() && env_host != nullptr) {
+      config_.datasystem_host = env_host;
+    }
+    if (config_.datasystem_port <= 0 && env_port != nullptr) {
+      config_.datasystem_port = std::atoi(env_port);
+    }
+    if (config_.datasystem_host.empty()) {
+      config_.datasystem_host = "127.0.0.1";
+    }
+    if (config_.datasystem_port <= 0) {
+      config_.datasystem_port = 31501;
+    }
+
+    datasystem::ConnectOptions options;
+    options.host = config_.datasystem_host;
+    options.port = config_.datasystem_port;
+    options.enableCrossNodeConnection = true;
+    datasystem_probe_client_.reset(new datasystem::KVClient(options));
+    datasystem::Status init_status = datasystem_probe_client_->Init();
+    if (init_status.IsError()) {
+      *error = "failed to initialize trtllm DataSystem MGet probe KVClient: " +
+               init_status.ToString();
+      return false;
+    }
+
+    std::cout << "[brpc-inference] trtllm_datasystem_mget_probe initialized"
+              << " host=" << config_.datasystem_host
+              << " port=" << config_.datasystem_port
+              << " object_count=" << config_.kvc_probe_object_count
+              << " object_bytes=" << config_.kvc_probe_object_bytes
+              << " ttl_sec=" << config_.kvc_probe_ttl_sec
+              << " timeout_ms=" << config_.kvc_probe_timeout_ms
+              << std::endl;
+    return true;
+  }
+
+  static std::string SanitizeKeyComponent(const std::string& input) {
+    std::string out;
+    out.reserve(std::min<size_t>(input.size(), 96));
+    for (char ch : input) {
+      const unsigned char c = static_cast<unsigned char>(ch);
+      if (std::isalnum(c) || ch == '~' || ch == '!' || ch == '@' ||
+          ch == '#' || ch == '$' || ch == '%' || ch == '^' || ch == '&' ||
+          ch == '*' || ch == '.' || ch == '-' || ch == '_') {
+        out.push_back(ch);
+      } else {
+        out.push_back('_');
+      }
+      if (out.size() >= 96) {
+        break;
+      }
+    }
+    if (out.empty()) {
+      out = "empty";
+    }
+    return out;
+  }
+
+  std::vector<std::string> BuildDatasystemMGetProbeKeys(
+      const pairec::inference::RecommendRequest& request) {
+    const uint64_t seq = datasystem_probe_sequence_.fetch_add(1);
+    std::string component = request.request_id();
+    if (component.empty()) {
+      component = request.user_id();
+    }
+    component = SanitizeKeyComponent(component);
+
+    std::vector<std::string> keys;
+    keys.reserve(static_cast<size_t>(config_.kvc_probe_object_count));
+    for (int i = 0; i < config_.kvc_probe_object_count; ++i) {
+      std::ostringstream out;
+      out << "pairec_trtllm_mget_" << component << "_" << seq << "_" << i;
+      keys.push_back(out.str());
+    }
+    return keys;
+  }
+
+  bool RunDatasystemMSetMGetProbe(
+      const pairec::inference::RecommendRequest& request,
+      pairec::inference::TraceInfo* trace,
+      std::string* error) {
+    if (!datasystem_probe_client_) {
+      *error = "trtllm DataSystem MGet probe was not initialized";
+      return false;
+    }
+
+    std::vector<std::string> keys = BuildDatasystemMGetProbeKeys(request);
+    std::vector<uint64_t> sizes(
+        keys.size(), static_cast<uint64_t>(config_.kvc_probe_object_bytes));
+    std::vector<std::shared_ptr<datasystem::Buffer>> buffers;
+
+    datasystem::SetParam set_param;
+    set_param.writeMode = datasystem::WriteMode::NONE_L2_CACHE_EVICT;
+    set_param.ttlSecond = static_cast<uint32_t>(std::max(0, config_.kvc_probe_ttl_sec));
+    set_param.existence = datasystem::ExistenceOpt::NONE;
+    set_param.cacheType = datasystem::CacheType::MEMORY;
+
+    butil::Timer mcreate_timer;
+    mcreate_timer.start();
+    datasystem::Status create_status =
+        datasystem_probe_client_->MCreate(keys, sizes, set_param, buffers);
+    mcreate_timer.stop();
+    if (create_status.IsError()) {
+      *error = "trtllm DataSystem MCreate failed: " + create_status.ToString();
+      return false;
+    }
+    if (buffers.size() != keys.size()) {
+      *error = "trtllm DataSystem MCreate returned unexpected buffer count";
+      return false;
+    }
+
+    butil::Timer fill_timer;
+    fill_timer.start();
+    std::vector<char> payload(static_cast<size_t>(config_.kvc_probe_object_bytes));
+    const uint64_t hash = StableRequestHash(request);
+    for (size_t i = 0; i < payload.size(); ++i) {
+      payload[i] = static_cast<char>((i + hash) & 0xff);
+    }
+    for (auto& buffer : buffers) {
+      datasystem::Status copy_status =
+          buffer->MemoryCopy(payload.data(), static_cast<uint64_t>(payload.size()));
+      if (copy_status.IsError()) {
+        *error = "trtllm DataSystem probe buffer copy failed: " +
+                 copy_status.ToString();
+        return false;
+      }
+    }
+    fill_timer.stop();
+
+    butil::Timer mset_timer;
+    mset_timer.start();
+    datasystem::Status set_status = datasystem_probe_client_->MSet(buffers);
+    mset_timer.stop();
+    if (set_status.IsError()) {
+      *error = "trtllm DataSystem MSet failed: " + set_status.ToString();
+      return false;
+    }
+
+    butil::Timer mget_timer;
+    mget_timer.start();
+    std::vector<datasystem::Optional<datasystem::Buffer>> out_buffers;
+    datasystem::Status get_status =
+        datasystem_probe_client_->Get(keys, out_buffers, config_.kvc_probe_timeout_ms);
+    mget_timer.stop();
+    if (get_status.IsError()) {
+      *error = "trtllm DataSystem MGet failed: " + get_status.ToString();
+      return false;
+    }
+
+    size_t found_count = 0;
+    uint64_t found_bytes = 0;
+    for (const auto& buffer : out_buffers) {
+      if (!buffer) {
+        continue;
+      }
+      ++found_count;
+      found_bytes += static_cast<uint64_t>(buffer->GetSize());
+    }
+    if (found_count != keys.size()) {
+      std::ostringstream out;
+      out << "trtllm DataSystem MGet returned " << found_count << "/"
+          << keys.size() << " buffers";
+      *error = out.str();
+      return false;
+    }
+
+    const double kv_write_ms =
+        mcreate_timer.m_elapsed() + fill_timer.m_elapsed() + mset_timer.m_elapsed();
+    trace->set_kv_write_ms(kv_write_ms);
+    trace->set_kv_lookup_ms(mget_timer.m_elapsed());
+    trace->set_kv_source("trtllm_cpp_datasystem_mset_mget");
+
+    std::cout << "[brpc-inference] method=TrtllmDatasystemMSetMGet"
+              << " request_id=" << request.request_id()
+              << " user=" << request.user_id()
+              << " object_count=" << keys.size()
+              << " object_bytes=" << config_.kvc_probe_object_bytes
+              << " total_bytes=" << found_bytes
+              << " mcreate_ms=" << mcreate_timer.m_elapsed()
+              << " fill_ms=" << fill_timer.m_elapsed()
+              << " mset_ms=" << mset_timer.m_elapsed()
+              << " mget_ms=" << mget_timer.m_elapsed()
+              << " found=" << found_count
+              << " backend=trtllm_cpp"
+              << std::endl;
+    return true;
+  }
+#endif
+
   ServerConfig config_;
   CppTokenizerConfig tokenizer_;
   std::vector<Candidate> candidates_;
   std::unordered_map<std::string, const Candidate*> semantic_to_candidate_;
   std::unique_ptr<tensorrt_llm::executor::Executor> executor_;
   std::atomic<uint64_t> seed_{42};
+#if defined(PAIREC_ENABLE_DATASYSTEM_KV_PROBE) && PAIREC_ENABLE_DATASYSTEM_KV_PROBE
+  std::unique_ptr<datasystem::KVClient> datasystem_probe_client_;
+  std::atomic<uint64_t> datasystem_probe_sequence_{1};
+#endif
 #else
   bool Init(const ServerConfig&, std::string* error) override {
     *error = "trtllm_cpp backend is not linked yet; build the TensorRT-LLM C++ "
