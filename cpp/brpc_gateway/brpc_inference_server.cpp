@@ -1400,84 +1400,81 @@ class TrtllmCppBackend final : public InferenceBackend {
       payload[i] = static_cast<char>((i + hash) & 0xff);
     }
 
-    double create_ms = 0.0;
-    double fill_ms = 0.0;
-    double set_ms = 0.0;
-    size_t create_call_count = 0;
-    size_t set_call_count = 0;
     const uint64_t object_bytes =
         static_cast<uint64_t>(config_.kvc_probe_object_bytes);
+    std::vector<uint64_t> sizes(keys.size(), object_bytes);
+    std::vector<std::shared_ptr<datasystem::Buffer>> buffers;
 
-    for (const auto& key : keys) {
-      std::shared_ptr<datasystem::Buffer> buffer;
+    butil::Timer create_timer;
+    create_timer.start();
+    datasystem::Status create_status =
+        datasystem_probe_client_->MCreate(keys, sizes, set_param, buffers);
+    create_timer.stop();
+    const double create_ms = create_timer.m_elapsed();
+    const size_t create_call_count = 1;
+    if (create_status.IsError()) {
+      *error = "trtllm DataSystem MCreate failed: " + create_status.ToString();
+      return false;
+    }
+    if (buffers.size() != keys.size()) {
+      *error = "trtllm DataSystem MCreate returned unexpected buffer count";
+      return false;
+    }
 
-      butil::Timer create_timer;
-      create_timer.start();
-      datasystem::Status create_status =
-          datasystem_probe_client_->Create(key, object_bytes, set_param, buffer);
-      create_timer.stop();
-      create_ms += create_timer.m_elapsed();
-      ++create_call_count;
-      if (create_status.IsError()) {
-        *error = "trtllm DataSystem Create failed: " + create_status.ToString();
-        return false;
-      }
+    butil::Timer fill_timer;
+    fill_timer.start();
+    for (auto& buffer : buffers) {
       if (!buffer) {
-        *error = "trtllm DataSystem Create returned null buffer";
+        *error = "trtllm DataSystem MCreate returned null buffer";
         return false;
       }
-
-      butil::Timer fill_timer;
-      fill_timer.start();
       datasystem::Status copy_status =
           buffer->MemoryCopy(payload.data(), static_cast<uint64_t>(payload.size()));
-      fill_timer.stop();
-      fill_ms += fill_timer.m_elapsed();
       if (copy_status.IsError()) {
         *error = "trtllm DataSystem probe buffer copy failed: " +
                  copy_status.ToString();
         return false;
       }
+    }
+    fill_timer.stop();
+    const double fill_ms = fill_timer.m_elapsed();
 
-      butil::Timer set_timer;
-      set_timer.start();
-      datasystem::Status set_status = datasystem_probe_client_->Set(buffer);
-      set_timer.stop();
-      set_ms += set_timer.m_elapsed();
-      ++set_call_count;
-      if (set_status.IsError()) {
-        *error = "trtllm DataSystem Set failed: " + set_status.ToString();
-        return false;
-      }
+    butil::Timer set_timer;
+    set_timer.start();
+    datasystem::Status set_status = datasystem_probe_client_->MSet(buffers);
+    set_timer.stop();
+    const double set_ms = set_timer.m_elapsed();
+    const size_t set_call_count = 1;
+    if (set_status.IsError()) {
+      *error = "trtllm DataSystem MSet failed: " + set_status.ToString();
+      return false;
     }
 
-    double get_ms = 0.0;
-    size_t get_call_count = 0;
+    butil::Timer get_timer;
+    get_timer.start();
+    std::vector<datasystem::Optional<datasystem::Buffer>> out_buffers;
+    datasystem::Status get_status =
+        datasystem_probe_client_->Get(keys, out_buffers, config_.kvc_probe_timeout_ms);
+    get_timer.stop();
+    const double get_ms = get_timer.m_elapsed();
+    const size_t get_call_count = 1;
+    if (get_status.IsError()) {
+      *error = "trtllm DataSystem MGet failed: " + get_status.ToString();
+      return false;
+    }
+
     size_t found_count = 0;
     uint64_t found_bytes = 0;
-    for (const auto& key : keys) {
-      datasystem::Optional<datasystem::Buffer> out_buffer;
-
-      butil::Timer get_timer;
-      get_timer.start();
-      datasystem::Status get_status =
-          datasystem_probe_client_->Get(key, out_buffer, config_.kvc_probe_timeout_ms);
-      get_timer.stop();
-      get_ms += get_timer.m_elapsed();
-      ++get_call_count;
-      if (get_status.IsError()) {
-        *error = "trtllm DataSystem Get failed: " + get_status.ToString();
-        return false;
-      }
-      if (!out_buffer) {
+    for (const auto& buffer : out_buffers) {
+      if (!buffer) {
         continue;
       }
       ++found_count;
-      found_bytes += static_cast<uint64_t>(out_buffer->GetSize());
+      found_bytes += static_cast<uint64_t>(buffer->GetSize());
     }
     if (found_count != keys.size()) {
       std::ostringstream out;
-      out << "trtllm DataSystem Get returned " << found_count << "/"
+      out << "trtllm DataSystem MGet returned " << found_count << "/"
           << keys.size() << " buffers";
       *error = out.str();
       return false;
@@ -1486,19 +1483,23 @@ class TrtllmCppBackend final : public InferenceBackend {
     const double kv_write_ms = create_ms + fill_ms + set_ms;
     trace->set_kv_write_ms(kv_write_ms);
     trace->set_kv_lookup_ms(get_ms);
-    trace->set_kv_source("trtllm_cpp_datasystem_set_get");
+    trace->set_kv_source("trtllm_cpp_datasystem_mset_mget");
 
-    std::cout << "[brpc-inference] method=TrtllmDatasystemSetGet"
+    std::cout << "[brpc-inference] method=TrtllmDatasystemMSetMGet"
               << " request_id=" << request.request_id()
               << " user=" << request.user_id()
               << " object_count=" << keys.size()
               << " object_bytes=" << config_.kvc_probe_object_bytes
               << " total_bytes=" << found_bytes
               << " create_call_count=" << create_call_count
+              << " mcreate_call_count=" << create_call_count
               << " set_call_count=" << set_call_count
               << " get_call_count=" << get_call_count
-              << " set_buffer_count=" << set_call_count
-              << " get_key_count=" << get_call_count
+              << " mset_call_count=" << set_call_count
+              << " mget_call_count=" << get_call_count
+              << " set_buffer_count=" << buffers.size()
+              << " get_key_count=" << keys.size()
+              << " out_buffer_count=" << out_buffers.size()
               << " create_ms=" << create_ms
               << " fill_ms=" << fill_ms
               << " set_ms=" << set_ms

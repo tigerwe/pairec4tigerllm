@@ -316,6 +316,7 @@ summary = {
     "brpc_events": brpc_events,
     "trt_datasystem_set_get_probe_events": trt_set_get_probe_events,
     "trt_datasystem_mget_probe_events": trt_set_get_probe_events,
+    "trt_datasystem_mset_mget_probe_events": trt_set_get_probe_events,
     "kvc_access": {
         "offload_count": len(offloads),
         "onboard_count": len(onboards),
@@ -340,7 +341,7 @@ for index, event in enumerate(brpc_events, start=1):
         f"latency_ms={event.get('latency_ms','')} backend={event.get('backend','')}"
     )
 
-print(f"trt_datasystem_set_get_probe_events={len(trt_set_get_probe_events)}")
+print(f"trt_datasystem_mset_mget_probe_events={len(trt_set_get_probe_events)}")
 for index, event in enumerate(trt_set_get_probe_events, start=1):
     create_ms = event.get("create_ms", event.get("mcreate_ms", ""))
     set_ms = event.get("set_ms", event.get("mset_ms", ""))
@@ -348,8 +349,11 @@ for index, event in enumerate(trt_set_get_probe_events, start=1):
     print(
         f"  set_get_probe[{index}] object_count={event.get('object_count','')} "
         f"create_call_count={event.get('create_call_count','')} "
+        f"mcreate_call_count={event.get('mcreate_call_count','')} "
         f"set_call_count={event.get('set_call_count', event.get('set_buffer_count',''))} "
         f"get_call_count={event.get('get_call_count', event.get('get_key_count',''))} "
+        f"mset_call_count={event.get('mset_call_count','')} "
+        f"mget_call_count={event.get('mget_call_count','')} "
         f"set_buffer_count={event.get('set_buffer_count','')} "
         f"get_key_count={event.get('get_key_count','')} "
         f"object_bytes={event.get('object_bytes','')} total_bytes={event.get('total_bytes','')} "

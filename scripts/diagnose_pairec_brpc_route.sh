@@ -118,7 +118,7 @@ echo "-- binary path --"
 ls -l "$bin" || true
 echo "-- strings markers --"
 if command -v strings >/dev/null 2>&1; then
-  strings "$bin" | grep -E "trt_datasystem_mget_probe|TrtllmDatasystemSetGet|trtllm_cpp_datasystem_set_get" || true
+  strings "$bin" | grep -E "trt_datasystem_mget_probe|TrtllmDatasystem(SetGet|MSetMGet)|trtllm_cpp_datasystem_(set_get|mset_mget)" || true
 else
   echo "strings not found"
 fi
@@ -219,7 +219,7 @@ fi
 
 section "recent inference brpc and datasystem logs"
 kubectl -n "$NAMESPACE" logs "deploy/${INFERENCE_DEPLOYMENT}" -c "$INFERENCE_CONTAINER" --since="$SINCE" 2>/dev/null \
-  | grep -E 'Unknown argument|method=Recommend|method=TrtllmDatasystemSetGet|trtllm_datasystem_set_get_probe|brpc inference server listening|Init KvCache|Rank 0 is using GPU|with host endpoint|with ServiceDiscovery|\[Datasystem\]\[TRACE\]' \
+  | grep -E 'Unknown argument|method=Recommend|method=TrtllmDatasystem(SetGet|MSetMGet)|trtllm_datasystem_set_get_probe|brpc inference server listening|Init KvCache|Rank 0 is using GPU|with host endpoint|with ServiceDiscovery|\[Datasystem\]\[TRACE\]' \
   || echo "no matching inference logs in --since=${SINCE}"
 
 section "recent PaiRec logs"
@@ -240,6 +240,6 @@ cat <<EOF
 - If TCP is open but PaiRec still does not produce method=Recommend, run:
   bash scripts/test_go_brpc_client_probe.sh
 - If inference logs show method=Recommend but PaiRec returns code=299, the issue is recommendation quality/item count, not brpc routing.
-- If inference logs show method=TrtllmDatasystemSetGet, the real trtllm_cpp request executed the Set/Get probe.
+- If inference logs show method=TrtllmDatasystemMSetMGet, the real trtllm_cpp request executed the MSet/MGet probe.
 - If inference logs show Init KvCache host=141.61.91.189, the current inference -> DataSystem endpoint is 189.
 EOF
