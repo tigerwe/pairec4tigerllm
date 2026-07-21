@@ -28,6 +28,7 @@ func main() {
 	topk := flag.Int("topk", getenvInt("TOPK", 10), "recommend topk")
 	requests := flag.Int("requests", getenvInt("REQUESTS", 1), "number of recommend requests")
 	concurrency := flag.Int("concurrency", getenvInt("CONCURRENCY", 1), "number of concurrent in-flight requests")
+	qps := flag.Int("qps", getenvInt("QPS", 0), "global request start rate limit; 0 disables limiting")
 	timeoutMs := flag.Int("timeout_ms", getenvInt("TIMEOUT_MS", 5000), "request timeout in ms")
 	maxRetries := flag.Int("max_retries", getenvInt("MAX_RETRIES", 1), "max retries")
 	payloadBytes := flag.Int("payload_bytes", getenvInt("PAYLOAD_BYTES", 0), "extra protobuf payload padding bytes")
@@ -59,7 +60,7 @@ func main() {
 		}
 		okCount := 0
 		totalStart := time.Now()
-		results := runIndexed(*requests, *concurrency, func(index int) probeResult {
+		results := runIndexed(*requests, *concurrency, *qps, func(index int) probeResult {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
 			started := time.Now()
 			resp, err := client.HealthCheckWithPayload(ctx, *payloadBytes)
@@ -89,8 +90,8 @@ func main() {
 			}
 		}
 		totalElapsed := time.Since(totalStart).Milliseconds()
-		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d concurrency=%d\n",
-			okCount, *requests, totalElapsed, *payloadBytes, normalizedConcurrency(*requests, *concurrency))
+		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d concurrency=%d qps=%d\n",
+			okCount, *requests, totalElapsed, *payloadBytes, normalizedConcurrency(*requests, *concurrency), *qps)
 		if okCount != *requests {
 			os.Exit(1)
 		}
@@ -106,7 +107,7 @@ func main() {
 		}
 		okCount := 0
 		totalStart := time.Now()
-		results := runIndexed(*requests, *concurrency, func(index int) probeResult {
+		results := runIndexed(*requests, *concurrency, *qps, func(index int) probeResult {
 			plan := requestPlans[(index-1)%len(requestPlans)]
 			requestID := fmt.Sprintf("go-brpc-probe-%d", index)
 			req := &recall.RecommendRequest{
@@ -154,8 +155,8 @@ func main() {
 			}
 		}
 		totalElapsed := time.Since(totalStart).Milliseconds()
-		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d concurrency=%d\n",
-			okCount, *requests, totalElapsed, *payloadBytes, normalizedConcurrency(*requests, *concurrency))
+		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d concurrency=%d qps=%d\n",
+			okCount, *requests, totalElapsed, *payloadBytes, normalizedConcurrency(*requests, *concurrency), *qps)
 		if okCount != *requests {
 			os.Exit(1)
 		}
@@ -178,7 +179,7 @@ type probeResult struct {
 	inferenceMs float64
 }
 
-func runIndexed(total int, concurrency int, fn func(index int) probeResult) []probeResult {
+func runIndexed(total int, concurrency int, qps int, fn func(index int) probeResult) []probeResult {
 	results := make([]probeResult, total)
 	concurrency = normalizedConcurrency(total, concurrency)
 	jobs := make(chan int)
@@ -192,7 +193,19 @@ func runIndexed(total int, concurrency int, fn func(index int) probeResult) []pr
 			}
 		}()
 	}
+	var ticker *time.Ticker
+	if qps > 0 {
+		interval := time.Second / time.Duration(qps)
+		if interval < time.Nanosecond {
+			interval = time.Nanosecond
+		}
+		ticker = time.NewTicker(interval)
+		defer ticker.Stop()
+	}
 	for index := 1; index <= total; index++ {
+		if ticker != nil {
+			<-ticker.C
+		}
 		jobs <- index
 	}
 	close(jobs)

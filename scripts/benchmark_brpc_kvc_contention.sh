@@ -9,8 +9,9 @@ EXPECTED_ONBOARDS="${EXPECTED_ONBOARDS:-2}"
 
 BRPC_ENDPOINT="${BRPC_ENDPOINT:-192.168.100.11:18100}"
 BRPC_LOAD_CONCURRENCY="${BRPC_LOAD_CONCURRENCY:-16}"
-BRPC_LOAD_PAYLOAD_BYTES="${BRPC_LOAD_PAYLOAD_BYTES:-102400}"
-BRPC_LOAD_REQUESTS="${BRPC_LOAD_REQUESTS:-2000000}"
+BRPC_LOAD_QPS="${BRPC_LOAD_QPS:-300}"
+BRPC_LOAD_PAYLOAD_BYTES="${BRPC_LOAD_PAYLOAD_BYTES:-8388608}"
+BRPC_LOAD_REQUESTS="${BRPC_LOAD_REQUESTS:-100000}"
 BRPC_LOAD_TIMEOUT_MS="${BRPC_LOAD_TIMEOUT_MS:-5000}"
 BRPC_PROBE_BIN="${BRPC_PROBE_BIN:-/tmp/probe-go-brpc-client}"
 
@@ -28,7 +29,10 @@ KVC_TASKSET_CPUS="${KVC_TASKSET_CPUS:-}"
 KVC_LOAD_DURATION_SECONDS="${KVC_LOAD_DURATION_SECONDS:-300}"
 
 LOAD_SETTLE_SECONDS="${LOAD_SETTLE_SECONDS:-3}"
+ROUND_COOLDOWN_SECONDS="${ROUND_COOLDOWN_SECONDS:-5}"
 PRIME_REQUESTS="${PRIME_REQUESTS:-200}"
+PRIME_MAX_ATTEMPTS="${PRIME_MAX_ATTEMPTS:-3}"
+PRIME_RETRY_DELAY_SECONDS="${PRIME_RETRY_DELAY_SECONDS:-10}"
 PRIME_UIDS="${PRIME_UIDS:-5,6312,130,2184,303,1190,1191,1192,1193,1194}"
 USER_FEATURES_PATH="${USER_FEATURES_PATH:-/home/zcx/workspace/pairec4tigerllm/data/user_features.json}"
 SEMANTIC_MAP_PATH="${SEMANTIC_MAP_PATH:-/home/zcx/workspace/pairec4tigerllm/data/tenrec/processed/semantic_id_map.json}"
@@ -93,11 +97,16 @@ validate() {
     *) die "MODE must be baseline, brpc, kvc-get, kvc-set, kvc-mixed, or combined" ;;
   esac
   local value
-  for value in "$REPEATS" "$EXPECTED_OFFLOADS" "$EXPECTED_ONBOARDS" "$PRIME_REQUESTS"; do
+  for value in "$REPEATS" "$EXPECTED_OFFLOADS" "$EXPECTED_ONBOARDS" "$PRIME_REQUESTS" \
+    "$BRPC_LOAD_QPS" "$PRIME_MAX_ATTEMPTS" "$PRIME_RETRY_DELAY_SECONDS" "$ROUND_COOLDOWN_SECONDS"; do
     [[ "$value" =~ ^[0-9]+$ ]] || die "repeat/count parameters must be non-negative integers"
   done
   [ "$REPEATS" -gt 0 ] || die "REPEATS must be positive"
   [ "$PRIME_REQUESTS" -gt 0 ] || die "PRIME_REQUESTS must be positive"
+  [ "$PRIME_MAX_ATTEMPTS" -gt 0 ] || die "PRIME_MAX_ATTEMPTS must be positive"
+  if mode_has_brpc && [ "$BRPC_LOAD_QPS" -le 0 ]; then
+    die "BRPC_LOAD_QPS must be positive; unlimited short connections can exhaust local ephemeral ports"
+  fi
   if mode_has_kvc && [ "$KVC_BATCH_NUM" -ne 1 ]; then
     die "KVC_BATCH_NUM must be 1 to match current single-key TRT KVC calls"
   fi
@@ -138,6 +147,7 @@ start_brpc_load() {
     --method=health \
     --requests="$BRPC_LOAD_REQUESTS" \
     --concurrency="$BRPC_LOAD_CONCURRENCY" \
+    --qps="$BRPC_LOAD_QPS" \
     --payload_bytes="$BRPC_LOAD_PAYLOAD_BYTES" \
     --timeout_ms="$BRPC_LOAD_TIMEOUT_MS" \
     --max_retries=0 \
@@ -211,9 +221,8 @@ terminate() {
 trap cleanup EXIT
 trap terminate INT TERM
 
-run_prime() {
-  local round_dir="$1"
-  log "Prime cache state"
+run_prime_once() {
+  local attempt_dir="$1"
   ENDPOINT="$BRPC_ENDPOINT" \
   REQUESTS="$PRIME_REQUESTS" \
   CONCURRENCY=1 \
@@ -226,9 +235,30 @@ run_prime() {
   SEMANTIC_MAP_PATH="$SEMANTIC_MAP_PATH" \
   HISTORY_MAX_LENGTH="$HISTORY_MAX_LENGTH" \
   VARY_USER_ID=true \
-  OUT_DIR="${round_dir}/prime" \
+  OUT_DIR="$attempt_dir" \
     bash scripts/benchmark_go_brpc_probe_kvc_latency.sh \
-    >"${round_dir}/prime.console.log" 2>&1
+    >"${attempt_dir}.console.log" 2>&1
+}
+
+run_prime() {
+  local round_dir="$1"
+  local attempt
+  for attempt in $(seq 1 "$PRIME_MAX_ATTEMPTS"); do
+    log "Prime cache state attempt ${attempt}/${PRIME_MAX_ATTEMPTS}"
+    set +e
+    run_prime_once "${round_dir}/prime-attempt-${attempt}"
+    local code="$?"
+    set -e
+    if [ "$code" -eq 0 ]; then
+      echo "$attempt" >"${round_dir}/prime.success_attempt"
+      return 0
+    fi
+    echo "$code" >"${round_dir}/prime-attempt-${attempt}.exit_code"
+    if [ "$attempt" -lt "$PRIME_MAX_ATTEMPTS" ]; then
+      sleep "$PRIME_RETRY_DELAY_SECONDS"
+    fi
+  done
+  return 1
 }
 
 run_replay() {
@@ -400,6 +430,7 @@ mode=${MODE}
 repeats=${REPEATS}
 brpc_endpoint=${BRPC_ENDPOINT}
 brpc_load_concurrency=${BRPC_LOAD_CONCURRENCY}
+brpc_load_qps=${BRPC_LOAD_QPS}
 brpc_load_payload_bytes=${BRPC_LOAD_PAYLOAD_BYTES}
 kvc_load_host=${KVC_LOAD_HOST}
 kvc_ds_endpoint=${KVC_DS_ENDPOINT}
@@ -422,7 +453,16 @@ for round in $(seq 1 "$REPEATS"); do
   mkdir -p "$round_dir"
   log "Round ${round}/${REPEATS}: mode=${MODE}"
 
+  set +e
   run_prime "$round_dir"
+  prime_code="$?"
+  set -e
+  if [ "$prime_code" -ne 0 ]; then
+    echo "$prime_code" >"${round_dir}/prime.exit_code"
+    overall_code=1
+    echo "ERROR: round ${round} prime failed after ${PRIME_MAX_ATTEMPTS} attempts" >&2
+    break
+  fi
 
   read_counter "$NETWORK_INTERFACE" rx_bytes >"${round_dir}/local-rx.before"
   read_counter "$NETWORK_INTERFACE" tx_bytes >"${round_dir}/local-tx.before"
@@ -457,6 +497,10 @@ for round in $(seq 1 "$REPEATS"); do
     read_remote_counter tx_bytes >"${round_dir}/remote-tx.after"
   fi
   stop_loads
+  if [ "$round" -lt "$REPEATS" ] && [ "$ROUND_COOLDOWN_SECONDS" -gt 0 ]; then
+    log "Round cooldown ${ROUND_COOLDOWN_SECONDS}s"
+    sleep "$ROUND_COOLDOWN_SECONDS"
+  fi
 done
 
 log "Summarize"
