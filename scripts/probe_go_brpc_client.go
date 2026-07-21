@@ -37,6 +37,7 @@ func main() {
 	semanticMapPath := flag.String("semantic_map_path", getenv("SEMANTIC_MAP_PATH", "data/tenrec/processed/semantic_id_map.json"), "semantic_id_map.json path")
 	historyMaxLength := flag.Int("history_max_length", getenvInt("HISTORY_MAX_LENGTH", 20), "max history items from user_features")
 	varyUserID := flag.Bool("vary_user_id", getenvBool("VARY_USER_ID", true), "append request index to synthetic user_id")
+	quiet := flag.Bool("quiet", getenvBool("QUIET", false), "suppress per-request success output")
 	flag.Parse()
 
 	client, err := recall.NewBRPCRecommendClient(
@@ -82,8 +83,10 @@ func main() {
 				continue
 			}
 			okCount++
-			fmt.Printf("health ok index=%d endpoint=%s payload_bytes=%d latency_ms=%d code=%d status=%s backend=%s\n",
-				result.index, *endpoint, *payloadBytes, result.latencyMs, result.code, result.status, result.backend)
+			if !*quiet {
+				fmt.Printf("health ok index=%d endpoint=%s payload_bytes=%d latency_ms=%d code=%d status=%s backend=%s\n",
+					result.index, *endpoint, *payloadBytes, result.latencyMs, result.code, result.status, result.backend)
+			}
 		}
 		totalElapsed := time.Since(totalStart).Milliseconds()
 		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d concurrency=%d\n",
@@ -145,8 +148,10 @@ func main() {
 				continue
 			}
 			okCount++
-			fmt.Printf("recommend ok index=%d endpoint=%s request_id=%s payload_bytes=%d latency_ms=%d code=%d user_id=%s items=%d inference_ms=%.0f backend=%s\n",
-				result.index, *endpoint, result.requestID, *payloadBytes, result.latencyMs, result.code, result.userID, result.items, result.inferenceMs, result.backend)
+			if !*quiet {
+				fmt.Printf("recommend ok index=%d endpoint=%s request_id=%s payload_bytes=%d latency_ms=%d code=%d user_id=%s items=%d inference_ms=%.0f backend=%s\n",
+					result.index, *endpoint, result.requestID, *payloadBytes, result.latencyMs, result.code, result.userID, result.items, result.inferenceMs, result.backend)
+			}
 		}
 		totalElapsed := time.Since(totalStart).Milliseconds()
 		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d concurrency=%d\n",
