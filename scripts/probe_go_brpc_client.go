@@ -42,6 +42,8 @@ func main() {
 	quiet := flag.Bool("quiet", getenvBool("QUIET", false), "suppress per-request success output")
 	reuseConnections := flag.Bool("reuse_connections", getenvBool("REUSE_CONNECTIONS", false), "reuse one brpc TCP connection per worker")
 	readyFile := flag.String("ready_file", getenv("READY_FILE", ""), "write worker concurrency evidence after the target is reached")
+	statsFile := flag.String("stats_file", getenv("STATS_FILE", ""), "append periodic pressure statistics as JSON lines")
+	statsIntervalMs := flag.Int("stats_interval_ms", getenvInt("STATS_INTERVAL_MS", 1000), "pressure statistics interval in milliseconds")
 	flag.Parse()
 
 	client, err := recall.NewBRPCRecommendClient(
@@ -67,6 +69,8 @@ func main() {
 		var active int64
 		var maxActive int64
 		var readyOnce sync.Once
+		var pressure pressureCounters
+		var statsStop chan struct{}
 		sessions := make([]*recall.BRPCRecommendSession, workerCount)
 		if *reuseConnections {
 			for worker := range sessions {
@@ -74,7 +78,28 @@ func main() {
 				defer sessions[worker].Close()
 			}
 		}
-		results := runIndexedWithWorker(*requests, *concurrency, *qps, func(worker, index int) probeResult {
+		if *statsFile != "" {
+			if *statsIntervalMs <= 0 {
+				fmt.Fprintln(os.Stderr, "stats_interval_ms must be positive")
+				os.Exit(2)
+			}
+			_ = os.Remove(*statsFile)
+			statsStop = make(chan struct{})
+			go reportPressureStats(*statsFile, time.Duration(*statsIntervalMs)*time.Millisecond,
+				totalStart, *payloadBytes, &pressure, &active, &maxActive, statsStop)
+		}
+		results := runIndexedWithWorker(*requests, *concurrency, *qps, func(worker, index int) (result probeResult) {
+			callStarted := time.Now()
+			defer func() {
+				atomic.AddInt64(&pressure.calls, 1)
+				atomic.AddInt64(&pressure.latencyUs, time.Since(callStarted).Microseconds())
+				if result.err != nil {
+					atomic.AddInt64(&pressure.errors, 1)
+				} else {
+					atomic.AddInt64(&pressure.success, 1)
+					atomic.AddInt64(&pressure.bytes, int64(*payloadBytes))
+				}
+			}()
 			currentActive := atomic.AddInt64(&active, 1)
 			updateAtomicMaximum(&maxActive, currentActive)
 			if currentActive >= int64(workerCount) && *readyFile != "" {
@@ -118,6 +143,10 @@ func main() {
 				backend:   resp.Backend,
 			}
 		})
+		if *statsFile != "" {
+			close(statsStop)
+			writePressureStats(*statsFile, totalStart, *payloadBytes, &pressure, &active, &maxActive, true)
+		}
 		for _, result := range results {
 			if result.err != nil {
 				fmt.Fprintf(os.Stderr, "health failed index=%d endpoint=%s payload_bytes=%d latency_ms=%d error=%v\n",
@@ -218,6 +247,58 @@ type probeResult struct {
 	userID      string
 	items       int
 	inferenceMs float64
+}
+
+type pressureCounters struct {
+	calls     int64
+	success   int64
+	errors    int64
+	bytes     int64
+	latencyUs int64
+}
+
+func reportPressureStats(path string, interval time.Duration, started time.Time, payloadBytes int,
+	counters *pressureCounters, active, maxActive *int64, stop <-chan struct{}) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			writePressureStats(path, started, payloadBytes, counters, active, maxActive, false)
+		case <-stop:
+			return
+		}
+	}
+}
+
+func writePressureStats(path string, started time.Time, payloadBytes int, counters *pressureCounters,
+	active, maxActive *int64, final bool) {
+	elapsed := time.Since(started).Seconds()
+	calls := atomic.LoadInt64(&counters.calls)
+	success := atomic.LoadInt64(&counters.success)
+	errors := atomic.LoadInt64(&counters.errors)
+	bytes := atomic.LoadInt64(&counters.bytes)
+	latencyUs := atomic.LoadInt64(&counters.latencyUs)
+	qps := 0.0
+	gbps := 0.0
+	avgMs := 0.0
+	if elapsed > 0 {
+		qps = float64(calls) / elapsed
+		gbps = float64(bytes) * 8 / elapsed / 1e9
+	}
+	if calls > 0 {
+		avgMs = float64(latencyUs) / float64(calls) / 1000
+	}
+	line := fmt.Sprintf("{\"event\":\"brpc_pressure_stats\",\"final\":%t,\"elapsed_s\":%.6f,\"payload_bytes\":%d,\"calls\":%d,\"success\":%d,\"errors\":%d,\"bytes\":%d,\"qps\":%.6f,\"gbps\":%.6f,\"avg_ms\":%.6f,\"active_calls\":%d,\"max_active_calls\":%d}\n",
+		final, elapsed, payloadBytes, calls, success, errors, bytes, qps, gbps, avgMs,
+		atomic.LoadInt64(active), atomic.LoadInt64(maxActive))
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open stats file failed: %v\n", err)
+		return
+	}
+	_, _ = file.WriteString(line)
+	_ = file.Close()
 }
 
 func runIndexed(total int, concurrency int, qps int, fn func(index int) probeResult) []probeResult {

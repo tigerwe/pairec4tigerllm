@@ -33,6 +33,7 @@ KVC_SET_CLIENTS="${KVC_SET_CLIENTS:-6}"
 KVC_TASKSET_CPUS="${KVC_TASKSET_CPUS:-}"
 KVC_LOAD_DURATION_SECONDS="${KVC_LOAD_DURATION_SECONDS:-300}"
 KVC_REPORT_INTERVAL_SECONDS="${KVC_REPORT_INTERVAL_SECONDS:-1}"
+KVC_LOAD_READY_TIMEOUT_SECONDS="${KVC_LOAD_READY_TIMEOUT_SECONDS:-300}"
 
 LOAD_SETTLE_SECONDS="${LOAD_SETTLE_SECONDS:-3}"
 ROUND_COOLDOWN_SECONDS="${ROUND_COOLDOWN_SECONDS:-5}"
@@ -107,7 +108,7 @@ validate() {
   for value in "$REPEATS" "$EXPECTED_OFFLOADS" "$EXPECTED_ONBOARDS" "$PRIME_REQUESTS" \
     "$BRPC_LOAD_QPS" "$BRPC_LOAD_CONCURRENCY" "$BRPC_LOAD_PAYLOAD_BYTES" "$BRPC_LOAD_REQUESTS" \
     "$BRPC_LOAD_TIMEOUT_MS" "$BRPC_LOAD_READY_TIMEOUT_SECONDS" "$PRIME_MAX_ATTEMPTS" \
-    "$PRIME_RETRY_DELAY_SECONDS" "$ROUND_COOLDOWN_SECONDS"; do
+    "$PRIME_RETRY_DELAY_SECONDS" "$ROUND_COOLDOWN_SECONDS" "$KVC_LOAD_READY_TIMEOUT_SECONDS"; do
     [[ "$value" =~ ^[0-9]+$ ]] || die "repeat/count parameters must be non-negative integers"
   done
   [ "$REPEATS" -gt 0 ] || die "REPEATS must be positive"
@@ -118,6 +119,7 @@ validate() {
   [ "$BRPC_LOAD_REQUESTS" -ge "$BRPC_LOAD_CONCURRENCY" ] \
     || die "BRPC_LOAD_REQUESTS must be at least BRPC_LOAD_CONCURRENCY"
   [ "$BRPC_LOAD_READY_TIMEOUT_SECONDS" -gt 0 ] || die "BRPC_LOAD_READY_TIMEOUT_SECONDS must be positive"
+  [ "$KVC_LOAD_READY_TIMEOUT_SECONDS" -gt 0 ] || die "KVC_LOAD_READY_TIMEOUT_SECONDS must be positive"
   case "$BRPC_LOAD_REUSE_CONNECTIONS" in
     0|1) ;;
     *) die "BRPC_LOAD_REUSE_CONNECTIONS must be 0 or 1" ;;
@@ -173,6 +175,8 @@ start_brpc_load() {
 		--max_retries=0 \
 		--reuse_connections="$BRPC_LOAD_REUSE_CONNECTIONS" \
 		--ready_file="$ready_file" \
+		--stats_file="${round_dir}/brpc-pressure-stats.jsonl" \
+		--stats_interval_ms=1000 \
 		--quiet=true \
     >"${round_dir}/brpc-load.log" 2>&1 &
 	BRPC_LOAD_PID="$!"
@@ -211,7 +215,7 @@ start_kvc_load() {
   echo "$KVC_SSH_PID" >"${round_dir}/kvc-load-ssh.pid"
 
   local attempt
-  for attempt in $(seq 1 60); do
+  for attempt in $(seq 1 "$KVC_LOAD_READY_TIMEOUT_SECONDS"); do
     if ssh "$KVC_LOAD_HOST" "test -f '$KVC_REMOTE_READY_FILE'" >/dev/null 2>&1; then
       ssh "$KVC_LOAD_HOST" "cat '$KVC_REMOTE_READY_FILE'" \
         >"${round_dir}/kvc-pressure-ready.txt" 2>/dev/null || true
@@ -223,7 +227,7 @@ start_kvc_load() {
     fi
     sleep 1
   done
-  die "remote KVC pressure did not become ready within 60 seconds"
+  die "remote KVC pressure did not become ready within ${KVC_LOAD_READY_TIMEOUT_SECONDS} seconds"
 }
 
 capture_kvc_stats() {
@@ -376,6 +380,18 @@ def read_last_json(path):
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
+def read_key_values(path):
+    try:
+        values = {}
+        with open(path, "r", encoding="utf-8") as handle:
+            for token in handle.read().split():
+                if "=" in token:
+                    key, value = token.split("=", 1)
+                    values[key] = value
+        return values
+    except FileNotFoundError:
+        return {}
+
 def percentile(values, q):
     values = sorted(values)
     if not values:
@@ -410,6 +426,10 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
     server_other_ms = max(0.0, server_ms - kvc_ms)
     round_dir = os.path.dirname(os.path.dirname(path))
     pressure = read_last_json(os.path.join(round_dir, "kvc-pressure-stats.jsonl"))
+    pressure_ready = {}
+    if mode in {"brpc", "combined"}:
+        pressure = read_last_json(os.path.join(round_dir, "brpc-pressure-stats.jsonl"))
+        pressure_ready = read_key_values(os.path.join(round_dir, "brpc-pressure.ready"))
     local_rx_delta = max(0, read_int(os.path.join(round_dir, "local-rx.after")) - read_int(os.path.join(round_dir, "local-rx.before")))
     local_tx_delta = max(0, read_int(os.path.join(round_dir, "local-tx.after")) - read_int(os.path.join(round_dir, "local-tx.before")))
     remote_rx_delta = max(0, read_int(os.path.join(round_dir, "remote-rx.after")) - read_int(os.path.join(round_dir, "remote-rx.before")))
@@ -418,7 +438,10 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
     response_ok = client.get("ok") is True and raw.get("response_code") == 200 and len(brpc_events) == 1
     pressure_calls = int(number(pressure.get("calls")))
     pressure_errors = int(number(pressure.get("errors")))
-    pressure_max_active = int(number(pressure.get("max_active_calls")))
+    pressure_max_active = max(
+        int(number(pressure.get("max_active_calls"))),
+        int(number(pressure_ready.get("max_active"))),
+    )
     pressure_ok = (
         not pressure_required or
         (pressure_calls > 0 and pressure_errors == 0 and pressure_max_active >= expected_pressure_active)
@@ -532,6 +555,7 @@ kvc_batch_num=${KVC_BATCH_NUM}
 kvc_thread_num=${KVC_THREAD_NUM}
 kvc_get_clients=${KVC_GET_CLIENTS}
 kvc_set_clients=${KVC_SET_CLIENTS}
+kvc_load_ready_timeout_seconds=${KVC_LOAD_READY_TIMEOUT_SECONDS}
 expected_offloads=${EXPECTED_OFFLOADS}
 expected_onboards=${EXPECTED_ONBOARDS}
 EOF
