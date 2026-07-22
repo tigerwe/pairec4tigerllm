@@ -60,6 +60,17 @@ ldd "$DSBENCH" | grep 'not found' && exit 1 || true
 
 持续模式会复用已初始化的 KVClient 和固定 key 集合，在指定时长内持续执行真实请求，不会不断重启 dsbench，也不会无限增加驻留对象。
 
+如果新二进制依赖构建目录中的动态库，使用仓库脚本生成固定运行环境的 wrapper，避免依赖当前 Shell 中临时设置的 `LD_LIBRARY_PATH`：
+
+```bash
+cd /home/zcx/workspace/pairec4tigerllm
+
+DATASYSTEM_DIR=/home/zcx/yuanrong-datasystem-v081 \
+  bash scripts/create_datasystem_dsbench_wrapper.sh
+```
+
+脚本默认生成 `/home/zcx/bin/dsbench-v081-sustained`，并自动检查动态库、DataSystem `0.8.1` 版本以及 `duration_seconds/ready_file` 标记。后续将该 wrapper 作为 `KVC_DSBENCH_CPP`，不要直接传裸二进制。
+
 ## 3. 校准 `3 Set + 2 Get`
 
 校准会对每个候选值重启 inference Pod、执行固定 prime，再发一次 replay。候选值首次命中后，还会重启并连续确认 3 轮；只有 3 轮都保持 `3 Set + 2 Get` 才会被选中。默认尝试 `PRIME_REQUESTS=192..200`：
