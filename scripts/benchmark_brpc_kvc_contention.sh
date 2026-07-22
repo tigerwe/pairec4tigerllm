@@ -8,6 +8,7 @@ EXPECTED_OFFLOADS="${EXPECTED_OFFLOADS:-3}"
 EXPECTED_ONBOARDS="${EXPECTED_ONBOARDS:-2}"
 
 BRPC_ENDPOINT="${BRPC_ENDPOINT:-192.168.100.11:18100}"
+BRPC_LOAD_ENDPOINT="${BRPC_LOAD_ENDPOINT:-$BRPC_ENDPOINT}"
 BRPC_LOAD_CONCURRENCY="${BRPC_LOAD_CONCURRENCY:-10}"
 BRPC_LOAD_QPS="${BRPC_LOAD_QPS:-0}"
 BRPC_LOAD_PAYLOAD_BYTES="${BRPC_LOAD_PAYLOAD_BYTES:-102400}"
@@ -34,6 +35,7 @@ KVC_TASKSET_CPUS="${KVC_TASKSET_CPUS:-}"
 KVC_LOAD_DURATION_SECONDS="${KVC_LOAD_DURATION_SECONDS:-300}"
 KVC_REPORT_INTERVAL_SECONDS="${KVC_REPORT_INTERVAL_SECONDS:-1}"
 KVC_LOAD_READY_TIMEOUT_SECONDS="${KVC_LOAD_READY_TIMEOUT_SECONDS:-300}"
+KVC_DSBENCH_SUSTAINED="${KVC_DSBENCH_SUSTAINED:-0}"
 
 LOAD_SETTLE_SECONDS="${LOAD_SETTLE_SECONDS:-3}"
 ROUND_COOLDOWN_SECONDS="${ROUND_COOLDOWN_SECONDS:-5}"
@@ -47,6 +49,8 @@ HISTORY_MAX_LENGTH="${HISTORY_MAX_LENGTH:-20}"
 REPLAY_USER_ID="${REPLAY_USER_ID:-5}"
 REPLAY_SIZE="${REPLAY_SIZE:-1}"
 REPLAY_TIMEOUT="${REPLAY_TIMEOUT:-30}"
+RESET_INFERENCE_BEFORE_ROUND="${RESET_INFERENCE_BEFORE_ROUND:-0}"
+INFERENCE_ROLLOUT_TIMEOUT_SECONDS="${INFERENCE_ROLLOUT_TIMEOUT_SECONDS:-600}"
 
 NAMESPACE="${NAMESPACE:-pairec}"
 PAIREC_TARGET="${PAIREC_TARGET:-deploy/pairec}"
@@ -108,7 +112,8 @@ validate() {
   for value in "$REPEATS" "$EXPECTED_OFFLOADS" "$EXPECTED_ONBOARDS" "$PRIME_REQUESTS" \
     "$BRPC_LOAD_QPS" "$BRPC_LOAD_CONCURRENCY" "$BRPC_LOAD_PAYLOAD_BYTES" "$BRPC_LOAD_REQUESTS" \
     "$BRPC_LOAD_TIMEOUT_MS" "$BRPC_LOAD_READY_TIMEOUT_SECONDS" "$PRIME_MAX_ATTEMPTS" \
-    "$PRIME_RETRY_DELAY_SECONDS" "$ROUND_COOLDOWN_SECONDS" "$KVC_LOAD_READY_TIMEOUT_SECONDS"; do
+    "$PRIME_RETRY_DELAY_SECONDS" "$ROUND_COOLDOWN_SECONDS" "$KVC_LOAD_READY_TIMEOUT_SECONDS" \
+    "$INFERENCE_ROLLOUT_TIMEOUT_SECONDS"; do
     [[ "$value" =~ ^[0-9]+$ ]] || die "repeat/count parameters must be non-negative integers"
   done
   [ "$REPEATS" -gt 0 ] || die "REPEATS must be positive"
@@ -123,6 +128,14 @@ validate() {
   case "$BRPC_LOAD_REUSE_CONNECTIONS" in
     0|1) ;;
     *) die "BRPC_LOAD_REUSE_CONNECTIONS must be 0 or 1" ;;
+  esac
+  case "$RESET_INFERENCE_BEFORE_ROUND" in
+    0|1) ;;
+    *) die "RESET_INFERENCE_BEFORE_ROUND must be 0 or 1" ;;
+  esac
+  case "$KVC_DSBENCH_SUSTAINED" in
+    0|1) ;;
+    *) die "KVC_DSBENCH_SUSTAINED must be 0 or 1" ;;
   esac
   if mode_has_brpc && [ "$BRPC_LOAD_QPS" -eq 0 ] && [ "$BRPC_LOAD_REUSE_CONNECTIONS" != "1" ]; then
 		die "unlimited BRPC load requires BRPC_LOAD_REUSE_CONNECTIONS=1 to avoid ephemeral-port exhaustion"
@@ -148,6 +161,21 @@ read_remote_counter() {
   ssh "$KVC_LOAD_HOST" "cat /sys/class/net/${REMOTE_NETWORK_INTERFACE}/statistics/${counter} 2>/dev/null || echo 0"
 }
 
+capture_inference_state() {
+  local round_dir="$1"
+  local phase="$2"
+  local pod
+  pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1].metadata.name}')"
+  [ -n "$pod" ] || die "inference pod not found"
+  printf '%s\n' "$pod" >"${round_dir}/inference-pod.${phase}"
+  kubectl -n "$NAMESPACE" get pod "$pod" \
+    -o jsonpath='{.status.containerStatuses[?(@.name=="brpc-inference")].restartCount}' \
+    >"${round_dir}/inference-restarts.${phase}"
+  printf '\n' >>"${round_dir}/inference-restarts.${phase}"
+}
+
 build_brpc_probe() {
   if ! mode_has_brpc; then
     return
@@ -165,7 +193,7 @@ start_brpc_load() {
 	local ready_file="${round_dir}/brpc-pressure.ready"
 	rm -f "$ready_file"
 	"$BRPC_PROBE_BIN" \
-    --endpoint="$BRPC_ENDPOINT" \
+		--endpoint="$BRPC_LOAD_ENDPOINT" \
     --method=health \
     --requests="$BRPC_LOAD_REQUESTS" \
     --concurrency="$BRPC_LOAD_CONCURRENCY" \
@@ -209,7 +237,7 @@ start_kvc_load() {
   remote_mode="$(kvc_mode)"
 
   ssh "$KVC_LOAD_HOST" \
-    "cd '$KVC_REMOTE_REPO' && env PRESSURE_ENGINE='$KVC_PRESSURE_ENGINE' MODE='$remote_mode' DS_ENDPOINT='$KVC_DS_ENDPOINT' DSBENCH_CPP='$KVC_DSBENCH_CPP' DATASYSTEM_SDK_DIR='$KVC_DATASYSTEM_SDK_DIR' PERSISTENT_BIN='$KVC_PERSISTENT_BIN' OBJECT_SIZE='$KVC_OBJECT_SIZE' KEY_COUNT='$KVC_KEY_COUNT' BATCH_NUM='$KVC_BATCH_NUM' THREAD_NUM='$KVC_THREAD_NUM' GET_CLIENTS='$KVC_GET_CLIENTS' SET_CLIENTS='$KVC_SET_CLIENTS' TASKSET_CPUS='$KVC_TASKSET_CPUS' DURATION_SECONDS='$KVC_LOAD_DURATION_SECONDS' REPORT_INTERVAL_SECONDS='$KVC_REPORT_INTERVAL_SECONDS' RUN_ID='$remote_run_id' PID_FILE='$KVC_REMOTE_PID_FILE' READY_FILE='$KVC_REMOTE_READY_FILE' STATS_FILE='$KVC_REMOTE_STATS_FILE' bash scripts/run_datasystem_dsbench_pressure.sh" \
+    "cd '$KVC_REMOTE_REPO' && env PRESSURE_ENGINE='$KVC_PRESSURE_ENGINE' MODE='$remote_mode' DS_ENDPOINT='$KVC_DS_ENDPOINT' DSBENCH_CPP='$KVC_DSBENCH_CPP' DSBENCH_SUSTAINED='$KVC_DSBENCH_SUSTAINED' DATASYSTEM_SDK_DIR='$KVC_DATASYSTEM_SDK_DIR' PERSISTENT_BIN='$KVC_PERSISTENT_BIN' OBJECT_SIZE='$KVC_OBJECT_SIZE' KEY_COUNT='$KVC_KEY_COUNT' BATCH_NUM='$KVC_BATCH_NUM' THREAD_NUM='$KVC_THREAD_NUM' GET_CLIENTS='$KVC_GET_CLIENTS' SET_CLIENTS='$KVC_SET_CLIENTS' TASKSET_CPUS='$KVC_TASKSET_CPUS' DURATION_SECONDS='$KVC_LOAD_DURATION_SECONDS' REPORT_INTERVAL_SECONDS='$KVC_REPORT_INTERVAL_SECONDS' RUN_ID='$remote_run_id' PID_FILE='$KVC_REMOTE_PID_FILE' READY_FILE='$KVC_REMOTE_READY_FILE' STATS_FILE='$KVC_REMOTE_STATS_FILE' bash scripts/run_datasystem_dsbench_pressure.sh" \
     >"${round_dir}/kvc-load.log" 2>&1 &
   KVC_SSH_PID="$!"
   echo "$KVC_SSH_PID" >"${round_dir}/kvc-load-ssh.pid"
@@ -291,6 +319,22 @@ run_prime_once() {
     >"${attempt_dir}.console.log" 2>&1
 }
 
+reset_inference() {
+  local round_dir="$1"
+  if [ "$RESET_INFERENCE_BEFORE_ROUND" != "1" ]; then
+    return
+  fi
+
+  log "Reset inference cache state"
+  kubectl -n "$NAMESPACE" rollout restart "$BRPC_TARGET" \
+    >"${round_dir}/inference-rollout-restart.log" 2>&1
+  kubectl -n "$NAMESPACE" rollout status "$BRPC_TARGET" \
+    --timeout="${INFERENCE_ROLLOUT_TIMEOUT_SECONDS}s" \
+    >"${round_dir}/inference-rollout-status.log" 2>&1
+  kubectl -n "$NAMESPACE" get pods -l app=inference-brpc-trtllm -o wide \
+    >"${round_dir}/inference-pods-after-reset.txt"
+}
+
 run_prime() {
   local round_dir="$1"
   local attempt
@@ -330,6 +374,7 @@ run_replay() {
 summarize() {
   python3 - "$OUT_DIR" "$MODE" "$REPEATS" "$EXPECTED_OFFLOADS" "$EXPECTED_ONBOARDS" \
     "$STRICT_COUNTS" "$RESULT_JSON" "$KVC_PRESSURE_ENGINE" "$KVC_GET_CLIENTS" "$KVC_SET_CLIENTS" \
+    "$KVC_DSBENCH_SUSTAINED" "$BRPC_LOAD_CONCURRENCY" \
     <<'PY' | tee "$SUMMARY_TXT"
 import glob
 import json
@@ -340,15 +385,22 @@ import sys
 
 (
     out_dir, mode, repeats, expected_offloads, expected_onboards, strict_counts, result_path,
-    pressure_engine, get_clients, set_clients,
-) = sys.argv[1:11]
+    pressure_engine, get_clients, set_clients, dsbench_sustained, brpc_load_concurrency,
+) = sys.argv[1:13]
 repeats = int(repeats)
 expected_offloads = int(expected_offloads)
 expected_onboards = int(expected_onboards)
 strict_counts = strict_counts == "1"
 get_clients = int(get_clients)
 set_clients = int(set_clients)
-pressure_required = mode in {"kvc-get", "kvc-set", "kvc-mixed", "combined"} and pressure_engine == "persistent"
+brpc_load_concurrency = int(brpc_load_concurrency)
+dsbench_sustained = dsbench_sustained == "1"
+kvc_pressure_required = (
+    mode in {"kvc-get", "kvc-set", "kvc-mixed", "combined"}
+    and (pressure_engine == "persistent" or dsbench_sustained)
+)
+brpc_pressure_required = mode in {"brpc", "combined"}
+pressure_required = kvc_pressure_required or brpc_pressure_required
 expected_pressure_active = (
     get_clients if mode == "kvc-get" else
     set_clients if mode == "kvc-set" else
@@ -425,33 +477,83 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
     outer_ms = max(0.0, e2e_ms - rpc_ms)
     server_other_ms = max(0.0, server_ms - kvc_ms)
     round_dir = os.path.dirname(os.path.dirname(path))
-    pressure = read_last_json(os.path.join(round_dir, "kvc-pressure-stats.jsonl"))
-    pressure_ready = {}
-    if mode in {"brpc", "combined"}:
-        pressure = read_last_json(os.path.join(round_dir, "brpc-pressure-stats.jsonl"))
-        pressure_ready = read_key_values(os.path.join(round_dir, "brpc-pressure.ready"))
+    kvc_pressure = read_last_json(os.path.join(round_dir, "kvc-pressure-stats.jsonl"))
+    kvc_pressure_ready = read_key_values(os.path.join(round_dir, "kvc-pressure-ready.txt"))
+    brpc_pressure = read_last_json(os.path.join(round_dir, "brpc-pressure-stats.jsonl"))
+    brpc_pressure_ready = read_key_values(os.path.join(round_dir, "brpc-pressure.ready"))
     local_rx_delta = max(0, read_int(os.path.join(round_dir, "local-rx.after")) - read_int(os.path.join(round_dir, "local-rx.before")))
     local_tx_delta = max(0, read_int(os.path.join(round_dir, "local-tx.after")) - read_int(os.path.join(round_dir, "local-tx.before")))
     remote_rx_delta = max(0, read_int(os.path.join(round_dir, "remote-rx.after")) - read_int(os.path.join(round_dir, "remote-rx.before")))
     remote_tx_delta = max(0, read_int(os.path.join(round_dir, "remote-tx.after")) - read_int(os.path.join(round_dir, "remote-tx.before")))
+    restart_before = read_int(os.path.join(round_dir, "inference-restarts.before"))
+    restart_after = read_int(os.path.join(round_dir, "inference-restarts.after"))
+    try:
+        with open(os.path.join(round_dir, "inference-pod.before"), "r", encoding="utf-8") as handle:
+            pod_before_name = handle.read().strip()
+        with open(os.path.join(round_dir, "inference-pod.after"), "r", encoding="utf-8") as handle:
+            pod_after_name = handle.read().strip()
+    except FileNotFoundError:
+        pod_before_name = ""
+        pod_after_name = ""
+    try:
+        with open(os.path.join(round_dir, "replay", "brpc_trtllm.log"), "r", encoding="utf-8", errors="replace") as handle:
+            replay_log = handle.read()
+    except FileNotFoundError:
+        replay_log = ""
+    crash_markers = sum(
+        replay_log.count(marker)
+        for marker in ("Segmentation fault", "core dumped", "Assertion failed", "CUDA error", "std::terminate")
+    )
+    runtime_ok = (
+        restart_after == restart_before
+        and pod_before_name != ""
+        and pod_before_name == pod_after_name
+        and crash_markers == 0
+    )
     count_ok = len(offloads) == expected_offloads and len(onboards) == expected_onboards
     response_ok = client.get("ok") is True and raw.get("response_code") == 200 and len(brpc_events) == 1
-    pressure_calls = int(number(pressure.get("calls")))
-    pressure_errors = int(number(pressure.get("errors")))
-    pressure_max_active = max(
-        int(number(pressure.get("max_active_calls"))),
-        int(number(pressure_ready.get("max_active"))),
+    kvc_pressure_calls = int(number(kvc_pressure.get("calls")))
+    kvc_pressure_errors = int(number(kvc_pressure.get("errors")))
+    kvc_pressure_max_active = max(
+        int(number(kvc_pressure.get("max_active_calls"))),
+        int(number(kvc_pressure_ready.get("max_active"))),
+        int(number(kvc_pressure_ready.get("active_calls"))),
     )
-    pressure_ok = (
-        not pressure_required or
-        (pressure_calls > 0 and pressure_errors == 0 and pressure_max_active >= expected_pressure_active)
+    brpc_pressure_calls = int(number(brpc_pressure.get("calls")))
+    brpc_pressure_errors = int(number(brpc_pressure.get("errors")))
+    brpc_pressure_max_active = max(
+        int(number(brpc_pressure.get("max_active_calls"))),
+        int(number(brpc_pressure.get("active_calls"))),
+        int(number(brpc_pressure.get("max_active"))),
+        int(number(brpc_pressure_ready.get("max_active"))),
+        int(number(brpc_pressure_ready.get("active_calls"))),
     )
+    if not kvc_pressure_required:
+        kvc_pressure_ok = True
+    elif pressure_engine == "persistent":
+        kvc_pressure_ok = (
+            kvc_pressure_calls > 0
+            and kvc_pressure_errors == 0
+            and kvc_pressure_max_active >= expected_pressure_active
+        )
+    else:
+        kvc_pressure_ok = kvc_pressure_max_active >= expected_pressure_active
+    brpc_pressure_ok = (
+        not brpc_pressure_required
+        or (
+            brpc_pressure_calls > 0
+            and brpc_pressure_errors == 0
+            and brpc_pressure_max_active >= brpc_load_concurrency
+        )
+    )
+    pressure_ok = kvc_pressure_ok and brpc_pressure_ok
     rows.append({
         "round": os.path.basename(os.path.dirname(os.path.dirname(path))).split("-")[-1],
-        "valid": response_ok and (count_ok or not strict_counts) and pressure_ok,
+        "valid": response_ok and (count_ok or not strict_counts) and pressure_ok and runtime_ok,
         "response_ok": response_ok,
         "count_ok": count_ok,
         "pressure_ok": pressure_ok,
+        "runtime_ok": runtime_ok,
         "e2e_ms": e2e_ms,
         "rpc_ms": rpc_ms,
         "server_ms": server_ms,
@@ -467,11 +569,25 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
         "local_tx_bytes": local_tx_delta,
         "remote_rx_bytes": remote_rx_delta,
         "remote_tx_bytes": remote_tx_delta,
-        "pressure_calls": pressure_calls,
-        "pressure_errors": pressure_errors,
-        "pressure_qps": number(pressure.get("qps")),
-        "pressure_gbps": number(pressure.get("gbps")),
-        "pressure_max_active_calls": pressure_max_active,
+        "pod_before": pod_before_name,
+        "pod_after": pod_after_name,
+        "restart_before": restart_before,
+        "restart_after": restart_after,
+        "restart_delta": restart_after - restart_before,
+        "crash_markers": crash_markers,
+        "pressure_calls": brpc_pressure_calls if brpc_pressure_required else kvc_pressure_calls,
+        "pressure_errors": brpc_pressure_errors if brpc_pressure_required else kvc_pressure_errors,
+        "pressure_qps": number(brpc_pressure.get("qps")) if brpc_pressure_required else number(kvc_pressure.get("qps")),
+        "pressure_gbps": number(brpc_pressure.get("gbps")) if brpc_pressure_required else number(kvc_pressure.get("gbps")),
+        "pressure_max_active_calls": max(brpc_pressure_max_active, kvc_pressure_max_active),
+        "brpc_pressure_ok": brpc_pressure_ok,
+        "brpc_pressure_qps": number(brpc_pressure.get("qps")),
+        "brpc_pressure_gbps": number(brpc_pressure.get("gbps")),
+        "brpc_pressure_max_active": brpc_pressure_max_active,
+        "kvc_pressure_ok": kvc_pressure_ok,
+        "kvc_pressure_qps": number(kvc_pressure.get("qps")),
+        "kvc_pressure_gbps": number(kvc_pressure.get("gbps")),
+        "kvc_pressure_max_active": kvc_pressure_max_active,
         "summary_path": path,
     })
 
@@ -495,7 +611,10 @@ result = {
     "expected_counts": {"offload": expected_offloads, "onboard": expected_onboards},
     "strict_counts": strict_counts,
     "pressure_engine": pressure_engine,
+    "dsbench_sustained": dsbench_sustained,
     "pressure_required": pressure_required,
+    "brpc_pressure_required": brpc_pressure_required,
+    "kvc_pressure_required": kvc_pressure_required,
     "expected_pressure_active": expected_pressure_active,
     "rows": rows,
     "metrics": metrics,
@@ -506,14 +625,18 @@ with open(result_path, "w", encoding="utf-8") as handle:
 print("BRPC/KVC contention summary")
 print(f"  mode={mode} status={status} valid_repeats={len(valid)}/{repeats}")
 if pressure_required:
-    print(f"  pressure_engine={pressure_engine} expected_active_calls={expected_pressure_active}")
-print("  round valid e2e_ms server_ms brpc_ms kvc_ms offloads onboards server_other_ms outer_ms pressure_qps pressure_gbps pressure_active")
+    print(
+        f"  pressure_engine={pressure_engine} expected_kvc_active={expected_pressure_active} "
+        f"expected_brpc_active={brpc_load_concurrency if brpc_pressure_required else 0}"
+    )
+print("  round valid e2e_ms server_ms brpc_ms kvc_ms offloads onboards server_other_ms outer_ms brpc_qps brpc_active kvc_active restarts crashes")
 for row in rows:
     print(
         f"  {row['round']:>5} {str(row['valid']):>5} {row['e2e_ms']:>7.3f} {row['server_ms']:>9.3f} "
         f"{row['brpc_ms']:>7.3f} {row['kvc_ms']:>6.3f} {row['offload_count']:>8} "
         f"{row['onboard_count']:>8} {row['server_other_ms']:>15.3f} {row['outer_ms']:>8.3f} "
-        f"{row['pressure_qps']:>12.3f} {row['pressure_gbps']:>13.3f} {row['pressure_max_active_calls']:>15}"
+        f"{row['brpc_pressure_qps']:>9.3f} {row['brpc_pressure_max_active']:>11} "
+        f"{row['kvc_pressure_max_active']:>10} {row['restart_delta']:>8} {row['crash_markers']:>7}"
     )
 if valid:
     print("  aggregate averages:")
@@ -542,6 +665,7 @@ cat >"${OUT_DIR}/config.txt" <<EOF
 mode=${MODE}
 repeats=${REPEATS}
 brpc_endpoint=${BRPC_ENDPOINT}
+brpc_load_endpoint=${BRPC_LOAD_ENDPOINT}
 brpc_load_concurrency=${BRPC_LOAD_CONCURRENCY}
 brpc_load_qps=${BRPC_LOAD_QPS}
 brpc_load_payload_bytes=${BRPC_LOAD_PAYLOAD_BYTES}
@@ -556,8 +680,12 @@ kvc_thread_num=${KVC_THREAD_NUM}
 kvc_get_clients=${KVC_GET_CLIENTS}
 kvc_set_clients=${KVC_SET_CLIENTS}
 kvc_load_ready_timeout_seconds=${KVC_LOAD_READY_TIMEOUT_SECONDS}
+kvc_dsbench_sustained=${KVC_DSBENCH_SUSTAINED}
 expected_offloads=${EXPECTED_OFFLOADS}
 expected_onboards=${EXPECTED_ONBOARDS}
+strict_counts=${STRICT_COUNTS}
+reset_inference_before_round=${RESET_INFERENCE_BEFORE_ROUND}
+inference_rollout_timeout_seconds=${INFERENCE_ROLLOUT_TIMEOUT_SECONDS}
 EOF
 
 log "Experiment configuration"
@@ -570,6 +698,17 @@ for round in $(seq 1 "$REPEATS"); do
   log "Round ${round}/${REPEATS}: mode=${MODE}"
 
   set +e
+  reset_inference "$round_dir"
+  reset_code="$?"
+  set -e
+  if [ "$reset_code" -ne 0 ]; then
+    echo "$reset_code" >"${round_dir}/inference-reset.exit_code"
+    overall_code=1
+    echo "ERROR: round ${round} inference reset failed" >&2
+    break
+  fi
+
+  set +e
   run_prime "$round_dir"
   prime_code="$?"
   set -e
@@ -579,6 +718,8 @@ for round in $(seq 1 "$REPEATS"); do
     echo "ERROR: round ${round} prime failed after ${PRIME_MAX_ATTEMPTS} attempts" >&2
     break
   fi
+
+  capture_inference_state "$round_dir" before
 
   read_counter "$NETWORK_INTERFACE" rx_bytes >"${round_dir}/local-rx.before"
   read_counter "$NETWORK_INTERFACE" tx_bytes >"${round_dir}/local-tx.before"
@@ -605,6 +746,7 @@ for round in $(seq 1 "$REPEATS"); do
   set -e
   echo "$replay_code" >"${round_dir}/replay.exit_code"
   [ "$replay_code" -eq 0 ] || overall_code=1
+  capture_inference_state "$round_dir" after
 
   read_counter "$NETWORK_INTERFACE" rx_bytes >"${round_dir}/local-rx.after"
   read_counter "$NETWORK_INTERFACE" tx_bytes >"${round_dir}/local-tx.after"

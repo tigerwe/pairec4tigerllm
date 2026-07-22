@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: brpc-pressure-target
+  namespace: pairec
+  labels:
+    app: brpc-pressure-target
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: brpc-pressure-target
+  template:
+    metadata:
+      labels:
+        app: brpc-pressure-target
+    spec:
+      nodeName: worker1
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: brpc-pressure-target
+          image: docker.io/library/pairec-brpc-inference:k8s-arm64-v1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: LD_PRELOAD
+              value: ""
+          command:
+            - /opt/pairec-brpc/bin/brpc_inference_server
+          args:
+            - --listen_port=18101
+            - --backend=semantic_map
+            - --semantic_map_path=/app/data/tenrec/processed/semantic_id_map.json
+          ports:
+            - containerPort: 18101
+              hostPort: 18101
+              name: brpc-pressure
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+              readOnly: true
+          startupProbe:
+            tcpSocket:
+              port: 18101
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            tcpSocket:
+              port: 18101
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 18101
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
+      volumes:
+        - name: data
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/data
+            type: Directory

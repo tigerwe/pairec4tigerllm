@@ -5,6 +5,8 @@ MODE="${MODE:-mixed}"
 DS_ENDPOINT="${DS_ENDPOINT:-192.168.100.12:18482}"
 PRESSURE_ENGINE="${PRESSURE_ENGINE:-persistent}"
 DSBENCH_CPP="${DSBENCH_CPP:-}"
+DSBENCH_SUSTAINED="${DSBENCH_SUSTAINED:-0}"
+DSBENCH_READY_TIMEOUT_SECONDS="${DSBENCH_READY_TIMEOUT_SECONDS:-60}"
 PERSISTENT_SOURCE="${PERSISTENT_SOURCE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/datasystem_kv_pressure.cpp}"
 PERSISTENT_BIN="${PERSISTENT_BIN:-/tmp/datasystem_kv_pressure}"
 DATASYSTEM_SDK_DIR="${DATASYSTEM_SDK_DIR:-}"
@@ -29,6 +31,7 @@ GET_PREFIX="${PREFIX}_Get"
 SET_PREFIX="${PREFIX}_Set"
 STOPPING=0
 CHILD_PIDS=()
+CHILD_READY_FILES=()
 
 log() {
   printf '[dsbench-pressure] %s\n' "$*"
@@ -117,6 +120,18 @@ validate() {
   [[ "$SET_CLIENTS" =~ ^[1-9][0-9]*$ ]] || die "SET_CLIENTS must be positive"
   [[ "$DURATION_SECONDS" =~ ^[0-9]+$ ]] || die "DURATION_SECONDS must be non-negative"
   [[ "$REPORT_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "REPORT_INTERVAL_SECONDS must be positive"
+  [[ "$DSBENCH_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+    || die "DSBENCH_READY_TIMEOUT_SECONDS must be positive"
+  case "$DSBENCH_SUSTAINED" in
+    0|1) ;;
+    *) die "DSBENCH_SUSTAINED must be 0 or 1" ;;
+  esac
+  if [ "$DSBENCH_SUSTAINED" = "1" ] && [ "$PRESSURE_ENGINE" != "dsbench" ]; then
+    die "DSBENCH_SUSTAINED=1 requires PRESSURE_ENGINE=dsbench"
+  fi
+  if [ "$DSBENCH_SUSTAINED" = "1" ] && [ "$DURATION_SECONDS" -eq 0 ]; then
+    die "DSBENCH_SUSTAINED=1 requires a positive DURATION_SECONDS"
+  fi
   if [ "$BATCH_NUM" -ne 1 ]; then
     log "warning: BATCH_NUM=${BATCH_NUM} uses vector Get/MSet; current TRT KVC comparison expects BATCH_NUM=1"
   fi
@@ -153,6 +168,8 @@ run_dsbench() {
   local action="$1"
   local prefix="$2"
   local clients="$3"
+  local duration_seconds="${4:-0}"
+  local ready_file="${5:-}"
   local -a args=(
     kv
     --action="$action"
@@ -169,11 +186,80 @@ run_dsbench() {
   else
     args+=(--worker_index=0)
   fi
+  if [ "$duration_seconds" -gt 0 ]; then
+    args+=(--duration_seconds="$duration_seconds")
+  fi
+  if [ -n "$ready_file" ]; then
+    args+=(--ready_file="$ready_file")
+  fi
   if [ -n "$TASKSET_CPUS" ]; then
     taskset -c "$TASKSET_CPUS" "$DSBENCH_CPP" "${args[@]}"
   else
     "$DSBENCH_CPP" "${args[@]}"
   fi
+}
+
+start_sustained_action() {
+  local action="$1"
+  local prefix="$2"
+  local clients="$3"
+  local ready_file="${READY_FILE}.${action}"
+  rm -f "$ready_file"
+  run_dsbench "$action" "$prefix" "$clients" "$DURATION_SECONDS" "$ready_file" &
+  CHILD_PIDS+=("$!")
+  CHILD_READY_FILES+=("$ready_file")
+}
+
+wait_sustained_ready() {
+  local attempt ready_file pid all_ready
+  for attempt in $(seq 1 "$DSBENCH_READY_TIMEOUT_SECONDS"); do
+    all_ready=1
+    for ready_file in "${CHILD_READY_FILES[@]}"; do
+      [ -s "$ready_file" ] || all_ready=0
+    done
+    if [ "$all_ready" -eq 1 ]; then
+      return
+    fi
+    for pid in "${CHILD_PIDS[@]}"; do
+      if ! kill -0 "$pid" >/dev/null 2>&1; then
+        die "sustained dsbench child exited before readiness"
+      fi
+    done
+    sleep 1
+  done
+  die "sustained dsbench did not become ready within ${DSBENCH_READY_TIMEOUT_SECONDS}s"
+}
+
+run_sustained_pressure() {
+  local help_output
+  help_output="$("$DSBENCH_CPP" kv --help 2>&1 || true)"
+  if ! grep -q -- '--duration_seconds' <<<"$help_output"; then
+    die "dsbench_cpp does not contain sustained pressure support; apply datasystem-dsbench-sustained-pressure.patch"
+  fi
+
+  case "$MODE" in
+    get)
+      start_sustained_action get "$GET_PREFIX" "$GET_CLIENTS"
+      ;;
+    set)
+      start_sustained_action set "$SET_PREFIX" "$SET_CLIENTS"
+      ;;
+    mixed)
+      start_sustained_action get "$GET_PREFIX" "$GET_CLIENTS"
+      start_sustained_action set "$SET_PREFIX" "$SET_CLIENTS"
+      ;;
+  esac
+
+  wait_sustained_ready
+  local active_calls=0 ready_file
+  for ready_file in "${CHILD_READY_FILES[@]}"; do
+    cat "$ready_file"
+    active_calls=$((active_calls + $(sed -n 's/.*active_calls=\([0-9][0-9]*\).*/\1/p' "$ready_file")))
+  done
+  printf 'engine=dsbench sustained=1 active_calls=%s duration_seconds=%s\n' \
+    "$active_calls" "$DURATION_SECONDS" >"$READY_FILE"
+  log "ready sustained=1 active_calls=${active_calls} ready_file=${READY_FILE}"
+  wait "${CHILD_PIDS[@]}"
 }
 
 should_continue() {
@@ -212,6 +298,7 @@ cleanup() {
   for pid in "${CHILD_PIDS[@]:-}"; do
     [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
   done
+  rm -f "${CHILD_READY_FILES[@]:-}"
   for pid in "${CHILD_PIDS[@]:-}"; do
     [ -n "$pid" ] && wait "$pid" >/dev/null 2>&1 || true
   done
@@ -239,6 +326,7 @@ printf '%s\n' "$$" >"$PID_FILE"
 log "mode=${MODE} engine=${PRESSURE_ENGINE} endpoint=${DS_ENDPOINT}"
 log "object_size=${OBJECT_SIZE} key_count=${KEY_COUNT} batch_num=${BATCH_NUM} thread_num=${THREAD_NUM}"
 log "get_clients=${GET_CLIENTS} set_clients=${SET_CLIENTS} duration_seconds=${DURATION_SECONDS}"
+log "dsbench_sustained=${DSBENCH_SUSTAINED}"
 log "taskset_cpus=${TASKSET_CPUS:-none}"
 
 if [ "$PRESSURE_ENGINE" = "persistent" ]; then
@@ -255,6 +343,11 @@ fi
 if [ "$MODE" = "set" ] || [ "$MODE" = "mixed" ]; then
   log "initialize set prefix=${SET_PREFIX}"
   run_dsbench set "$SET_PREFIX" "$SET_CLIENTS"
+fi
+
+if [ "$DSBENCH_SUSTAINED" = "1" ]; then
+  run_sustained_pressure
+  exit 0
 fi
 
 : >"$READY_FILE"
