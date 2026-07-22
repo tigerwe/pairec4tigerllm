@@ -18,7 +18,10 @@ BRPC_PROBE_BIN="${BRPC_PROBE_BIN:-/tmp/probe-go-brpc-client}"
 KVC_LOAD_HOST="${KVC_LOAD_HOST:-worker1}"
 KVC_REMOTE_REPO="${KVC_REMOTE_REPO:-/home/zcx/workspace/pairec4tigerllm}"
 KVC_DS_ENDPOINT="${KVC_DS_ENDPOINT:-192.168.100.12:18482}"
+KVC_PRESSURE_ENGINE="${KVC_PRESSURE_ENGINE:-persistent}"
 KVC_DSBENCH_CPP="${KVC_DSBENCH_CPP:-}"
+KVC_DATASYSTEM_SDK_DIR="${KVC_DATASYSTEM_SDK_DIR:-}"
+KVC_PERSISTENT_BIN="${KVC_PERSISTENT_BIN:-/tmp/datasystem_kv_pressure}"
 KVC_OBJECT_SIZE="${KVC_OBJECT_SIZE:-3584KB}"
 KVC_KEY_COUNT="${KVC_KEY_COUNT:-256}"
 KVC_BATCH_NUM="${KVC_BATCH_NUM:-1}"
@@ -27,6 +30,7 @@ KVC_GET_CLIENTS="${KVC_GET_CLIENTS:-4}"
 KVC_SET_CLIENTS="${KVC_SET_CLIENTS:-6}"
 KVC_TASKSET_CPUS="${KVC_TASKSET_CPUS:-}"
 KVC_LOAD_DURATION_SECONDS="${KVC_LOAD_DURATION_SECONDS:-300}"
+KVC_REPORT_INTERVAL_SECONDS="${KVC_REPORT_INTERVAL_SECONDS:-1}"
 
 LOAD_SETTLE_SECONDS="${LOAD_SETTLE_SECONDS:-3}"
 ROUND_COOLDOWN_SECONDS="${ROUND_COOLDOWN_SECONDS:-5}"
@@ -57,6 +61,7 @@ BRPC_LOAD_PID=""
 KVC_SSH_PID=""
 KVC_REMOTE_PID_FILE=""
 KVC_REMOTE_READY_FILE=""
+KVC_REMOTE_STATS_FILE=""
 
 log() {
   printf '\n== %s ==\n' "$*"
@@ -166,11 +171,12 @@ start_kvc_load() {
   local remote_run_id="${RUN_ID//[^a-zA-Z0-9]/}_${round}"
   KVC_REMOTE_PID_FILE="/tmp/dsbench-pressure-${remote_run_id}.pid"
   KVC_REMOTE_READY_FILE="/tmp/dsbench-pressure-${remote_run_id}.ready"
+  KVC_REMOTE_STATS_FILE="/tmp/dsbench-pressure-${remote_run_id}.stats.jsonl"
   local remote_mode
   remote_mode="$(kvc_mode)"
 
   ssh "$KVC_LOAD_HOST" \
-    "cd '$KVC_REMOTE_REPO' && env MODE='$remote_mode' DS_ENDPOINT='$KVC_DS_ENDPOINT' DSBENCH_CPP='$KVC_DSBENCH_CPP' OBJECT_SIZE='$KVC_OBJECT_SIZE' KEY_COUNT='$KVC_KEY_COUNT' BATCH_NUM='$KVC_BATCH_NUM' THREAD_NUM='$KVC_THREAD_NUM' GET_CLIENTS='$KVC_GET_CLIENTS' SET_CLIENTS='$KVC_SET_CLIENTS' TASKSET_CPUS='$KVC_TASKSET_CPUS' DURATION_SECONDS='$KVC_LOAD_DURATION_SECONDS' RUN_ID='$remote_run_id' PID_FILE='$KVC_REMOTE_PID_FILE' READY_FILE='$KVC_REMOTE_READY_FILE' bash scripts/run_datasystem_dsbench_pressure.sh" \
+    "cd '$KVC_REMOTE_REPO' && env PRESSURE_ENGINE='$KVC_PRESSURE_ENGINE' MODE='$remote_mode' DS_ENDPOINT='$KVC_DS_ENDPOINT' DSBENCH_CPP='$KVC_DSBENCH_CPP' DATASYSTEM_SDK_DIR='$KVC_DATASYSTEM_SDK_DIR' PERSISTENT_BIN='$KVC_PERSISTENT_BIN' OBJECT_SIZE='$KVC_OBJECT_SIZE' KEY_COUNT='$KVC_KEY_COUNT' BATCH_NUM='$KVC_BATCH_NUM' THREAD_NUM='$KVC_THREAD_NUM' GET_CLIENTS='$KVC_GET_CLIENTS' SET_CLIENTS='$KVC_SET_CLIENTS' TASKSET_CPUS='$KVC_TASKSET_CPUS' DURATION_SECONDS='$KVC_LOAD_DURATION_SECONDS' REPORT_INTERVAL_SECONDS='$KVC_REPORT_INTERVAL_SECONDS' RUN_ID='$remote_run_id' PID_FILE='$KVC_REMOTE_PID_FILE' READY_FILE='$KVC_REMOTE_READY_FILE' STATS_FILE='$KVC_REMOTE_STATS_FILE' bash scripts/run_datasystem_dsbench_pressure.sh" \
     >"${round_dir}/kvc-load.log" 2>&1 &
   KVC_SSH_PID="$!"
   echo "$KVC_SSH_PID" >"${round_dir}/kvc-load-ssh.pid"
@@ -178,15 +184,26 @@ start_kvc_load() {
   local attempt
   for attempt in $(seq 1 60); do
     if ssh "$KVC_LOAD_HOST" "test -f '$KVC_REMOTE_READY_FILE'" >/dev/null 2>&1; then
+      ssh "$KVC_LOAD_HOST" "cat '$KVC_REMOTE_READY_FILE'" \
+        >"${round_dir}/kvc-pressure-ready.txt" 2>/dev/null || true
       return
     fi
     if ! kill -0 "$KVC_SSH_PID" >/dev/null 2>&1; then
       cat "${round_dir}/kvc-load.log" >&2 || true
-      die "remote dsbench pressure exited before becoming ready"
+      die "remote KVC pressure exited before becoming ready"
     fi
     sleep 1
   done
-  die "remote dsbench pressure did not become ready within 60 seconds"
+  die "remote KVC pressure did not become ready within 60 seconds"
+}
+
+capture_kvc_stats() {
+  local round_dir="$1"
+  if [ -z "$KVC_REMOTE_STATS_FILE" ]; then
+    return
+  fi
+  ssh "$KVC_LOAD_HOST" "cat '$KVC_REMOTE_STATS_FILE' 2>/dev/null || true" \
+    >"${round_dir}/kvc-pressure-stats.jsonl" 2>/dev/null || true
 }
 
 stop_loads() {
@@ -206,6 +223,7 @@ stop_loads() {
   fi
   KVC_REMOTE_PID_FILE=""
   KVC_REMOTE_READY_FILE=""
+  KVC_REMOTE_STATS_FILE=""
 }
 
 cleanup() {
@@ -278,7 +296,8 @@ run_replay() {
 
 summarize() {
   python3 - "$OUT_DIR" "$MODE" "$REPEATS" "$EXPECTED_OFFLOADS" "$EXPECTED_ONBOARDS" \
-    "$STRICT_COUNTS" "$RESULT_JSON" <<'PY' | tee "$SUMMARY_TXT"
+    "$STRICT_COUNTS" "$RESULT_JSON" "$KVC_PRESSURE_ENGINE" "$KVC_GET_CLIENTS" "$KVC_SET_CLIENTS" \
+    <<'PY' | tee "$SUMMARY_TXT"
 import glob
 import json
 import math
@@ -286,11 +305,22 @@ import os
 import statistics
 import sys
 
-out_dir, mode, repeats, expected_offloads, expected_onboards, strict_counts, result_path = sys.argv[1:8]
+(
+    out_dir, mode, repeats, expected_offloads, expected_onboards, strict_counts, result_path,
+    pressure_engine, get_clients, set_clients,
+) = sys.argv[1:11]
 repeats = int(repeats)
 expected_offloads = int(expected_offloads)
 expected_onboards = int(expected_onboards)
 strict_counts = strict_counts == "1"
+get_clients = int(get_clients)
+set_clients = int(set_clients)
+pressure_required = mode in {"kvc-get", "kvc-set", "kvc-mixed", "combined"} and pressure_engine == "persistent"
+expected_pressure_active = (
+    get_clients if mode == "kvc-get" else
+    set_clients if mode == "kvc-set" else
+    get_clients + set_clients if mode in {"kvc-mixed", "combined"} else 0
+)
 
 def number(value, default=0.0):
     try:
@@ -304,6 +334,18 @@ def read_int(path):
             return int(handle.read().strip())
     except (FileNotFoundError, ValueError):
         return 0
+
+def read_last_json(path):
+    try:
+        last = None
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    last = json.loads(line)
+        return last or {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
 def percentile(values, q):
     values = sorted(values)
@@ -338,17 +380,26 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
     outer_ms = max(0.0, e2e_ms - rpc_ms)
     server_other_ms = max(0.0, server_ms - kvc_ms)
     round_dir = os.path.dirname(os.path.dirname(path))
+    pressure = read_last_json(os.path.join(round_dir, "kvc-pressure-stats.jsonl"))
     local_rx_delta = max(0, read_int(os.path.join(round_dir, "local-rx.after")) - read_int(os.path.join(round_dir, "local-rx.before")))
     local_tx_delta = max(0, read_int(os.path.join(round_dir, "local-tx.after")) - read_int(os.path.join(round_dir, "local-tx.before")))
     remote_rx_delta = max(0, read_int(os.path.join(round_dir, "remote-rx.after")) - read_int(os.path.join(round_dir, "remote-rx.before")))
     remote_tx_delta = max(0, read_int(os.path.join(round_dir, "remote-tx.after")) - read_int(os.path.join(round_dir, "remote-tx.before")))
     count_ok = len(offloads) == expected_offloads and len(onboards) == expected_onboards
     response_ok = client.get("ok") is True and raw.get("response_code") == 200 and len(brpc_events) == 1
+    pressure_calls = int(number(pressure.get("calls")))
+    pressure_errors = int(number(pressure.get("errors")))
+    pressure_max_active = int(number(pressure.get("max_active_calls")))
+    pressure_ok = (
+        not pressure_required or
+        (pressure_calls > 0 and pressure_errors == 0 and pressure_max_active >= expected_pressure_active)
+    )
     rows.append({
         "round": os.path.basename(os.path.dirname(os.path.dirname(path))).split("-")[-1],
-        "valid": response_ok and (count_ok or not strict_counts),
+        "valid": response_ok and (count_ok or not strict_counts) and pressure_ok,
         "response_ok": response_ok,
         "count_ok": count_ok,
+        "pressure_ok": pressure_ok,
         "e2e_ms": e2e_ms,
         "rpc_ms": rpc_ms,
         "server_ms": server_ms,
@@ -364,6 +415,11 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
         "local_tx_bytes": local_tx_delta,
         "remote_rx_bytes": remote_rx_delta,
         "remote_tx_bytes": remote_tx_delta,
+        "pressure_calls": pressure_calls,
+        "pressure_errors": pressure_errors,
+        "pressure_qps": number(pressure.get("qps")),
+        "pressure_gbps": number(pressure.get("gbps")),
+        "pressure_max_active_calls": pressure_max_active,
         "summary_path": path,
     })
 
@@ -386,6 +442,9 @@ result = {
     "valid_repeats": len(valid),
     "expected_counts": {"offload": expected_offloads, "onboard": expected_onboards},
     "strict_counts": strict_counts,
+    "pressure_engine": pressure_engine,
+    "pressure_required": pressure_required,
+    "expected_pressure_active": expected_pressure_active,
     "rows": rows,
     "metrics": metrics,
 }
@@ -394,13 +453,15 @@ with open(result_path, "w", encoding="utf-8") as handle:
 
 print("BRPC/KVC contention summary")
 print(f"  mode={mode} status={status} valid_repeats={len(valid)}/{repeats}")
-print("  round valid e2e_ms server_ms brpc_ms kvc_ms offloads onboards server_other_ms outer_ms local_rx local_tx")
+if pressure_required:
+    print(f"  pressure_engine={pressure_engine} expected_active_calls={expected_pressure_active}")
+print("  round valid e2e_ms server_ms brpc_ms kvc_ms offloads onboards server_other_ms outer_ms pressure_qps pressure_gbps pressure_active")
 for row in rows:
     print(
         f"  {row['round']:>5} {str(row['valid']):>5} {row['e2e_ms']:>7.3f} {row['server_ms']:>9.3f} "
         f"{row['brpc_ms']:>7.3f} {row['kvc_ms']:>6.3f} {row['offload_count']:>8} "
         f"{row['onboard_count']:>8} {row['server_other_ms']:>15.3f} {row['outer_ms']:>8.3f} "
-        f"{row['local_rx_bytes']:>8} {row['local_tx_bytes']:>8}"
+        f"{row['pressure_qps']:>12.3f} {row['pressure_gbps']:>13.3f} {row['pressure_max_active_calls']:>15}"
     )
 if valid:
     print("  aggregate averages:")
@@ -434,6 +495,7 @@ brpc_load_qps=${BRPC_LOAD_QPS}
 brpc_load_payload_bytes=${BRPC_LOAD_PAYLOAD_BYTES}
 kvc_load_host=${KVC_LOAD_HOST}
 kvc_ds_endpoint=${KVC_DS_ENDPOINT}
+kvc_pressure_engine=${KVC_PRESSURE_ENGINE}
 kvc_object_size=${KVC_OBJECT_SIZE}
 kvc_key_count=${KVC_KEY_COUNT}
 kvc_batch_num=${KVC_BATCH_NUM}
@@ -495,6 +557,7 @@ for round in $(seq 1 "$REPEATS"); do
   if mode_has_kvc; then
     read_remote_counter rx_bytes >"${round_dir}/remote-rx.after"
     read_remote_counter tx_bytes >"${round_dir}/remote-tx.after"
+    capture_kvc_stats "$round_dir"
   fi
   stop_loads
   if [ "$round" -lt "$REPEATS" ] && [ "$ROUND_COOLDOWN_SECONDS" -gt 0 ]; then

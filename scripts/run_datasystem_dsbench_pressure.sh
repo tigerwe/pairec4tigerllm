@@ -3,7 +3,12 @@ set -euo pipefail
 
 MODE="${MODE:-mixed}"
 DS_ENDPOINT="${DS_ENDPOINT:-192.168.100.12:18482}"
+PRESSURE_ENGINE="${PRESSURE_ENGINE:-persistent}"
 DSBENCH_CPP="${DSBENCH_CPP:-}"
+PERSISTENT_SOURCE="${PERSISTENT_SOURCE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/datasystem_kv_pressure.cpp}"
+PERSISTENT_BIN="${PERSISTENT_BIN:-/tmp/datasystem_kv_pressure}"
+DATASYSTEM_SDK_DIR="${DATASYSTEM_SDK_DIR:-}"
+CXX="${CXX:-g++}"
 OBJECT_SIZE="${OBJECT_SIZE:-3584KB}"
 KEY_COUNT="${KEY_COUNT:-256}"
 BATCH_NUM="${BATCH_NUM:-1}"
@@ -13,10 +18,12 @@ GET_CLIENTS="${GET_CLIENTS:-4}"
 SET_CLIENTS="${SET_CLIENTS:-6}"
 DURATION_SECONDS="${DURATION_SECONDS:-0}"
 CLEANUP_KEYS="${CLEANUP_KEYS:-1}"
+REPORT_INTERVAL_SECONDS="${REPORT_INTERVAL_SECONDS:-1}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)}"
 PREFIX="${PREFIX:-KvcLoad_${RUN_ID}}"
 PID_FILE="${PID_FILE:-/tmp/dsbench-pressure-${RUN_ID}.pid}"
 READY_FILE="${READY_FILE:-/tmp/dsbench-pressure-${RUN_ID}.ready}"
+STATS_FILE="${STATS_FILE:-/tmp/dsbench-pressure-${RUN_ID}.stats.jsonl}"
 
 GET_PREFIX="${PREFIX}_Get"
 SET_PREFIX="${PREFIX}_Set"
@@ -52,7 +59,53 @@ find_dsbench() {
   die "dsbench_cpp not found; set DSBENCH_CPP explicitly"
 }
 
+parse_bytes() {
+  local value="$1"
+  local number unit multiplier
+  if [[ "$value" =~ ^([1-9][0-9]*)([KkMmGg][Bb]|[Bb])?$ ]]; then
+    number="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]:-B}"
+  else
+    die "invalid byte size: $value"
+  fi
+  case "${unit^^}" in
+    B) multiplier=1 ;;
+    KB) multiplier=1024 ;;
+    MB) multiplier=$((1024 * 1024)) ;;
+    GB) multiplier=$((1024 * 1024 * 1024)) ;;
+    *) die "unsupported byte size unit: $unit" ;;
+  esac
+  echo $((number * multiplier))
+}
+
+build_persistent_pressure() {
+  [ "$PRESSURE_ENGINE" = "persistent" ] || return
+  command -v "$CXX" >/dev/null 2>&1 || die "C++ compiler not found: $CXX"
+  [ -f "$PERSISTENT_SOURCE" ] || die "persistent pressure source not found: $PERSISTENT_SOURCE"
+  if [ -z "$DATASYSTEM_SDK_DIR" ]; then
+    [ -n "$DSBENCH_CPP" ] || find_dsbench
+    DATASYSTEM_SDK_DIR="$(dirname "$DSBENCH_CPP")"
+  fi
+  local include_dir="${DATASYSTEM_SDK_DIR}/include"
+  local lib_dir="${DATASYSTEM_SDK_DIR}/lib"
+  [ -f "${include_dir}/datasystem/kv_client.h" ] \
+    || die "DataSystem headers not found under ${include_dir}"
+  [ -f "${lib_dir}/libdatasystem.so" ] \
+    || die "libdatasystem.so not found under ${lib_dir}"
+  if [ ! -x "$PERSISTENT_BIN" ] || [ "$PERSISTENT_SOURCE" -nt "$PERSISTENT_BIN" ]; then
+    log "build persistent pressure client: ${PERSISTENT_BIN}"
+    "$CXX" -std=c++17 -O2 -pthread \
+      -I"$include_dir" "$PERSISTENT_SOURCE" \
+      -L"$lib_dir" -Wl,-rpath,"$lib_dir" -ldatasystem \
+      -o "$PERSISTENT_BIN"
+  fi
+}
+
 validate() {
+  case "$PRESSURE_ENGINE" in
+    persistent|dsbench) ;;
+    *) die "PRESSURE_ENGINE must be persistent or dsbench" ;;
+  esac
   case "$MODE" in
     get|set|mixed) ;;
     *) die "MODE must be get, set, or mixed" ;;
@@ -63,9 +116,37 @@ validate() {
   [[ "$GET_CLIENTS" =~ ^[1-9][0-9]*$ ]] || die "GET_CLIENTS must be positive"
   [[ "$SET_CLIENTS" =~ ^[1-9][0-9]*$ ]] || die "SET_CLIENTS must be positive"
   [[ "$DURATION_SECONDS" =~ ^[0-9]+$ ]] || die "DURATION_SECONDS must be non-negative"
+  [[ "$REPORT_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "REPORT_INTERVAL_SECONDS must be positive"
   if [ "$BATCH_NUM" -ne 1 ]; then
     log "warning: BATCH_NUM=${BATCH_NUM} uses vector Get/MSet; current TRT KVC comparison expects BATCH_NUM=1"
   fi
+}
+
+run_persistent_pressure() {
+  local host="${DS_ENDPOINT%:*}"
+  local port="${DS_ENDPOINT##*:}"
+  local object_size_bytes
+  object_size_bytes="$(parse_bytes "$OBJECT_SIZE")"
+  rm -f "$READY_FILE" "$STATS_FILE"
+  log "start persistent pressure client"
+  local -a command=("$PERSISTENT_BIN"
+    --mode="$MODE"
+    --host="$host"
+    --port="$port"
+    --object_size="$object_size_bytes"
+    --key_count="$KEY_COUNT"
+    --get_clients="$GET_CLIENTS"
+    --set_clients="$SET_CLIENTS"
+    --duration_seconds="$DURATION_SECONDS"
+    --report_interval_seconds="$REPORT_INTERVAL_SECONDS"
+    --prefix="$PREFIX"
+    --ready_file="$READY_FILE"
+    --stats_file="$STATS_FILE"
+    --cleanup_keys="$CLEANUP_KEYS")
+  if [ -n "$TASKSET_CPUS" ]; then
+    exec taskset -c "$TASKSET_CPUS" "${command[@]}"
+  fi
+  exec "${command[@]}"
 }
 
 run_dsbench() {
@@ -147,14 +228,24 @@ terminate() {
 trap cleanup EXIT
 trap terminate INT TERM
 
-find_dsbench
 validate
+if [ "$PRESSURE_ENGINE" = "persistent" ]; then
+  build_persistent_pressure
+else
+  find_dsbench
+fi
 printf '%s\n' "$$" >"$PID_FILE"
 
-log "mode=${MODE} endpoint=${DS_ENDPOINT} dsbench=${DSBENCH_CPP}"
+log "mode=${MODE} engine=${PRESSURE_ENGINE} endpoint=${DS_ENDPOINT}"
 log "object_size=${OBJECT_SIZE} key_count=${KEY_COUNT} batch_num=${BATCH_NUM} thread_num=${THREAD_NUM}"
 log "get_clients=${GET_CLIENTS} set_clients=${SET_CLIENTS} duration_seconds=${DURATION_SECONDS}"
 log "taskset_cpus=${TASKSET_CPUS:-none}"
+
+if [ "$PRESSURE_ENGINE" = "persistent" ]; then
+  run_persistent_pressure
+fi
+
+log "dsbench=${DSBENCH_CPP}"
 
 if [ "$MODE" = "get" ] || [ "$MODE" = "mixed" ]; then
   log "prefill prefix=${GET_PREFIX}"
