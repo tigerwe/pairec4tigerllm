@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +33,15 @@ type BRPCRecommendClient struct {
 	timeout    time.Duration
 	maxRetries int
 	nextID     int64
+}
+
+// BRPCRecommendSession reuses one TCP connection for sequential RPCs. It is
+// intended for long-running callers such as pressure workers; normal request
+// paths continue to use BRPCRecommendClient's short-connection behavior.
+type BRPCRecommendSession struct {
+	client *BRPCRecommendClient
+	mu     sync.Mutex
+	conn   net.Conn
 }
 
 func NewBRPCRecommendClient(endpoint, service string, timeout time.Duration, maxRetries int) (*BRPCRecommendClient, error) {
@@ -83,6 +93,67 @@ func (c *BRPCRecommendClient) HealthCheckWithPayload(ctx context.Context, payloa
 	return healthResponseFromProto(&responsePB), nil
 }
 
+func (c *BRPCRecommendClient) NewSession() *BRPCRecommendSession {
+	return &BRPCRecommendSession{client: c}
+}
+
+func (s *BRPCRecommendSession) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeLocked()
+}
+
+func (s *BRPCRecommendSession) HealthCheckWithPayload(ctx context.Context, payloadBytes int) (*brpcHealthResponse, error) {
+	var responsePB healthResponsePB
+	if err := s.call(ctx, "Health", &healthRequestPB{PayloadPadding: makePayloadPadding(payloadBytes)}, &responsePB); err != nil {
+		return nil, err
+	}
+	return healthResponseFromProto(&responsePB), nil
+}
+
+func (s *BRPCRecommendSession) call(ctx context.Context, method string, request proto.Message, response proto.Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var lastErr error
+	for attempt := 0; attempt < s.client.maxRetries; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, s.client.timeout)
+		if s.conn == nil {
+			var dialer net.Dialer
+			s.conn, lastErr = dialer.DialContext(attemptCtx, "tcp", s.client.endpoint)
+		}
+		if lastErr == nil {
+			lastErr = s.client.callOnConn(attemptCtx, s.conn, method, request, response)
+		}
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		_ = s.closeLocked()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if attempt < s.client.maxRetries-1 {
+			sleep := time.Duration(attempt+1) * brpcRetrySleepBase
+			select {
+			case <-time.After(sleep):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return fmt.Errorf("brpc %s failed after %d retries: %w", method, s.client.maxRetries, lastErr)
+}
+
+func (s *BRPCRecommendSession) closeLocked() error {
+	if s.conn == nil {
+		return nil
+	}
+	err := s.conn.Close()
+	s.conn = nil
+	return err
+}
+
 func (c *BRPCRecommendClient) call(ctx context.Context, method string, request proto.Message, response proto.Message) error {
 	var lastErr error
 	for attempt := 0; attempt < c.maxRetries; attempt++ {
@@ -108,6 +179,16 @@ func (c *BRPCRecommendClient) call(ctx context.Context, method string, request p
 }
 
 func (c *BRPCRecommendClient) callOnce(ctx context.Context, method string, request proto.Message, response proto.Message) error {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp", c.endpoint)
+	if err != nil {
+		return fmt.Errorf("dial %s failed: %w", c.endpoint, err)
+	}
+	defer conn.Close()
+	return c.callOnConn(ctx, conn, method, request, response)
+}
+
+func (c *BRPCRecommendClient) callOnConn(ctx context.Context, conn net.Conn, method string, request proto.Message, response proto.Message) error {
 	payload, err := proto.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("marshal %s request failed: %w", method, err)
@@ -135,13 +216,6 @@ func (c *BRPCRecommendClient) callOnce(ctx context.Context, method string, reque
 	if err != nil {
 		return err
 	}
-
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp", c.endpoint)
-	if err != nil {
-		return fmt.Errorf("dial %s failed: %w", c.endpoint, err)
-	}
-	defer conn.Close()
 
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := conn.SetDeadline(deadline); err != nil {

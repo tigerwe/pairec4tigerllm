@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	recall "pairec4tigerllm/services/recall"
@@ -39,6 +40,8 @@ func main() {
 	historyMaxLength := flag.Int("history_max_length", getenvInt("HISTORY_MAX_LENGTH", 20), "max history items from user_features")
 	varyUserID := flag.Bool("vary_user_id", getenvBool("VARY_USER_ID", true), "append request index to synthetic user_id")
 	quiet := flag.Bool("quiet", getenvBool("QUIET", false), "suppress per-request success output")
+	reuseConnections := flag.Bool("reuse_connections", getenvBool("REUSE_CONNECTIONS", false), "reuse one brpc TCP connection per worker")
+	readyFile := flag.String("ready_file", getenv("READY_FILE", ""), "write worker concurrency evidence after the target is reached")
 	flag.Parse()
 
 	client, err := recall.NewBRPCRecommendClient(
@@ -60,9 +63,47 @@ func main() {
 		}
 		okCount := 0
 		totalStart := time.Now()
-		results := runIndexed(*requests, *concurrency, *qps, func(index int) probeResult {
+		workerCount := normalizedConcurrency(*requests, *concurrency)
+		var active int64
+		var maxActive int64
+		var readyOnce sync.Once
+		sessions := make([]*recall.BRPCRecommendSession, workerCount)
+		if *reuseConnections {
+			for worker := range sessions {
+				sessions[worker] = client.NewSession()
+				defer sessions[worker].Close()
+			}
+		}
+		results := runIndexedWithWorker(*requests, *concurrency, *qps, func(worker, index int) probeResult {
+			currentActive := atomic.AddInt64(&active, 1)
+			updateAtomicMaximum(&maxActive, currentActive)
+			if currentActive >= int64(workerCount) && *readyFile != "" {
+				readyOnce.Do(func() {
+					content := fmt.Sprintf("workers=%d max_active=%d payload_bytes=%d reuse_connections=%t\n",
+						workerCount, atomic.LoadInt64(&maxActive), *payloadBytes, *reuseConnections)
+					if err := os.WriteFile(*readyFile, []byte(content), 0o644); err != nil {
+						fmt.Fprintf(os.Stderr, "write ready file failed: %v\n", err)
+					}
+				})
+			}
+			defer atomic.AddInt64(&active, -1)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
 			started := time.Now()
+			if *reuseConnections {
+				resp, err := sessions[worker].HealthCheckWithPayload(ctx, *payloadBytes)
+				cancel()
+				elapsed := time.Since(started).Milliseconds()
+				if err != nil {
+					return probeResult{index: index, latencyMs: elapsed, err: err}
+				}
+				return probeResult{
+					index:     index,
+					latencyMs: elapsed,
+					code:      resp.Code,
+					status:    resp.Status,
+					backend:   resp.Backend,
+				}
+			}
 			resp, err := client.HealthCheckWithPayload(ctx, *payloadBytes)
 			cancel()
 			elapsed := time.Since(started).Milliseconds()
@@ -90,8 +131,8 @@ func main() {
 			}
 		}
 		totalElapsed := time.Since(totalStart).Milliseconds()
-		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d concurrency=%d qps=%d\n",
-			okCount, *requests, totalElapsed, *payloadBytes, normalizedConcurrency(*requests, *concurrency), *qps)
+		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d concurrency=%d max_active=%d qps=%d reuse_connections=%t\n",
+			okCount, *requests, totalElapsed, *payloadBytes, workerCount, atomic.LoadInt64(&maxActive), *qps, *reuseConnections)
 		if okCount != *requests {
 			os.Exit(1)
 		}
@@ -180,18 +221,24 @@ type probeResult struct {
 }
 
 func runIndexed(total int, concurrency int, qps int, fn func(index int) probeResult) []probeResult {
+	return runIndexedWithWorker(total, concurrency, qps, func(_ int, index int) probeResult {
+		return fn(index)
+	})
+}
+
+func runIndexedWithWorker(total int, concurrency int, qps int, fn func(worker, index int) probeResult) []probeResult {
 	results := make([]probeResult, total)
 	concurrency = normalizedConcurrency(total, concurrency)
 	jobs := make(chan int)
 	var wg sync.WaitGroup
 	for worker := 0; worker < concurrency; worker++ {
 		wg.Add(1)
-		go func() {
+		go func(worker int) {
 			defer wg.Done()
 			for index := range jobs {
-				results[index-1] = fn(index)
+				results[index-1] = fn(worker, index)
 			}
-		}()
+		}(worker)
 	}
 	var ticker *time.Ticker
 	if qps > 0 {
@@ -221,6 +268,15 @@ func normalizedConcurrency(total int, concurrency int) int {
 		concurrency = total
 	}
 	return concurrency
+}
+
+func updateAtomicMaximum(target *int64, value int64) {
+	for {
+		current := atomic.LoadInt64(target)
+		if current >= value || atomic.CompareAndSwapInt64(target, current, value) {
+			return
+		}
+	}
 }
 
 func buildProbeRequests(historySource, baseUserID, uids, userFeaturesPath, semanticMapPath string, historyMaxLength int, varyUserID bool, requestCount int) ([]probeRequest, error) {

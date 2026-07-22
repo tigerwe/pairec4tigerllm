@@ -2,11 +2,109 @@ package recall
 
 import (
 	"bytes"
+	"context"
+	"encoding/binary"
+	"io"
+	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	proto "github.com/gogo/protobuf/proto"
 )
+
+func TestBRPCSessionReusesConnection(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	var accepted int32
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		atomic.AddInt32(&accepted, 1)
+		defer conn.Close()
+		for i := 0; i < 2; i++ {
+			header := make([]byte, brpcHeaderSize)
+			if _, err := io.ReadFull(conn, header); err != nil {
+				serverDone <- err
+				return
+			}
+			bodySize := binary.BigEndian.Uint32(header[4:8])
+			metaSize := binary.BigEndian.Uint32(header[8:12])
+			body := make([]byte, bodySize)
+			if _, err := io.ReadFull(conn, body); err != nil {
+				serverDone <- err
+				return
+			}
+			var requestMeta brpcRPCMeta
+			if err := proto.Unmarshal(body[:metaSize], &requestMeta); err != nil {
+				serverDone <- err
+				return
+			}
+			responsePayload, err := proto.Marshal(&healthResponsePB{
+				Code: proto.Int32(200), Status: proto.String("healthy"), Backend: proto.String("test"),
+			})
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			responseMeta, err := proto.Marshal(&brpcRPCMeta{
+				CompressType:   proto.Int32(brpcNoCompression),
+				CorrelationID:  requestMeta.CorrelationID,
+				AttachmentSize: proto.Int32(0),
+				ContentType:    proto.Int32(brpcContentTypePB),
+				ChecksumType:   proto.Int32(brpcChecksumNone),
+				Response:       &brpcResponseMeta{ErrorCode: proto.Int32(0)},
+			})
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			frame, err := buildBRPCFrame(responseMeta, responsePayload)
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			if _, err := conn.Write(frame); err != nil {
+				serverDone <- err
+				return
+			}
+		}
+		serverDone <- nil
+	}()
+
+	client, err := NewBRPCRecommendClient(listener.Addr().String(), brpcDefaultServiceName, time.Second, 1)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	session := client.NewSession()
+	defer session.Close()
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		response, err := session.HealthCheckWithPayload(ctx, 102400)
+		cancel()
+		if err != nil {
+			t.Fatalf("health %d: %v", i, err)
+		}
+		if response.Code != 200 || response.Status != "healthy" {
+			t.Fatalf("health %d response: %+v", i, response)
+		}
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	if got := atomic.LoadInt32(&accepted); got != 1 {
+		t.Fatalf("accepted connections=%d, want 1", got)
+	}
+}
 
 func TestRecommendProtoRoundTrip(t *testing.T) {
 	req := &RecommendRequest{

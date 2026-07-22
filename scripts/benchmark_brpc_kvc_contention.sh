@@ -8,17 +8,19 @@ EXPECTED_OFFLOADS="${EXPECTED_OFFLOADS:-3}"
 EXPECTED_ONBOARDS="${EXPECTED_ONBOARDS:-2}"
 
 BRPC_ENDPOINT="${BRPC_ENDPOINT:-192.168.100.11:18100}"
-BRPC_LOAD_CONCURRENCY="${BRPC_LOAD_CONCURRENCY:-16}"
-BRPC_LOAD_QPS="${BRPC_LOAD_QPS:-300}"
-BRPC_LOAD_PAYLOAD_BYTES="${BRPC_LOAD_PAYLOAD_BYTES:-8388608}"
-BRPC_LOAD_REQUESTS="${BRPC_LOAD_REQUESTS:-100000}"
+BRPC_LOAD_CONCURRENCY="${BRPC_LOAD_CONCURRENCY:-10}"
+BRPC_LOAD_QPS="${BRPC_LOAD_QPS:-0}"
+BRPC_LOAD_PAYLOAD_BYTES="${BRPC_LOAD_PAYLOAD_BYTES:-102400}"
+BRPC_LOAD_REQUESTS="${BRPC_LOAD_REQUESTS:-1000000}"
 BRPC_LOAD_TIMEOUT_MS="${BRPC_LOAD_TIMEOUT_MS:-5000}"
+BRPC_LOAD_REUSE_CONNECTIONS="${BRPC_LOAD_REUSE_CONNECTIONS:-1}"
+BRPC_LOAD_READY_TIMEOUT_SECONDS="${BRPC_LOAD_READY_TIMEOUT_SECONDS:-30}"
 BRPC_PROBE_BIN="${BRPC_PROBE_BIN:-/tmp/probe-go-brpc-client}"
 
 KVC_LOAD_HOST="${KVC_LOAD_HOST:-worker1}"
 KVC_REMOTE_REPO="${KVC_REMOTE_REPO:-/home/zcx/workspace/pairec4tigerllm}"
 KVC_DS_ENDPOINT="${KVC_DS_ENDPOINT:-192.168.100.12:18482}"
-KVC_PRESSURE_ENGINE="${KVC_PRESSURE_ENGINE:-persistent}"
+KVC_PRESSURE_ENGINE="${KVC_PRESSURE_ENGINE:-dsbench}"
 KVC_DSBENCH_CPP="${KVC_DSBENCH_CPP:-}"
 KVC_DATASYSTEM_SDK_DIR="${KVC_DATASYSTEM_SDK_DIR:-}"
 KVC_PERSISTENT_BIN="${KVC_PERSISTENT_BIN:-/tmp/datasystem_kv_pressure}"
@@ -103,14 +105,25 @@ validate() {
   esac
   local value
   for value in "$REPEATS" "$EXPECTED_OFFLOADS" "$EXPECTED_ONBOARDS" "$PRIME_REQUESTS" \
-    "$BRPC_LOAD_QPS" "$PRIME_MAX_ATTEMPTS" "$PRIME_RETRY_DELAY_SECONDS" "$ROUND_COOLDOWN_SECONDS"; do
+    "$BRPC_LOAD_QPS" "$BRPC_LOAD_CONCURRENCY" "$BRPC_LOAD_PAYLOAD_BYTES" "$BRPC_LOAD_REQUESTS" \
+    "$BRPC_LOAD_TIMEOUT_MS" "$BRPC_LOAD_READY_TIMEOUT_SECONDS" "$PRIME_MAX_ATTEMPTS" \
+    "$PRIME_RETRY_DELAY_SECONDS" "$ROUND_COOLDOWN_SECONDS"; do
     [[ "$value" =~ ^[0-9]+$ ]] || die "repeat/count parameters must be non-negative integers"
   done
   [ "$REPEATS" -gt 0 ] || die "REPEATS must be positive"
   [ "$PRIME_REQUESTS" -gt 0 ] || die "PRIME_REQUESTS must be positive"
   [ "$PRIME_MAX_ATTEMPTS" -gt 0 ] || die "PRIME_MAX_ATTEMPTS must be positive"
-  if mode_has_brpc && [ "$BRPC_LOAD_QPS" -le 0 ]; then
-    die "BRPC_LOAD_QPS must be positive; unlimited short connections can exhaust local ephemeral ports"
+  [ "$BRPC_LOAD_CONCURRENCY" -gt 0 ] || die "BRPC_LOAD_CONCURRENCY must be positive"
+  [ "$BRPC_LOAD_PAYLOAD_BYTES" -gt 0 ] || die "BRPC_LOAD_PAYLOAD_BYTES must be positive"
+  [ "$BRPC_LOAD_REQUESTS" -ge "$BRPC_LOAD_CONCURRENCY" ] \
+    || die "BRPC_LOAD_REQUESTS must be at least BRPC_LOAD_CONCURRENCY"
+  [ "$BRPC_LOAD_READY_TIMEOUT_SECONDS" -gt 0 ] || die "BRPC_LOAD_READY_TIMEOUT_SECONDS must be positive"
+  case "$BRPC_LOAD_REUSE_CONNECTIONS" in
+    0|1) ;;
+    *) die "BRPC_LOAD_REUSE_CONNECTIONS must be 0 or 1" ;;
+  esac
+  if mode_has_brpc && [ "$BRPC_LOAD_QPS" -eq 0 ] && [ "$BRPC_LOAD_REUSE_CONNECTIONS" != "1" ]; then
+		die "unlimited BRPC load requires BRPC_LOAD_REUSE_CONNECTIONS=1 to avoid ephemeral-port exhaustion"
   fi
   if mode_has_kvc && [ "$KVC_BATCH_NUM" -ne 1 ]; then
     die "KVC_BATCH_NUM must be 1 to match current single-key TRT KVC calls"
@@ -143,11 +156,13 @@ build_brpc_probe() {
 }
 
 start_brpc_load() {
-  local round_dir="$1"
+	local round_dir="$1"
   if ! mode_has_brpc; then
     return
   fi
-  "$BRPC_PROBE_BIN" \
+	local ready_file="${round_dir}/brpc-pressure.ready"
+	rm -f "$ready_file"
+	"$BRPC_PROBE_BIN" \
     --endpoint="$BRPC_ENDPOINT" \
     --method=health \
     --requests="$BRPC_LOAD_REQUESTS" \
@@ -155,11 +170,25 @@ start_brpc_load() {
     --qps="$BRPC_LOAD_QPS" \
     --payload_bytes="$BRPC_LOAD_PAYLOAD_BYTES" \
     --timeout_ms="$BRPC_LOAD_TIMEOUT_MS" \
-    --max_retries=0 \
-    --quiet=true \
+		--max_retries=0 \
+		--reuse_connections="$BRPC_LOAD_REUSE_CONNECTIONS" \
+		--ready_file="$ready_file" \
+		--quiet=true \
     >"${round_dir}/brpc-load.log" 2>&1 &
-  BRPC_LOAD_PID="$!"
-  echo "$BRPC_LOAD_PID" >"${round_dir}/brpc-load.pid"
+	BRPC_LOAD_PID="$!"
+	echo "$BRPC_LOAD_PID" >"${round_dir}/brpc-load.pid"
+	local attempt
+	for attempt in $(seq 1 "$BRPC_LOAD_READY_TIMEOUT_SECONDS"); do
+		if [ -s "$ready_file" ]; then
+			return
+		fi
+		if ! kill -0 "$BRPC_LOAD_PID" >/dev/null 2>&1; then
+			cat "${round_dir}/brpc-load.log" >&2 || true
+			die "BRPC pressure exited before reaching configured concurrency"
+		fi
+		sleep 1
+	done
+	die "BRPC pressure did not reach concurrency=${BRPC_LOAD_CONCURRENCY} within ${BRPC_LOAD_READY_TIMEOUT_SECONDS}s"
 }
 
 start_kvc_load() {
@@ -493,6 +522,7 @@ brpc_endpoint=${BRPC_ENDPOINT}
 brpc_load_concurrency=${BRPC_LOAD_CONCURRENCY}
 brpc_load_qps=${BRPC_LOAD_QPS}
 brpc_load_payload_bytes=${BRPC_LOAD_PAYLOAD_BYTES}
+brpc_load_reuse_connections=${BRPC_LOAD_REUSE_CONNECTIONS}
 kvc_load_host=${KVC_LOAD_HOST}
 kvc_ds_endpoint=${KVC_DS_ENDPOINT}
 kvc_pressure_engine=${KVC_PRESSURE_ENGINE}
