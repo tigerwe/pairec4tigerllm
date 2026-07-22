@@ -2,11 +2,12 @@
 set -euo pipefail
 
 REPEATS="${REPEATS:-3}"
-CASES="${CASES:-brpc-c10,brpc-c100,brpc-c1000,kvc-17.5m-c10,kvc-1.75m-c100}"
+CASES="${CASES:-baseline,brpc-c10,brpc-c100,brpc-c1000,kvc-17.5m-c10,kvc-1.75m-c100}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT_ROOT="${OUT_ROOT:-/tmp/brpc-kvc-pressure-matrix/${RUN_ID}}"
 ROUND_COOLDOWN_SECONDS="${ROUND_COOLDOWN_SECONDS:-5}"
 BENCHMARK_SCRIPT="${BENCHMARK_SCRIPT:-scripts/benchmark_brpc_kvc_contention.sh}"
+MATRIX_STRICT_COUNTS="${MATRIX_STRICT_COUNTS:-0}"
 
 BRPC_PAYLOAD_BYTES="${BRPC_PAYLOAD_BYTES:-102400}"
 BRPC_REQUESTS="${BRPC_REQUESTS:-1000000}"
@@ -29,11 +30,15 @@ run_case() {
   local -a args=(
     REPEATS="$REPEATS"
     ROUND_COOLDOWN_SECONDS="$ROUND_COOLDOWN_SECONDS"
+    STRICT_COUNTS="$MATRIX_STRICT_COUNTS"
     RUN_ID="${RUN_ID}-${name}"
     OUT_DIR="$out_dir"
   )
 
   case "$name" in
+    baseline)
+      args+=(MODE=baseline)
+      ;;
     brpc-c10|brpc-c100|brpc-c1000)
       local concurrency="${name#brpc-c}"
       args+=(
@@ -81,12 +86,23 @@ run_case() {
 
   mkdir -p "$out_dir"
   printf '\n== pressure case=%s ==\n' "$name"
+  set +e
   env "${args[@]}" bash "$BENCHMARK_SCRIPT" \
     | tee "${out_dir}/console.log"
+  local benchmark_code="${PIPESTATUS[0]}"
+  set -e
+  echo "$benchmark_code" >"${out_dir}/exit_code"
+  if [ "$benchmark_code" -ne 0 ]; then
+    echo "WARNING: pressure case=${name} failed with status ${benchmark_code}; continue with remaining cases" >&2
+  fi
 }
 
 mkdir -p "$OUT_ROOT"
 [ -f "$BENCHMARK_SCRIPT" ] || die "benchmark script not found: $BENCHMARK_SCRIPT"
+case "$MATRIX_STRICT_COUNTS" in
+  0|1) ;;
+  *) die "MATRIX_STRICT_COUNTS must be 0 or 1" ;;
+esac
 IFS=',' read -r -a selected_cases <<<"$CASES"
 for selected in "${selected_cases[@]}"; do
   selected="${selected//[[:space:]]/}"
