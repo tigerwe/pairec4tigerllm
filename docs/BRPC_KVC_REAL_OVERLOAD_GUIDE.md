@@ -39,13 +39,13 @@ bash scripts/k8s_apply_brpc_pressure_target_188.sh
 ```bash
 cd /home/zcx/workspace/pairec4tigerllm
 
-DATASYSTEM_DIR=/home/zcx/workspace/yuanrong-datasystem \
+DATASYSTEM_DIR=/home/zcx/yuanrong-datasystem-v081 \
   bash scripts/apply_datasystem_dsbench_sustained_patch.sh
 
-cmake --build /home/zcx/workspace/yuanrong-datasystem/build \
+cmake --build /home/zcx/yuanrong-datasystem-v081/build-sustained \
   --target dsbench_cpp -j"$(nproc)"
 
-find /home/zcx/workspace/yuanrong-datasystem/build \
+find /home/zcx/yuanrong-datasystem-v081/build-sustained \
   -type f -name dsbench_cpp -perm -111
 ```
 
@@ -54,11 +54,16 @@ find /home/zcx/workspace/yuanrong-datasystem/build \
 ```bash
 DSBENCH=/path/to/rebuilt/dsbench_cpp
 DSBENCH_HELP=$("$DSBENCH" kv --help 2>&1 || true)
-grep -E 'duration_seconds|ready_file' <<<"$DSBENCH_HELP"
+grep -E 'duration_seconds|ready_file|prepared_file|start_file|stats_file' <<<"$DSBENCH_HELP"
 ldd "$DSBENCH" | grep 'not found' && exit 1 || true
 ```
 
-持续模式会复用已初始化的 KVClient 和固定 key 集合，在指定时长内持续执行真实请求，不会不断重启 dsbench，也不会无限增加驻留对象。
+持续模式会复用已初始化的 KVClient 和固定 key 集合，在指定时长内持续执行真实请求，不会不断重启 dsbench，也不会无限增加驻留对象。当前补丁还增加了两阶段门控和真实负载指标：
+
+- `prepared_file`：客户端、固定 key 和预填充对象已经准备完成，但还没有发测量 RPC；
+- `start_file`：benchmark 完成 inference 重置和 prime 后统一放行；
+- `ready_file`：所有 worker 已经离开门控；
+- `stats_file`：分别记录 GET/SET 的 calls、errors、QPS、Gbps 和 `max_inflight`。
 
 如果新二进制依赖构建目录中的动态库，使用仓库脚本生成固定运行环境的 wrapper，避免依赖当前 Shell 中临时设置的 `LD_LIBRARY_PATH`：
 
@@ -69,7 +74,7 @@ DATASYSTEM_DIR=/home/zcx/yuanrong-datasystem-v081 \
   bash scripts/create_datasystem_dsbench_wrapper.sh
 ```
 
-脚本默认生成 `/home/zcx/bin/dsbench-v081-sustained`，并自动检查动态库、DataSystem `0.8.1` 版本以及 `duration_seconds/ready_file` 标记。后续将该 wrapper 作为 `KVC_DSBENCH_CPP`，不要直接传裸二进制。
+脚本默认生成 `/home/zcx/bin/dsbench-v081-sustained`，并自动检查动态库、DataSystem `0.8.1` 版本以及全部持续压测参数。后续将该 wrapper 作为 `KVC_DSBENCH_CPP`，不要直接传裸二进制。
 
 ## 3. 校准 `3 Set + 2 Get`
 
@@ -122,10 +127,26 @@ CASES=kvc-17.5m-c10,kvc-1.75m-c100 REPEATS=10 \
 
 对应并发：
 
-| 档位 | Set | Get | 总并发 |
-|---|---:|---:|---:|
-| 17.5MiB | 6 | 4 | 10 |
-| 1.75MiB | 60 | 40 | 100 |
+| 档位 | Set | Get | 总并发 | 常驻对象总量 |
+|---|---:|---:|---:|---:|
+| 17.5MiB | 6 | 4 | 10 | 175MiB |
+| 1.75MiB | 60 | 40 | 100 | 175MiB |
+
+每个 worker 固定操作一个 key，`batch_num=1`，因此一次循环对应一次普通 DataSystem RPC。脚本不再把“worker 已启动”当成并发证据；只有 GET/SET 两侧都满足 `calls > 0`、`errors = 0`、QPS 非零且 `max_inflight` 达到配置值，样本才有效。
+
+每轮顺序固定为：
+
+```text
+dsbench 预填充并等待 start_file
+-> 重启 inference
+-> prime 前台缓存形态
+-> 启动 BRPC 压力
+-> 写入 start_file 放行 KVC 压力
+-> 等待压力稳定
+-> replay
+```
+
+背景对象在 inference 重置和 prime 之前创建，避免 dsbench 的预填充把刚构造好的前台 KV 淘汰，从而提高 `3 Set + 2 Get` 的稳定性。
 
 最后运行组合压力：
 
@@ -137,7 +158,7 @@ CASES=combined-c100-kvc100 REPEATS=30 \
   bash scripts/benchmark_brpc_kvc_pressure_matrix.sh
 ```
 
-combined 模式会同时验收 BRPC 实际并发、dsbench 实际并发和前台 `3 Set + 2 Get`，任一条件不满足都会将样本判为无效。
+combined 模式会同时验收 BRPC 的真实 `max_active_calls`、dsbench GET/SET 各自的真实 `max_inflight` 和前台 `3 Set + 2 Get`，任一条件不满足都会将样本判为无效。GET 与 SET 来自两个进程，报告分别展示两侧峰值，不把两个峰值相加伪装成同一时刻的总在途 RPC。
 
 ## 5. 验收目标分布
 

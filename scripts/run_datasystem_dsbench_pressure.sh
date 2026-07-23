@@ -18,6 +18,8 @@ THREAD_NUM="${THREAD_NUM:-1}"
 TASKSET_CPUS="${TASKSET_CPUS:-}"
 GET_CLIENTS="${GET_CLIENTS:-4}"
 SET_CLIENTS="${SET_CLIENTS:-6}"
+GET_KEY_COUNT="${GET_KEY_COUNT:-$GET_CLIENTS}"
+SET_KEY_COUNT="${SET_KEY_COUNT:-$SET_CLIENTS}"
 DURATION_SECONDS="${DURATION_SECONDS:-0}"
 CLEANUP_KEYS="${CLEANUP_KEYS:-1}"
 REPORT_INTERVAL_SECONDS="${REPORT_INTERVAL_SECONDS:-1}"
@@ -25,6 +27,8 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)}"
 PREFIX="${PREFIX:-KvcLoad_${RUN_ID}}"
 PID_FILE="${PID_FILE:-/tmp/dsbench-pressure-${RUN_ID}.pid}"
 READY_FILE="${READY_FILE:-/tmp/dsbench-pressure-${RUN_ID}.ready}"
+PREPARED_FILE="${PREPARED_FILE:-/tmp/dsbench-pressure-${RUN_ID}.prepared}"
+START_FILE="${START_FILE:-/tmp/dsbench-pressure-${RUN_ID}.start}"
 STATS_FILE="${STATS_FILE:-/tmp/dsbench-pressure-${RUN_ID}.stats.jsonl}"
 
 GET_PREFIX="${PREFIX}_Get"
@@ -32,6 +36,8 @@ SET_PREFIX="${PREFIX}_Set"
 STOPPING=0
 CHILD_PIDS=()
 CHILD_READY_FILES=()
+CHILD_PREPARED_FILES=()
+CHILD_STATS_FILES=()
 
 log() {
   printf '[dsbench-pressure] %s\n' "$*"
@@ -118,6 +124,8 @@ validate() {
   [[ "$THREAD_NUM" =~ ^[1-9][0-9]*$ ]] || die "THREAD_NUM must be positive"
   [[ "$GET_CLIENTS" =~ ^[1-9][0-9]*$ ]] || die "GET_CLIENTS must be positive"
   [[ "$SET_CLIENTS" =~ ^[1-9][0-9]*$ ]] || die "SET_CLIENTS must be positive"
+  [[ "$GET_KEY_COUNT" =~ ^[1-9][0-9]*$ ]] || die "GET_KEY_COUNT must be positive"
+  [[ "$SET_KEY_COUNT" =~ ^[1-9][0-9]*$ ]] || die "SET_KEY_COUNT must be positive"
   [[ "$DURATION_SECONDS" =~ ^[0-9]+$ ]] || die "DURATION_SECONDS must be non-negative"
   [[ "$REPORT_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "REPORT_INTERVAL_SECONDS must be positive"
   [[ "$DSBENCH_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
@@ -131,6 +139,23 @@ validate() {
   fi
   if [ "$DSBENCH_SUSTAINED" = "1" ] && [ "$DURATION_SECONDS" -eq 0 ]; then
     die "DSBENCH_SUSTAINED=1 requires a positive DURATION_SECONDS"
+  fi
+  if [ "$DSBENCH_SUSTAINED" = "1" ] && [ "$BATCH_NUM" -ne 1 ]; then
+    die "sustained observability requires BATCH_NUM=1"
+  fi
+  if [ "$DSBENCH_SUSTAINED" = "1" ]; then
+    case "$MODE" in
+      get|mixed)
+        [ "$GET_KEY_COUNT" -eq $((GET_CLIENTS * THREAD_NUM)) ] \
+          || die "GET_KEY_COUNT must equal GET_CLIENTS * THREAD_NUM for exact RPC accounting"
+        ;;
+    esac
+    case "$MODE" in
+      set|mixed)
+        [ "$SET_KEY_COUNT" -eq $((SET_CLIENTS * THREAD_NUM)) ] \
+          || die "SET_KEY_COUNT must equal SET_CLIENTS * THREAD_NUM for exact RPC accounting"
+        ;;
+    esac
   fi
   if [ "$BATCH_NUM" -ne 1 ]; then
     log "warning: BATCH_NUM=${BATCH_NUM} uses vector Get/MSet; current TRT KVC comparison expects BATCH_NUM=1"
@@ -170,6 +195,10 @@ run_dsbench() {
   local clients="$3"
   local duration_seconds="${4:-0}"
   local ready_file="${5:-}"
+  local key_count="${6:-$KEY_COUNT}"
+  local prepared_file="${7:-}"
+  local start_file="${8:-}"
+  local stats_file="${9:-}"
   local -a args=(
     kv
     --action="$action"
@@ -177,7 +206,7 @@ run_dsbench() {
     --prefix="$prefix"
     --client_num="$clients"
     --thread_num="$THREAD_NUM"
-    --num="$KEY_COUNT"
+    --num="$key_count"
     --size="$OBJECT_SIZE"
     --batch_num="$BATCH_NUM"
   )
@@ -192,6 +221,15 @@ run_dsbench() {
   if [ -n "$ready_file" ]; then
     args+=(--ready_file="$ready_file")
   fi
+  if [ -n "$prepared_file" ]; then
+    args+=(--prepared_file="$prepared_file")
+  fi
+  if [ -n "$start_file" ]; then
+    args+=(--start_file="$start_file")
+  fi
+  if [ -n "$stats_file" ]; then
+    args+=(--stats_file="$stats_file" --report_interval_ms=$((REPORT_INTERVAL_SECONDS * 1000)))
+  fi
   if [ -n "$TASKSET_CPUS" ]; then
     taskset -c "$TASKSET_CPUS" "$DSBENCH_CPP" "${args[@]}"
   else
@@ -204,38 +242,55 @@ start_sustained_action() {
   local prefix="$2"
   local clients="$3"
   local ready_file="${READY_FILE}.${action}"
-  rm -f "$ready_file"
-  run_dsbench "$action" "$prefix" "$clients" "$DURATION_SECONDS" "$ready_file" &
+  local prepared_file="${PREPARED_FILE}.${action}"
+  local stats_file="${STATS_FILE}.${action}"
+  local key_count
+  if [ "$action" = "get" ]; then
+    key_count="$GET_KEY_COUNT"
+  else
+    key_count="$SET_KEY_COUNT"
+  fi
+  rm -f "$ready_file" "$prepared_file" "$stats_file"
+  run_dsbench "$action" "$prefix" "$clients" "$DURATION_SECONDS" "$ready_file" \
+    "$key_count" "$prepared_file" "$START_FILE" "$stats_file" &
   CHILD_PIDS+=("$!")
   CHILD_READY_FILES+=("$ready_file")
+  CHILD_PREPARED_FILES+=("$prepared_file")
+  CHILD_STATS_FILES+=("$stats_file")
 }
 
-wait_sustained_ready() {
-  local attempt ready_file pid all_ready
+wait_sustained_files() {
+  local description="$1"
+  shift
+  local -a files=("$@")
+  local attempt state_file pid all_ready
   for attempt in $(seq 1 "$DSBENCH_READY_TIMEOUT_SECONDS"); do
     all_ready=1
-    for ready_file in "${CHILD_READY_FILES[@]}"; do
-      [ -s "$ready_file" ] || all_ready=0
+    for state_file in "${files[@]}"; do
+      [ -s "$state_file" ] || all_ready=0
     done
     if [ "$all_ready" -eq 1 ]; then
       return
     fi
     for pid in "${CHILD_PIDS[@]}"; do
       if ! kill -0 "$pid" >/dev/null 2>&1; then
-        die "sustained dsbench child exited before readiness"
+        die "sustained dsbench child exited before ${description}"
       fi
     done
     sleep 1
   done
-  die "sustained dsbench did not become ready within ${DSBENCH_READY_TIMEOUT_SECONDS}s"
+  die "sustained dsbench did not reach ${description} within ${DSBENCH_READY_TIMEOUT_SECONDS}s"
 }
 
 run_sustained_pressure() {
   local help_output
   help_output="$("$DSBENCH_CPP" kv --help 2>&1 || true)"
-  if ! grep -q -- '--duration_seconds' <<<"$help_output"; then
-    die "dsbench_cpp does not contain sustained pressure support; apply datasystem-dsbench-sustained-pressure.patch"
-  fi
+  for marker in --duration_seconds --prepared_file --start_file --stats_file; do
+    grep -q -- "$marker" <<<"$help_output" \
+      || die "dsbench_cpp does not contain ${marker}; reapply and rebuild sustained pressure patches"
+  done
+
+  rm -f "$READY_FILE" "$PREPARED_FILE" "$START_FILE" "$STATS_FILE"
 
   case "$MODE" in
     get)
@@ -250,15 +305,25 @@ run_sustained_pressure() {
       ;;
   esac
 
-  wait_sustained_ready
-  local active_calls=0 ready_file
-  for ready_file in "${CHILD_READY_FILES[@]}"; do
-    cat "$ready_file"
-    active_calls=$((active_calls + $(sed -n 's/.*active_calls=\([0-9][0-9]*\).*/\1/p' "$ready_file")))
+  wait_sustained_files prepared "${CHILD_PREPARED_FILES[@]}"
+  local prepared_workers=0 state_file
+  for state_file in "${CHILD_PREPARED_FILES[@]}"; do
+    cat "$state_file"
+    prepared_workers=$((prepared_workers + $(sed -n 's/.*prepared_workers=\([0-9][0-9]*\).*/\1/p' "$state_file")))
   done
-  printf 'engine=dsbench sustained=1 active_calls=%s duration_seconds=%s\n' \
-    "$active_calls" "$DURATION_SECONDS" >"$READY_FILE"
-  log "ready sustained=1 active_calls=${active_calls} ready_file=${READY_FILE}"
+  printf 'engine=dsbench sustained=1 prepared_workers=%s duration_seconds=%s\n' \
+    "$prepared_workers" "$DURATION_SECONDS" >"$PREPARED_FILE"
+  log "prepared sustained=1 prepared_workers=${prepared_workers} prepared_file=${PREPARED_FILE}"
+
+  wait_sustained_files ready "${CHILD_READY_FILES[@]}"
+  local ready_workers=0
+  for state_file in "${CHILD_READY_FILES[@]}"; do
+    cat "$state_file"
+    ready_workers=$((ready_workers + $(sed -n 's/.*ready_workers=\([0-9][0-9]*\).*/\1/p' "$state_file")))
+  done
+  printf 'engine=dsbench sustained=1 ready_workers=%s duration_seconds=%s\n' \
+    "$ready_workers" "$DURATION_SECONDS" >"$READY_FILE"
+  log "ready sustained=1 ready_workers=${ready_workers} ready_file=${READY_FILE}"
   wait "${CHILD_PIDS[@]}"
 }
 
@@ -283,10 +348,10 @@ cleanup_keys() {
   [ "$CLEANUP_KEYS" = "1" ] || return 0
   set +e
   if [ "$MODE" = "get" ] || [ "$MODE" = "mixed" ]; then
-    run_dsbench del "$GET_PREFIX" 1 >/dev/null 2>&1
+    run_dsbench del "$GET_PREFIX" 1 0 "" "$GET_KEY_COUNT" >/dev/null 2>&1
   fi
   if [ "$MODE" = "set" ] || [ "$MODE" = "mixed" ]; then
-    run_dsbench del "$SET_PREFIX" 1 >/dev/null 2>&1
+    run_dsbench del "$SET_PREFIX" 1 0 "" "$SET_KEY_COUNT" >/dev/null 2>&1
   fi
   set -e
 }
@@ -298,7 +363,8 @@ cleanup() {
   for pid in "${CHILD_PIDS[@]:-}"; do
     [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
   done
-  rm -f "${CHILD_READY_FILES[@]:-}"
+  rm -f "$PREPARED_FILE" "$START_FILE"
+  rm -f "${CHILD_READY_FILES[@]:-}" "${CHILD_PREPARED_FILES[@]:-}"
   for pid in "${CHILD_PIDS[@]:-}"; do
     [ -n "$pid" ] && wait "$pid" >/dev/null 2>&1 || true
   done
@@ -326,6 +392,7 @@ printf '%s\n' "$$" >"$PID_FILE"
 log "mode=${MODE} engine=${PRESSURE_ENGINE} endpoint=${DS_ENDPOINT}"
 log "object_size=${OBJECT_SIZE} key_count=${KEY_COUNT} batch_num=${BATCH_NUM} thread_num=${THREAD_NUM}"
 log "get_clients=${GET_CLIENTS} set_clients=${SET_CLIENTS} duration_seconds=${DURATION_SECONDS}"
+log "get_key_count=${GET_KEY_COUNT} set_key_count=${SET_KEY_COUNT}"
 log "dsbench_sustained=${DSBENCH_SUSTAINED}"
 log "taskset_cpus=${TASKSET_CPUS:-none}"
 
@@ -337,12 +404,12 @@ log "dsbench=${DSBENCH_CPP}"
 
 if [ "$MODE" = "get" ] || [ "$MODE" = "mixed" ]; then
   log "prefill prefix=${GET_PREFIX}"
-  run_dsbench set "$GET_PREFIX" "$GET_CLIENTS"
+  run_dsbench set "$GET_PREFIX" "$GET_CLIENTS" 0 "" "$GET_KEY_COUNT"
 fi
 
 if [ "$MODE" = "set" ] || [ "$MODE" = "mixed" ]; then
   log "initialize set prefix=${SET_PREFIX}"
-  run_dsbench set "$SET_PREFIX" "$SET_CLIENTS"
+  run_dsbench set "$SET_PREFIX" "$SET_CLIENTS" 0 "" "$SET_KEY_COUNT"
 fi
 
 if [ "$DSBENCH_SUSTAINED" = "1" ]; then

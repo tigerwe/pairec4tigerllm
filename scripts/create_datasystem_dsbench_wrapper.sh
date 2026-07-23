@@ -50,9 +50,15 @@ verify_binary() {
     || die "dsbench_cpp does not expose --duration_seconds"
   grep -q -- '--ready_file' <<<"$help_output" \
     || die "dsbench_cpp does not expose --ready_file"
+  grep -q -- '--prepared_file' <<<"$help_output" \
+    || die "dsbench_cpp does not expose --prepared_file"
+  grep -q -- '--start_file' <<<"$help_output" \
+    || die "dsbench_cpp does not expose --start_file"
+  grep -q -- '--stats_file' <<<"$help_output" \
+    || die "dsbench_cpp does not expose --stats_file"
 
   printf '%s\n' "$version_output"
-  grep -E -- '--duration_seconds|--ready_file' <<<"$help_output"
+  grep -E -- '--duration_seconds|--ready_file|--prepared_file|--start_file|--stats_file' <<<"$help_output"
 }
 
 write_wrapper() {

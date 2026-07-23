@@ -1,0 +1,343 @@
+diff --git a/dsbench/src/kv/kv_args.h b/dsbench/src/kv/kv_args.h
+--- a/dsbench/src/kv/kv_args.h
++++ b/dsbench/src/kv/kv_args.h
+@@ -39,6 +39,10 @@ struct KVArgs : public ArgsBase {
+     bool skipLocal;
+     uint64_t durationSeconds;
+     std::string readyFile;
++    std::string preparedFile;
++    std::string startFile;
++    std::string statsFile;
++    uint64_t reportIntervalMs;
+ };
+ }  // namespace bench
+ }  // namespace datasystem
+diff --git a/dsbench/src/kv/kv_args.cpp b/dsbench/src/kv/kv_args.cpp
+--- a/dsbench/src/kv/kv_args.cpp
++++ b/dsbench/src/kv/kv_args.cpp
+@@ -36,7 +36,8 @@ KVArgs::KVArgs(const std::string &command)
+       workerNum(0),
+       workerIndex(0),
+       skipLocal(false),
+-      durationSeconds(0)
++      durationSeconds(0),
++      reportIntervalMs(1000)
+ {
+ }
+ 
+@@ -63,6 +64,10 @@ std::string KVArgs::Usage(const std::string &argv0)
+     ss << "  --skip_local         Skip local worker data during get operations (default: false)\n";
+     ss << "  --duration_seconds   Repeatedly run over the fixed key set for this many seconds (default: 0)\n";
+     ss << "  --ready_file         Write readiness after all clients cross the start barrier\n";
++    ss << "  --prepared_file      Write after clients initialize, before waiting for start_file\n";
++    ss << "  --start_file         Wait for this file before issuing measured DataSystem calls\n";
++    ss << "  --stats_file         Append real call/QPS/Gbps/inflight statistics as JSON lines\n";
++    ss << "  --report_interval_ms Statistics interval in milliseconds (default: 1000)\n";
+     ss << "  -h                   Show help\n";
+     return ss.str();
+ }
+@@ -87,7 +92,11 @@ std::string KVArgs::ToString()
+     ss << "  -I --worker_index:   " << workerIndex << "\n";
+     ss << "  --skip_local:        " << (skipLocal ? "true" : "false") << "\n";
+     ss << "  --duration_seconds:  " << durationSeconds << "\n";
+-    ss << "  --ready_file:        " << readyFile;
++    ss << "  --ready_file:        " << readyFile << "\n";
++    ss << "  --prepared_file:     " << preparedFile << "\n";
++    ss << "  --start_file:        " << startFile << "\n";
++    ss << "  --stats_file:        " << statsFile << "\n";
++    ss << "  --report_interval_ms:" << reportIntervalMs;
+     return ss.str();
+ }
+ 
+@@ -96,6 +105,10 @@ Status KVArgs::Parse(int argc, char *argv[])
+     const int SKIP_LOCAL = 1;
+     const int DURATION_SECONDS = 2;
+     const int READY_FILE = 3;
++    const int PREPARED_FILE = 4;
++    const int START_FILE = 5;
++    const int STATS_FILE = 6;
++    const int REPORT_INTERVAL_MS = 7;
+     // clang-format off
+     static const struct option longOptions[] = {
+         { "action", required_argument, nullptr, 'a' },       { "worker_address", required_argument, nullptr, 'w' },
+@@ -109,7 +122,12 @@ Status KVArgs::Parse(int argc, char *argv[])
+         { "worker_num", required_argument, nullptr, 'W' },   { "worker_index", required_argument, nullptr, 'I' },
+         { "skip_local", no_argument, nullptr, SKIP_LOCAL },
+         { "duration_seconds", required_argument, nullptr, DURATION_SECONDS },
+-        { "ready_file", required_argument, nullptr, READY_FILE }, { "help", no_argument, nullptr, 'h' }
++        { "ready_file", required_argument, nullptr, READY_FILE },
++        { "prepared_file", required_argument, nullptr, PREPARED_FILE },
++        { "start_file", required_argument, nullptr, START_FILE },
++        { "stats_file", required_argument, nullptr, STATS_FILE },
++        { "report_interval_ms", required_argument, nullptr, REPORT_INTERVAL_MS },
++        { "help", no_argument, nullptr, 'h' }
+     };
+     // clang-format on
+     while (true) {
+@@ -173,6 +191,18 @@ Status KVArgs::Parse(int argc, char *argv[])
+             case READY_FILE:
+                 readyFile = optarg;
+                 break;
++            case PREPARED_FILE:
++                preparedFile = optarg;
++                break;
++            case START_FILE:
++                startFile = optarg;
++                break;
++            case STATS_FILE:
++                statsFile = optarg;
++                break;
++            case REPORT_INTERVAL_MS:
++                rc = StrToInt(optarg, reportIntervalMs);
++                break;
+             default:
+                 std::cout << Usage(argv[0]);
+                 return Status(K_INVALID, "");
+diff --git a/dsbench/src/kv/kv_bench.cpp b/dsbench/src/kv/kv_bench.cpp
+--- a/dsbench/src/kv/kv_bench.cpp
++++ b/dsbench/src/kv/kv_bench.cpp
+@@ -17,10 +17,12 @@
+ #include "kv_bench.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <chrono>
+ #include <fstream>
+ #include <numeric>
+ #include <random>
++#include <thread>
+ 
+ #include "datasystem/common/util/net_util.h"
+ #include "datasystem/common/util/status_helper.h"
+@@ -31,6 +33,111 @@
+ 
+ namespace datasystem {
+ namespace bench {
++namespace {
++
++std::atomic<uint64_t> gReadyWorkers{ 0 };
++std::atomic<uint64_t> gCalls{ 0 };
++std::atomic<uint64_t> gSuccess{ 0 };
++std::atomic<uint64_t> gErrors{ 0 };
++std::atomic<uint64_t> gBytes{ 0 };
++std::atomic<uint64_t> gTotalLatencyUs{ 0 };
++std::atomic<uint64_t> gActiveCalls{ 0 };
++std::atomic<uint64_t> gMaxInflight{ 0 };
++std::atomic<int64_t> gLoadStartedNs{ 0 };
++std::atomic<int64_t> gNextReportNs{ 0 };
++
++int64_t SteadyNowNs()
++{
++    return std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch())
++        .count();
++}
++
++void UpdateMaximum(std::atomic<uint64_t> &maximum, uint64_t value)
++{
++    uint64_t observed = maximum.load(std::memory_order_relaxed);
++    while (observed < value
++           && !maximum.compare_exchange_weak(observed, value, std::memory_order_relaxed)) {
++    }
++}
++
++Status WriteTextFile(const std::string &path, const std::string &content)
++{
++    if (path.empty()) {
++        return Status::OK();
++    }
++    std::ofstream output(path, std::ios::out | std::ios::trunc);
++    CHECK_FAIL_RETURN_STATUS(output.is_open(), K_RUNTIME_ERROR, "Cannot open state file: " + path);
++    output << content << std::endl;
++    return Status::OK();
++}
++
++void WaitForStartFile(const std::string &path)
++{
++    while (!path.empty()) {
++        std::ifstream input(path);
++        if (input.good()) {
++            return;
++        }
++        std::this_thread::sleep_for(std::chrono::milliseconds(10));
++    }
++}
++
++void WriteStats(const KVArgs &args, bool final)
++{
++    if (args.statsFile.empty()) {
++        return;
++    }
++    int64_t const nowNs = SteadyNowNs();
++    int64_t const startedNs = gLoadStartedNs.load(std::memory_order_relaxed);
++    double const elapsedSeconds = std::max(0.000001, static_cast<double>(nowNs - startedNs) / 1.0e9);
++    uint64_t const calls = gCalls.load(std::memory_order_relaxed);
++    uint64_t const success = gSuccess.load(std::memory_order_relaxed);
++    uint64_t const errors = gErrors.load(std::memory_order_relaxed);
++    uint64_t const bytes = gBytes.load(std::memory_order_relaxed);
++    uint64_t const totalLatencyUs = gTotalLatencyUs.load(std::memory_order_relaxed);
++    double const qps = static_cast<double>(success) / elapsedSeconds;
++    double const gbps = static_cast<double>(bytes) * 8.0 / elapsedSeconds / 1.0e9;
++    double const avgMs = calls == 0 ? 0.0 : static_cast<double>(totalLatencyUs) / calls / 1000.0;
++
++    std::ofstream output(args.statsFile, std::ios::out | std::ios::app);
++    if (!output.is_open()) {
++        return;
++    }
++    output << "{\"event\":\"dsbench_pressure_stats\",\"action\":\"" << args.action << "\","
++           << "\"final\":" << (final ? "true" : "false") << ","
++           << "\"elapsed_s\":" << elapsedSeconds << ","
++           << "\"ready_workers\":" << gReadyWorkers.load(std::memory_order_relaxed) << ","
++           << "\"calls\":" << calls << ","
++           << "\"success\":" << success << ","
++           << "\"errors\":" << errors << ","
++           << "\"bytes\":" << bytes << ","
++           << "\"qps\":" << qps << ","
++           << "\"gbps\":" << gbps << ","
++           << "\"avg_ms\":" << avgMs << ","
++           << "\"current_inflight\":" << gActiveCalls.load(std::memory_order_relaxed) << ","
++           << "\"max_inflight\":" << gMaxInflight.load(std::memory_order_relaxed) << "}"
++           << std::endl;
++}
++
++void MaybeWriteStats(const KVArgs &args, bool final)
++{
++    if (args.statsFile.empty()) {
++        return;
++    }
++    int64_t const nowNs = SteadyNowNs();
++    if (!final) {
++        int64_t nextNs = gNextReportNs.load(std::memory_order_relaxed);
++        int64_t const intervalNs = static_cast<int64_t>(args.reportIntervalMs) * 1000000;
++        if (nowNs < nextNs
++            || !gNextReportNs.compare_exchange_strong(nextNs, nowNs + intervalNs, std::memory_order_relaxed)) {
++            return;
++        }
++    }
++    WriteStats(args, final);
++}
++
++}  // namespace
+ 
+ Status KVBench::WarmUp()
+ {
+@@ -38,17 +145,26 @@ Status KVBench::WarmUp()
+     uint64_t originalKeyNum = args_.keyNum;
+     uint64_t originalDurationSeconds = args_.durationSeconds;
+     std::string originalReadyFile = args_.readyFile;
++    std::string originalPreparedFile = args_.preparedFile;
++    std::string originalStartFile = args_.startFile;
++    std::string originalStatsFile = args_.statsFile;
+ 
+     args_.keyPrefix += "-pre-run";
+     args_.keyNum = args_.batchNum;
+     args_.durationSeconds = 0;
+     args_.readyFile.clear();
++    args_.preparedFile.clear();
++    args_.startFile.clear();
++    args_.statsFile.clear();
+ 
+     auto rc = ParallelRun();
+     args_.keyPrefix = originalKeyPrefix;
+     args_.keyNum = originalKeyNum;
+     args_.durationSeconds = originalDurationSeconds;
+     args_.readyFile = originalReadyFile;
++    args_.preparedFile = originalPreparedFile;
++    args_.startFile = originalStartFile;
++    args_.statsFile = originalStatsFile;
+     if (rc.IsError()) {
+         std::cerr << "ERROR: WarmUp phase failed - " << rc.GetMsg() << std::endl;
+         return rc;
+@@ -215,19 +331,45 @@ Status KVBench::Run(uint64_t threadIndex, Barrier &barrier)
+ {
++    if (threadIndex == 0 && !args_.statsFile.empty()) {
++        gReadyWorkers.store(0, std::memory_order_relaxed);
++        gCalls.store(0, std::memory_order_relaxed);
++        gSuccess.store(0, std::memory_order_relaxed);
++        gErrors.store(0, std::memory_order_relaxed);
++        gBytes.store(0, std::memory_order_relaxed);
++        gTotalLatencyUs.store(0, std::memory_order_relaxed);
++        gActiveCalls.store(0, std::memory_order_relaxed);
++        gMaxInflight.store(0, std::memory_order_relaxed);
++        gLoadStartedNs.store(0, std::memory_order_relaxed);
++        gNextReportNs.store(0, std::memory_order_relaxed);
++    }
+     barrier.Wait();
+-    if (threadIndex == 0 && !args_.readyFile.empty()) {
+-        std::ofstream ready(args_.readyFile, std::ios::out | std::ios::trunc);
+-        CHECK_FAIL_RETURN_STATUS(ready.is_open(), K_RUNTIME_ERROR, "Cannot open ready_file: " + args_.readyFile);
+-        ready << "active_calls=" << args_.clientNum * args_.threadNum
+-              << " duration_seconds=" << args_.durationSeconds << std::endl;
++    uint64_t const totalWorkers = args_.clientNum * args_.threadNum;
++    if (threadIndex == 0) {
++        RETURN_IF_NOT_OK(WriteTextFile(args_.preparedFile,
++            "prepared_workers=" + std::to_string(totalWorkers)
++                + " duration_seconds=" + std::to_string(args_.durationSeconds)));
+     }
++    WaitForStartFile(args_.startFile);
++
+     CHECK_FAIL_RETURN_STATUS(!clients_.empty(), K_RUNTIME_ERROR, "KV client is not initialized");
+     auto clientIndex = threadIndex / args_.threadNum;
+     CHECK_FAIL_RETURN_STATUS(clientIndex < clients_.size(), K_RUNTIME_ERROR, "client index out of range");
+     auto &client = *clients_[clientIndex];
+ 
++    if (!args_.statsFile.empty()) {
++        CHECK_FAIL_RETURN_STATUS(args_.batchNum == 1, K_INVALID,
++            "stats_file requires batch_num=1 for exact RPC accounting");
++        CHECK_FAIL_RETURN_STATUS(perThreadKeys_[threadIndex].size() == 1, K_INVALID,
++            "stats_file requires exactly one fixed key per worker for exact RPC accounting");
++    }
++
++    int64_t expectedStart = 0;
++    int64_t const nowNs = SteadyNowNs();
++    if (gLoadStartedNs.compare_exchange_strong(expectedStart, nowNs, std::memory_order_relaxed)) {
++        gNextReportNs.store(nowNs, std::memory_order_relaxed);
++    }
++    uint64_t const readyWorkers = gReadyWorkers.fetch_add(1, std::memory_order_relaxed) + 1;
++    if (readyWorkers == totalWorkers) {
++        RETURN_IF_NOT_OK(WriteTextFile(args_.readyFile,
++            "ready_workers=" + std::to_string(totalWorkers)
++                + " duration_seconds=" + std::to_string(args_.durationSeconds)));
++    }
++
++    uint64_t valueSize = 1;
++    RETURN_IF_NOT_OK(StringToBytes(args_.keySize, valueSize));
+     auto const started = std::chrono::steady_clock::now();
+     uint64_t accumulatedCost = 0;
+     do {
++        uint64_t const activeCalls = gActiveCalls.fetch_add(1, std::memory_order_relaxed) + 1;
++        UpdateMaximum(gMaxInflight, activeCalls);
++        auto const callStarted = std::chrono::steady_clock::now();
+         Status rc = Status::OK();
+         if (args_.action == "set" || args_.action == "prefill") {
+             rc = Set(client, threadIndex);
+@@ -236,12 +378,29 @@ Status KVBench::Run(uint64_t threadIndex, Barrier &barrier)
+         } else if (args_.action == "del") {
+             rc = Del(client, threadIndex);
+         } else {
++            gActiveCalls.fetch_sub(1, std::memory_order_relaxed);
+             RETURN_STATUS(K_INVALID, "unknown action" + args_.action);
+         }
++        uint64_t const latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(
++            std::chrono::steady_clock::now() - callStarted)
++                                       .count();
++        gActiveCalls.fetch_sub(1, std::memory_order_relaxed);
++        gCalls.fetch_add(1, std::memory_order_relaxed);
++        gTotalLatencyUs.fetch_add(latencyUs, std::memory_order_relaxed);
++        if (rc.IsOk()) {
++            gSuccess.fetch_add(1, std::memory_order_relaxed);
++            gBytes.fetch_add(valueSize, std::memory_order_relaxed);
++        } else {
++            gErrors.fetch_add(1, std::memory_order_relaxed);
++        }
++        MaybeWriteStats(args_, false);
+         RETURN_IF_NOT_OK(rc);
+         accumulatedCost += perThreadCost_[threadIndex];
+     } while (args_.durationSeconds > 0
+              && std::chrono::steady_clock::now() - started < std::chrono::seconds(args_.durationSeconds));
+     perThreadCost_[threadIndex] = accumulatedCost;
++    if (threadIndex == 0) {
++        MaybeWriteStats(args_, true);
++    }
+     return Status::OK();
+ }
