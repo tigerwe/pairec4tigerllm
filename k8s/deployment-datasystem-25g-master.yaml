@@ -1,0 +1,147 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datasystem-25g-master
+  namespace: pairec
+  labels:
+    app: datasystem-25g-master
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: datasystem-25g-master
+  template:
+    metadata:
+      labels:
+        app: datasystem-25g-master
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeName: master
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: datasystem-worker
+          image: docker.io/library/zcx-pairec-image:v1.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DS_WORKER_ADDRESS
+              value: "192.168.100.12:18482"
+            - name: ETCD_ADDRESS
+              value: "141.61.91.189:12379"
+            - name: CLUSTER_NAME
+              value: "pairec-25g"
+            - name: HOST_ID
+              value: "192.168.100.12"
+            - name: HOST_ID_ENV_NAME
+              value: "PAIREC_DS_HOST_ID"
+            - name: SHARED_MEMORY_SIZE_MB
+              value: "5120"
+            - name: ENABLE_WORKER_WORKER_BATCH_GET
+              value: "false"
+            - name: LD_PRELOAD
+              value: ""
+            - name: DS_WORKER_BIN
+              value: ""
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              unset LD_PRELOAD
+
+              : "${DS_WORKER_ADDRESS:?DS_WORKER_ADDRESS is required}"
+              : "${ETCD_ADDRESS:?ETCD_ADDRESS is required}"
+              export PAIREC_DS_HOST_ID="${HOST_ID}"
+              DS_LOG_DIR=/tmp/datasystem-25g-master/log
+
+              DS_HOST="${DS_WORKER_ADDRESS%:*}"
+              DS_PORT="${DS_WORKER_ADDRESS##*:}"
+              python3 - "$DS_HOST" <<'PY'
+              import socket
+              import sys
+
+              address = sys.argv[1]
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              try:
+                  sock.bind((address, 0))
+              except OSError as exc:
+                  raise SystemExit(
+                      f"ERROR: cannot bind the 25G address {address}: {exc}"
+                  ) from exc
+              finally:
+                  sock.close()
+              PY
+
+              if [ -n "${DS_WORKER_BIN:-}" ] && [ ! -x "$DS_WORKER_BIN" ]; then
+                DS_WORKER_BIN=""
+              fi
+              if [ -z "${DS_WORKER_BIN:-}" ]; then
+                DS_WORKER_BIN="$(command -v datasystem_worker 2>/dev/null || true)"
+              fi
+              if [ -z "${DS_WORKER_BIN:-}" ]; then
+                DS_WORKER_BIN="$(find /usr/local /usr /opt /root \
+                  -path '*datasystem*' -name datasystem_worker -type f \
+                  2>/dev/null | head -1 || true)"
+              fi
+              if [ -n "${DS_WORKER_BIN:-}" ] && [ ! -x "$DS_WORKER_BIN" ]; then
+                chmod +x "$DS_WORKER_BIN" 2>/dev/null || true
+              fi
+              if [ ! -x "${DS_WORKER_BIN:-}" ]; then
+                echo "ERROR: datasystem_worker was not found or is not executable" >&2
+                exit 1
+              fi
+
+              ETCD_HOST="${ETCD_ADDRESS%:*}"
+              ETCD_PORT="${ETCD_ADDRESS##*:}"
+              ETCD_READY=0
+              for _ in $(seq 1 60); do
+                if timeout 2 bash -c "</dev/tcp/${ETCD_HOST}/${ETCD_PORT}" 2>/dev/null; then
+                  ETCD_READY=1
+                  break
+                fi
+                sleep 1
+              done
+              if [ "$ETCD_READY" != "1" ]; then
+                echo "ERROR: etcd is not reachable: ${ETCD_ADDRESS}" >&2
+                exit 1
+              fi
+
+              mkdir -p "$DS_LOG_DIR"
+              echo "Starting isolated 25G DataSystem worker"
+              echo "worker=${DS_WORKER_ADDRESS} etcd=${ETCD_ADDRESS} cluster=${CLUSTER_NAME}"
+              exec "$DS_WORKER_BIN" \
+                --worker_address="${DS_WORKER_ADDRESS}" \
+                --etcd_address="${ETCD_ADDRESS}" \
+                --cluster_name="${CLUSTER_NAME}" \
+                --host_id_env_name="${HOST_ID_ENV_NAME}" \
+                --shared_memory_size_mb="${SHARED_MEMORY_SIZE_MB}" \
+                --enable_worker_worker_batch_get="${ENABLE_WORKER_WORKER_BATCH_GET}" \
+                --log_dir="$DS_LOG_DIR"
+          ports:
+            - name: ds-worker
+              containerPort: 18482
+              hostPort: 18482
+          readinessProbe:
+            tcpSocket:
+              host: 192.168.100.12
+              port: 18482
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 20
+          resources:
+            requests:
+              cpu: "1"
+              memory: "6Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 6Gi

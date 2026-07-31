@@ -112,7 +112,8 @@ log "DataSystem endpoint state from master"
     echo "SS_COMMAND=UNAVAILABLE"
   fi
   echo "-- local-worker-processes --"
-  pgrep -af datasystem_worker || echo "LOCAL_DATASYSTEM_WORKER_COUNT=0"
+  pgrep -af '(^|[ /])datasystem_worker([ ]|$)' \
+    || echo "LOCAL_DATASYSTEM_WORKER_COUNT=0"
 } | tee "${OUT_DIR}/master-state.log"
 
 MASTER_TCP_STATUS="$(

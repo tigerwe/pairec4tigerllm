@@ -76,6 +76,35 @@ DATASYSTEM_DIR=/home/zcx/yuanrong-datasystem-v081 \
 
 脚本默认生成 `/home/zcx/bin/dsbench-v081-sustained`，并自动检查动态库、DataSystem `0.8.1` 版本以及全部持续压测参数。后续将该 wrapper 作为 `KVC_DSBENCH_CPP`，不要直接传裸二进制。
 
+### 恢复严格 25G Worker
+
+严格复现 `124.072ms` 基线时，inference 和背景压力必须共同使用
+`192.168.100.12:18482`，不能将背景压力单独切到管理网 Worker
+`141.61.91.189:18481`。如果 18482 没有监听，在 master 执行：
+
+```bash
+KVC_LOAD_HOST=root@141.61.91.188 \
+KVC_DSBENCH_CPP=/home/zcx/bin/dsbench-v081-sustained \
+  bash scripts/deploy_datasystem_25g_master.sh \
+  | tee /tmp/deploy-datasystem-25g-master.log
+```
+
+该脚本部署独立 `datasystem-25g-master`，固定绑定 master 的 25G 地址
+`192.168.100.12:18482`，使用共享 etcd 但独立 cluster
+`pairec-25g` 和独立 6Gi `/dev/shm`，不会修改现有 18481 pool。部署门禁包括：
+
+- master 确实持有 `192.168.100.12`；
+- etcd `141.61.91.189:12379` 可达且 18482 没有未知监听；
+- Pod rollout/ready、188 到 18482 TCP 和 1KB DataSystem Set/Delete 通过；
+- inference 的 `DATASYSTEM_HOST/PORT` 严格等于 `192.168.100.12/18482`。
+
+最终必须输出 `DATASYSTEM_25G_MASTER_DEPLOYMENT_OK`，之后才能继续生命周期或
+压力矩阵。删除该独立 Worker 的回滚命令为：
+
+```bash
+kubectl -n pairec delete deployment datasystem-25g-master
+```
+
 ### Worker RPC 可用性诊断
 
 如果 dsbench 在 `prefill` 或 `WarmUp` 阶段报告 `RPC_RECV_TIMEOUT`、
