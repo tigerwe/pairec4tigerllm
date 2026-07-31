@@ -273,8 +273,12 @@ wait_sustained_files() {
       return
     fi
     for pid in "${CHILD_PIDS[@]}"; do
-      if ! kill -0 "$pid" >/dev/null 2>&1; then
-        die "sustained dsbench child exited before ${description}"
+      local child_state
+      child_state="$(awk '{ print $3 }' "/proc/${pid}/stat" 2>/dev/null || true)"
+      if [ -z "$child_state" ] || [ "$child_state" = "Z" ]; then
+        local child_status=0
+        wait "$pid" || child_status="$?"
+        die "sustained dsbench child pid=${pid} exited with status=${child_status} before ${description}"
       fi
     done
     sleep 1

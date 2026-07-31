@@ -76,6 +76,36 @@ DATASYSTEM_DIR=/home/zcx/yuanrong-datasystem-v081 \
 
 脚本默认生成 `/home/zcx/bin/dsbench-v081-sustained`，并自动检查动态库、DataSystem `0.8.1` 版本以及全部持续压测参数。后续将该 wrapper 作为 `KVC_DSBENCH_CPP`，不要直接传裸二进制。
 
+### 持续 Get 生命周期诊断
+
+如果 dsbench 已输出 `prepared_workers=10`，放行后却报
+`Cannot get objects from worker`，先不要重跑压力矩阵。在 master 的当前仓库执行：
+
+```bash
+KVC_LOAD_HOST=root@141.61.91.188 \
+KVC_REMOTE_REPO=/home/zcx/workspace/pairec4tigerllm \
+KVC_DSBENCH_CPP=/home/zcx/bin/dsbench-v081-sustained \
+PRIME_REQUESTS=195 \
+  bash scripts/diagnose_datasystem_sustained_get_lifecycle.sh \
+  | tee /tmp/diagnose-datasystem-sustained-get.log
+```
+
+脚本会完成以下检查：
+
+1. 在 188 预填充 4 个 Get key 和 6 个 Set key，并等待 10 个 worker 进入 prepared；
+2. inference reset 前串行读取同一批 4 个 Get key；
+3. 重启 inference 并执行前台 prime；
+4. prime 后再次读取同一批 key；
+5. 两次读取均成功后才写入 `start_file`，放行 4 Get + 6 Set，并收集 ready、stats 和远端日志。
+
+`diagnosis.txt` 的 `failure_stage` 用于区分：
+
+- `before_reset`：dsbench 预填充或对象生命周期本身有问题；
+- `after_prime`：对象在 inference reset 或 prime 期间消失；
+- `PASS`：key 生命周期正常，问题位于持续子进程放行或后续压力阶段。
+
+脚本退出时会停止远端压力进程并清理本轮 key。
+
 ## 3. 校准 `3 Set + 2 Get`
 
 校准会对每个候选值重启 inference Pod、执行固定 prime，再发一次 replay。候选值首次命中后，还会重启并连续确认 3 轮；只有 3 轮都保持 `3 Set + 2 Get` 才会被选中。默认尝试 `PRIME_REQUESTS=192..200`：
