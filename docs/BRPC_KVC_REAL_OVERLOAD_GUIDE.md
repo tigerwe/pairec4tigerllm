@@ -76,6 +76,31 @@ DATASYSTEM_DIR=/home/zcx/yuanrong-datasystem-v081 \
 
 脚本默认生成 `/home/zcx/bin/dsbench-v081-sustained`，并自动检查动态库、DataSystem `0.8.1` 版本以及全部持续压测参数。后续将该 wrapper 作为 `KVC_DSBENCH_CPP`，不要直接传裸二进制。
 
+### Worker RPC 可用性诊断
+
+如果 dsbench 在 `prefill` 或 `WarmUp` 阶段报告 `RPC_RECV_TIMEOUT`、
+`RPC unavailable`，说明尚未进入 key 生命周期测试。先在 master 执行：
+
+```bash
+KVC_LOAD_HOST=root@141.61.91.188 \
+KVC_DS_ENDPOINT=192.168.100.12:18482 \
+KVC_DSBENCH_CPP=/home/zcx/bin/dsbench-v081-sustained \
+  bash scripts/diagnose_datasystem_worker_rpc.sh \
+  | tee /tmp/diagnose-datasystem-worker-rpc.log
+```
+
+脚本检查 188 到 Worker 的 TCP、残留压力进程和 PID 文件、master 监听、
+DataSystem Pod/日志，并执行一次 1KB Set/Delete smoke。它不会重启 Worker、
+inference 或批量终止进程。最终分类：
+
+- `ENDPOINT_TCP_UNREACHABLE_FROM_LOAD_HOST`：188 无法建立到 Worker 的 TCP；
+- `REMOTE_DSBENCH_UNAVAILABLE`：远端 0.8.1 wrapper 缺失或不可执行；
+- `DATASYSTEM_RPC_UNAVAILABLE`：TCP 正常，但最小 Set RPC 失败；
+- `DATASYSTEM_RPC_SMOKE_OK`：Worker RPC 已恢复，可继续 Get 生命周期诊断。
+
+完整证据位于输出目录的 `diagnosis.txt`、`remote-state.log`、
+`master-state.log`、`kubernetes-worker-logs.log` 和 `rpc-set-smoke.log`。
+
 ### 持续 Get 生命周期诊断
 
 如果 dsbench 已输出 `prepared_workers=10`，放行后却报
