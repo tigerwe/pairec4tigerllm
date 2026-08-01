@@ -49,8 +49,11 @@ ETCD_PORT="${ETCD_ENDPOINT##*:}"
 
 log "25G host preflight"
 ip -o address show | tee /tmp/pairec-datasystem-25g-addresses.log
-ip -o address show | grep -Fq " ${MASTER_25G_IP}/" \
-  || die "master does not own 25G address ${MASTER_25G_IP}"
+if ! ip -o address show | grep -Fq " ${MASTER_25G_IP}/"; then
+  echo "Run the non-mutating link diagnosis first:" >&2
+  echo "  APPLY=0 bash scripts/restore_strict_25g_link.sh" >&2
+  die "master does not own 25G address ${MASTER_25G_IP}"
+fi
 
 if ! timeout 3 bash -c "</dev/tcp/${ETCD_HOST}/${ETCD_PORT}" 2>/dev/null; then
   die "etcd is not reachable: ${ETCD_ENDPOINT}"

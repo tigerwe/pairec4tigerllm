@@ -83,6 +83,22 @@ DATASYSTEM_DIR=/home/zcx/yuanrong-datasystem-v081 \
 `141.61.91.189:18481`。如果 18482 没有监听，在 master 执行：
 
 ```bash
+APPLY=0 bash scripts/restore_strict_25g_link.sh
+```
+
+默认只检查 master/worker1 的 `enp41s0f1`、carrier、速率、固定地址和双向
+ping，不修改网络。如果分类为 `STRICT_25G_LINK_NOT_CONFIGURED`，且两端均确认
+存在 `enp41s0f1`，再显式恢复原实验地址：
+
+```bash
+APPLY=1 bash scripts/restore_strict_25g_link.sh
+```
+
+必须看到 `STRICT_25G_LINK_RESTORED` 或 `STRICT_25G_LINK_READY`。该脚本只将
+接口置为 UP 并恢复 `192.168.100.12/24`、`192.168.100.11/24`，不会修改 MTU、
+默认路由、etcd 或 Kubernetes。之后部署 Worker：
+
+```bash
 KVC_LOAD_HOST=root@141.61.91.188 \
 KVC_DSBENCH_CPP=/home/zcx/bin/dsbench-v081-sustained \
   bash scripts/deploy_datasystem_25g_master.sh \
