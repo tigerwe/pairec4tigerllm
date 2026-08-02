@@ -235,6 +235,19 @@ CASES=brpc-c100x2 REPEATS=3 \
   bash scripts/benchmark_brpc_kvc_pressure_matrix.sh
 ```
 
+若独立压力端点已经达到单机最强有效吞吐但前台BRPC仍无明显变化，可以单独运行
+shared-service档位。该档位把100KB Health压力发送到真实推理服务 `18100`，并把
+CPU限流统计切换到inference Pod；它衡量的是BRPC服务队列竞争，不再是纯粹的
+独立端点网络竞争，结果必须单独标记：
+
+```bash
+CASES=brpc-shared-c10 REPEATS=3 \
+  bash scripts/benchmark_brpc_kvc_pressure_matrix.sh
+```
+
+只有c10保持严格 `3 Set + 2 Get`、restart/crash为0且server-other没有失控后，
+才继续 `brpc-shared-c100`。
+
 再单独调 KVC。两档均为 `Set:Get=3:2` 的 mixed 压力：
 
 ```bash
