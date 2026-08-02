@@ -31,8 +31,11 @@ bash scripts/k8s_apply_brpc_pressure_target_188.sh
 ```
 
 压力目标使用真实 BRPC Health、protobuf 和 TCP，但不初始化 TRT-LLM。这样 BRPC 压力主要竞争 25G 网卡和网络栈，不直接占用推荐服务的 TensorRT-LLM Executor。
-压力 Pod 固定申请 4 CPU、上限 8 CPU，避免单个压力服务先被 2 CPU cgroup
-限流而无法提高实际线速；apply 脚本会输出资源配置和生效的 cgroup quota。
+压力 Pod 固定申请 8 CPU、上限 16 CPU。8 CPU 实测在约 21.4k QPS、
+17.5Gbps 应用层载荷下仍有 `138/888=15.5%` 的 CFS period 发生限流，
+因此继续提高上限以避免压力服务先于 25G 链路成为瓶颈。apply 脚本会输出资源配置、
+生效的 cgroup quota 和累计 `cpu.stat`；正式 benchmark 还会按轮记录前后差值，
+汇总 `brpc_gbps` 与 `cpu_thr_pct`。
 
 ## 2. 构建持续模式 dsbench
 

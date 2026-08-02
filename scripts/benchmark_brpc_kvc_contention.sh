@@ -58,6 +58,8 @@ NAMESPACE="${NAMESPACE:-pairec}"
 PAIREC_TARGET="${PAIREC_TARGET:-deploy/pairec}"
 BRPC_TARGET="${BRPC_TARGET:-deployment/inference-brpc-trtllm}"
 BRPC_CONTAINER="${BRPC_CONTAINER:-brpc-inference}"
+BRPC_LOAD_POD_SELECTOR="${BRPC_LOAD_POD_SELECTOR:-app=brpc-pressure-target}"
+BRPC_LOAD_CONTAINER="${BRPC_LOAD_CONTAINER:-brpc-pressure-target}"
 NETWORK_INTERFACE="${NETWORK_INTERFACE:-enp41s0f1}"
 REMOTE_NETWORK_INTERFACE="${REMOTE_NETWORK_INTERFACE:-enp41s0f1}"
 
@@ -194,6 +196,30 @@ capture_inference_state() {
     -o jsonpath='{.status.containerStatuses[?(@.name=="brpc-inference")].restartCount}' \
     >"${round_dir}/inference-restarts.${phase}"
   printf '\n' >>"${round_dir}/inference-restarts.${phase}"
+}
+
+capture_brpc_pressure_cpu_stat() {
+  local round_dir="$1"
+  local phase="$2"
+  if ! mode_has_brpc; then
+    return
+  fi
+  local pod
+  pod="$(kubectl -n "$NAMESPACE" get pod -l "$BRPC_LOAD_POD_SELECTOR" \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1].metadata.name}')"
+  [ -n "$pod" ] || die "BRPC pressure target pod not found: ${BRPC_LOAD_POD_SELECTOR}"
+  printf '%s\n' "$pod" >"${round_dir}/brpc-pressure-pod.${phase}"
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$BRPC_LOAD_CONTAINER" -- \
+    env -u LD_PRELOAD sh -c '
+      if test -r /sys/fs/cgroup/cpu.stat; then
+        cat /sys/fs/cgroup/cpu.stat
+      elif test -r /sys/fs/cgroup/cpu/cpu.stat; then
+        cat /sys/fs/cgroup/cpu/cpu.stat
+      else
+        exit 1
+      fi
+    ' >"${round_dir}/brpc-pressure-cpu-stat.${phase}"
 }
 
 build_brpc_probe() {
@@ -537,6 +563,41 @@ def read_key_values(path):
     except FileNotFoundError:
         return {}
 
+def read_cpu_stat(path):
+    try:
+        values = {}
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) == 2:
+                    values[parts[0]] = parts[1]
+        return values
+    except FileNotFoundError:
+        return {}
+
+def cpu_stat_delta(before_path, after_path):
+    before = read_cpu_stat(before_path)
+    after = read_cpu_stat(after_path)
+    periods = max(0, int(number(after.get("nr_periods"))) - int(number(before.get("nr_periods"))))
+    throttled = max(0, int(number(after.get("nr_throttled"))) - int(number(before.get("nr_throttled"))))
+    if "throttled_usec" in after:
+        throttled_ms = max(
+            0.0,
+            number(after.get("throttled_usec")) - number(before.get("throttled_usec")),
+        ) / 1000.0
+    else:
+        throttled_ms = max(
+            0.0,
+            number(after.get("throttled_time")) - number(before.get("throttled_time")),
+        ) / 1_000_000.0
+    return {
+        "available": bool(before) and bool(after),
+        "periods": periods,
+        "throttled_periods": throttled,
+        "throttled_period_pct": 0.0 if periods == 0 else throttled / periods * 100.0,
+        "throttled_ms": throttled_ms,
+    }
+
 def percentile(values, q):
     values = sorted(values)
     if not values:
@@ -578,6 +639,10 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
     kvc_pressure_ready = read_key_values(os.path.join(round_dir, "kvc-pressure-ready.txt"))
     brpc_pressure = read_last_json(os.path.join(round_dir, "brpc-pressure-stats.jsonl"))
     brpc_pressure_ready = read_key_values(os.path.join(round_dir, "brpc-pressure.ready"))
+    brpc_pressure_cpu = cpu_stat_delta(
+        os.path.join(round_dir, "brpc-pressure-cpu-stat.before"),
+        os.path.join(round_dir, "brpc-pressure-cpu-stat.after"),
+    )
     local_rx_delta = max(0, read_int(os.path.join(round_dir, "local-rx.after")) - read_int(os.path.join(round_dir, "local-rx.before")))
     local_tx_delta = max(0, read_int(os.path.join(round_dir, "local-tx.after")) - read_int(os.path.join(round_dir, "local-tx.before")))
     remote_rx_delta = max(0, read_int(os.path.join(round_dir, "remote-rx.after")) - read_int(os.path.join(round_dir, "remote-rx.before")))
@@ -726,6 +791,11 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
         "brpc_pressure_qps": number(brpc_pressure.get("qps")),
         "brpc_pressure_gbps": number(brpc_pressure.get("gbps")),
         "brpc_pressure_max_active": brpc_pressure_max_active,
+        "brpc_pressure_cpu_stat_available": brpc_pressure_cpu["available"],
+        "brpc_pressure_cpu_periods": brpc_pressure_cpu["periods"],
+        "brpc_pressure_cpu_throttled_periods": brpc_pressure_cpu["throttled_periods"],
+        "brpc_pressure_cpu_throttled_period_pct": brpc_pressure_cpu["throttled_period_pct"],
+        "brpc_pressure_cpu_throttled_ms": brpc_pressure_cpu["throttled_ms"],
         "kvc_pressure_ok": kvc_pressure_ok,
         "kvc_pressure_calls": kvc_pressure_calls,
         "kvc_pressure_errors": kvc_pressure_errors,
@@ -747,6 +817,13 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
     })
 
 valid = [row for row in rows if row["valid"]]
+brpc_cpu_periods = sum(row["brpc_pressure_cpu_periods"] for row in valid)
+brpc_cpu_throttled_periods = sum(row["brpc_pressure_cpu_throttled_periods"] for row in valid)
+brpc_cpu_throttled_period_pct = (
+    0.0 if brpc_cpu_periods == 0
+    else brpc_cpu_throttled_periods / brpc_cpu_periods * 100.0
+)
+brpc_cpu_throttled_ms = sum(row["brpc_pressure_cpu_throttled_ms"] for row in valid)
 metrics = {}
 for key in ("e2e_ms", "server_ms", "brpc_ms", "kvc_ms", "offload_ms", "onboard_ms", "server_other_ms", "outer_ms"):
     values = [row[key] for row in valid]
@@ -771,6 +848,12 @@ result = {
     "brpc_pressure_required": brpc_pressure_required,
     "kvc_pressure_required": kvc_pressure_required,
     "expected_pressure_active": expected_pressure_active,
+    "brpc_pressure_cpu": {
+        "periods": brpc_cpu_periods,
+        "throttled_periods": brpc_cpu_throttled_periods,
+        "throttled_period_pct": brpc_cpu_throttled_period_pct,
+        "throttled_ms": brpc_cpu_throttled_ms,
+    },
     "rows": rows,
     "metrics": metrics,
 }
@@ -785,13 +868,14 @@ if pressure_required:
         f"expected_set_inflight={set_clients if mode in {'kvc-set', 'kvc-mixed', 'combined'} else 0} "
         f"expected_brpc_active={brpc_load_concurrency if brpc_pressure_required else 0}"
     )
-print("  round valid e2e_ms server_ms brpc_ms kvc_ms offloads onboards server_other_ms outer_ms brpc_qps brpc_active get_qps get_inflight set_qps set_inflight restarts crashes")
+print("  round valid e2e_ms server_ms brpc_ms kvc_ms offloads onboards server_other_ms outer_ms brpc_qps brpc_gbps brpc_active cpu_thr_pct get_qps get_inflight set_qps set_inflight restarts crashes")
 for row in rows:
     print(
         f"  {row['round']:>5} {str(row['valid']):>5} {row['e2e_ms']:>7.3f} {row['server_ms']:>9.3f} "
         f"{row['brpc_ms']:>7.3f} {row['kvc_ms']:>6.3f} {row['offload_count']:>8} "
         f"{row['onboard_count']:>8} {row['server_other_ms']:>15.3f} {row['outer_ms']:>8.3f} "
-        f"{row['brpc_pressure_qps']:>9.3f} {row['brpc_pressure_max_active']:>11} "
+        f"{row['brpc_pressure_qps']:>9.3f} {row['brpc_pressure_gbps']:>10.3f} "
+        f"{row['brpc_pressure_max_active']:>11} {row['brpc_pressure_cpu_throttled_period_pct']:>11.3f} "
         f"{row['kvc_get_qps']:>7.3f} {row['kvc_get_max_inflight']:>12} "
         f"{row['kvc_set_qps']:>7.3f} {row['kvc_set_max_inflight']:>12} "
         f"{row['restart_delta']:>8} {row['crash_markers']:>7}"
@@ -803,6 +887,11 @@ if valid:
     e2e_avg = metrics["e2e_ms"]["avg"]
     print(f"    brpc_e2e_pct={metrics['brpc_ms']['avg'] / e2e_avg * 100:.2f}%")
     print(f"    kvc_e2e_pct={metrics['kvc_ms']['avg'] / e2e_avg * 100:.2f}%")
+    if brpc_pressure_required:
+        print(f"    brpc_pressure_qps={statistics.mean(row['brpc_pressure_qps'] for row in valid):.3f}")
+        print(f"    brpc_pressure_gbps={statistics.mean(row['brpc_pressure_gbps'] for row in valid):.3f}")
+        print(f"    brpc_pressure_cpu_throttled_period_pct={brpc_cpu_throttled_period_pct:.3f}%")
+        print(f"    brpc_pressure_cpu_throttled_ms={brpc_cpu_throttled_ms:.3f}")
 print(f"  result_json={result_path}")
 raise SystemExit(0 if status == "PASS" else 1)
 PY
@@ -885,6 +974,7 @@ for round in $(seq 1 "$REPEATS"); do
   fi
 
   capture_inference_state "$round_dir" before
+  capture_brpc_pressure_cpu_stat "$round_dir" before
 
   read_counter "$NETWORK_INTERFACE" rx_bytes >"${round_dir}/local-rx.before"
   read_counter "$NETWORK_INTERFACE" tx_bytes >"${round_dir}/local-tx.before"
@@ -912,6 +1002,7 @@ for round in $(seq 1 "$REPEATS"); do
   echo "$replay_code" >"${round_dir}/replay.exit_code"
   [ "$replay_code" -eq 0 ] || overall_code=1
   capture_inference_state "$round_dir" after
+  capture_brpc_pressure_cpu_stat "$round_dir" after
 
   read_counter "$NETWORK_INTERFACE" rx_bytes >"${round_dir}/local-rx.after"
   read_counter "$NETWORK_INTERFACE" tx_bytes >"${round_dir}/local-tx.after"

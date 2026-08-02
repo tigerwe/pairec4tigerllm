@@ -39,10 +39,10 @@ spec:
               name: brpc-pressure
           resources:
             requests:
-              cpu: "4"
+              cpu: "8"
               memory: "1Gi"
             limits:
-              cpu: "8"
+              cpu: "16"
               memory: "4Gi"
           volumeMounts:
             - name: data

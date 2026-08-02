@@ -36,6 +36,13 @@ kubectl -n "$NAMESPACE" exec "$POD" -- bash -lc '
     echo -n "cpu.cfs_period_us="
     cat /sys/fs/cgroup/cpu/cpu.cfs_period_us
   fi
+  if test -f /sys/fs/cgroup/cpu.stat; then
+    echo "cpu.stat:"
+    cat /sys/fs/cgroup/cpu.stat
+  elif test -f /sys/fs/cgroup/cpu/cpu.stat; then
+    echo "cpu.stat:"
+    cat /sys/fs/cgroup/cpu/cpu.stat
+  fi
 '
 
 GOPROXY="${GOPROXY:-off}" GOSUMDB="${GOSUMDB:-off}" \
