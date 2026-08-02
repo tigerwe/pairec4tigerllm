@@ -46,15 +46,10 @@ func main() {
 	statsIntervalMs := flag.Int("stats_interval_ms", getenvInt("STATS_INTERVAL_MS", 1000), "pressure statistics interval in milliseconds")
 	flag.Parse()
 
-	client, err := recall.NewBRPCRecommendClient(
-		*endpoint,
-		*service,
-		time.Duration(*timeoutMs)*time.Millisecond,
-		*maxRetries,
-	)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "create client failed: %v\n", err)
-		os.Exit(1)
+	endpoints := splitEndpoints(*endpoint)
+	if len(endpoints) == 0 {
+		fmt.Fprintln(os.Stderr, "at least one endpoint is required")
+		os.Exit(2)
 	}
 
 	switch *method {
@@ -71,10 +66,24 @@ func main() {
 		var readyOnce sync.Once
 		var pressure pressureCounters
 		var statsStop chan struct{}
+		clients := make([]*recall.BRPCRecommendClient, len(endpoints))
+		for index, target := range endpoints {
+			client, err := recall.NewBRPCRecommendClient(
+				target,
+				*service,
+				time.Duration(*timeoutMs)*time.Millisecond,
+				*maxRetries,
+			)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "create client failed endpoint=%s: %v\n", target, err)
+				os.Exit(1)
+			}
+			clients[index] = client
+		}
 		sessions := make([]*recall.BRPCRecommendSession, workerCount)
 		if *reuseConnections {
 			for worker := range sessions {
-				sessions[worker] = client.NewSession()
+				sessions[worker] = clients[worker%len(clients)].NewSession()
 				defer sessions[worker].Close()
 			}
 		}
@@ -89,6 +98,7 @@ func main() {
 				totalStart, *payloadBytes, &pressure, &active, &maxActive, statsStop)
 		}
 		results := runIndexedWithWorker(*requests, *concurrency, *qps, func(worker, index int) (result probeResult) {
+			target := endpoints[worker%len(endpoints)]
 			callStarted := time.Now()
 			defer func() {
 				atomic.AddInt64(&pressure.calls, 1)
@@ -104,8 +114,8 @@ func main() {
 			updateAtomicMaximum(&maxActive, currentActive)
 			if currentActive >= int64(workerCount) && *readyFile != "" {
 				readyOnce.Do(func() {
-					content := fmt.Sprintf("workers=%d max_active=%d payload_bytes=%d reuse_connections=%t\n",
-						workerCount, atomic.LoadInt64(&maxActive), *payloadBytes, *reuseConnections)
+					content := fmt.Sprintf("workers=%d max_active=%d endpoints=%d payload_bytes=%d reuse_connections=%t\n",
+						workerCount, atomic.LoadInt64(&maxActive), len(endpoints), *payloadBytes, *reuseConnections)
 					if err := os.WriteFile(*readyFile, []byte(content), 0o644); err != nil {
 						fmt.Fprintf(os.Stderr, "write ready file failed: %v\n", err)
 					}
@@ -119,24 +129,26 @@ func main() {
 				cancel()
 				elapsed := time.Since(started).Milliseconds()
 				if err != nil {
-					return probeResult{index: index, latencyMs: elapsed, err: err}
+					return probeResult{index: index, endpoint: target, latencyMs: elapsed, err: err}
 				}
 				return probeResult{
 					index:     index,
+					endpoint:  target,
 					latencyMs: elapsed,
 					code:      resp.Code,
 					status:    resp.Status,
 					backend:   resp.Backend,
 				}
 			}
-			resp, err := client.HealthCheckWithPayload(ctx, *payloadBytes)
+			resp, err := clients[worker%len(clients)].HealthCheckWithPayload(ctx, *payloadBytes)
 			cancel()
 			elapsed := time.Since(started).Milliseconds()
 			if err != nil {
-				return probeResult{index: index, latencyMs: elapsed, err: err}
+				return probeResult{index: index, endpoint: target, latencyMs: elapsed, err: err}
 			}
 			return probeResult{
 				index:     index,
+				endpoint:  target,
 				latencyMs: elapsed,
 				code:      resp.Code,
 				status:    resp.Status,
@@ -150,13 +162,13 @@ func main() {
 		for _, result := range results {
 			if result.err != nil {
 				fmt.Fprintf(os.Stderr, "health failed index=%d endpoint=%s payload_bytes=%d latency_ms=%d error=%v\n",
-					result.index, *endpoint, *payloadBytes, result.latencyMs, result.err)
+					result.index, result.endpoint, *payloadBytes, result.latencyMs, result.err)
 				continue
 			}
 			okCount++
 			if !*quiet {
 				fmt.Printf("health ok index=%d endpoint=%s payload_bytes=%d latency_ms=%d code=%d status=%s backend=%s\n",
-					result.index, *endpoint, *payloadBytes, result.latencyMs, result.code, result.status, result.backend)
+					result.index, result.endpoint, *payloadBytes, result.latencyMs, result.code, result.status, result.backend)
 			}
 		}
 		totalElapsed := time.Since(totalStart).Milliseconds()
@@ -166,6 +178,20 @@ func main() {
 			os.Exit(1)
 		}
 	case "recommend":
+		if len(endpoints) != 1 {
+			fmt.Fprintln(os.Stderr, "recommend method requires exactly one endpoint")
+			os.Exit(2)
+		}
+		client, err := recall.NewBRPCRecommendClient(
+			endpoints[0],
+			*service,
+			time.Duration(*timeoutMs)*time.Millisecond,
+			*maxRetries,
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create client failed endpoint=%s: %v\n", endpoints[0], err)
+			os.Exit(1)
+		}
 		if *requests < 1 {
 			fmt.Fprintln(os.Stderr, "requests must be positive")
 			os.Exit(2)
@@ -238,6 +264,7 @@ func main() {
 
 type probeResult struct {
 	index       int
+	endpoint    string
 	requestID   string
 	latencyMs   int64
 	err         error
@@ -247,6 +274,17 @@ type probeResult struct {
 	userID      string
 	items       int
 	inferenceMs float64
+}
+
+func splitEndpoints(value string) []string {
+	var endpoints []string
+	for _, endpoint := range strings.Split(value, ",") {
+		endpoint = strings.TrimSpace(endpoint)
+		if endpoint != "" {
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	return endpoints
 }
 
 type pressureCounters struct {

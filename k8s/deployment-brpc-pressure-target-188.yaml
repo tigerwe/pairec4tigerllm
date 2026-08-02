@@ -28,15 +28,28 @@ spec:
             - name: LD_PRELOAD
               value: ""
           command:
-            - /opt/pairec-brpc/bin/brpc_inference_server
+            - /bin/bash
+            - -c
           args:
-            - --listen_port=18101
-            - --backend=semantic_map
-            - --semantic_map_path=/app/data/tenrec/processed/semantic_id_map.json
+            - |
+              set -uo pipefail
+              server=/opt/pairec-brpc/bin/brpc_inference_server
+              semantic_map=/app/data/tenrec/processed/semantic_id_map.json
+              "$server" --listen_port=18101 --backend=semantic_map --semantic_map_path="$semantic_map" &
+              pid1=$!
+              "$server" --listen_port=18102 --backend=semantic_map --semantic_map_path="$semantic_map" &
+              pid2=$!
+              trap 'kill -TERM "$pid1" "$pid2" 2>/dev/null || true; wait "$pid1" "$pid2" 2>/dev/null || true' EXIT INT TERM
+              wait -n "$pid1" "$pid2"
+              status=$?
+              exit "$status"
           ports:
             - containerPort: 18101
               hostPort: 18101
-              name: brpc-pressure
+              name: brpc-pressure-1
+            - containerPort: 18102
+              hostPort: 18102
+              name: brpc-pressure-2
           resources:
             requests:
               cpu: "8"
@@ -55,7 +68,7 @@ spec:
             failureThreshold: 60
           readinessProbe:
             tcpSocket:
-              port: 18101
+              port: 18102
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 6

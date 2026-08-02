@@ -27,10 +27,14 @@ bash scripts/k8s_apply_brpc_pressure_target_188.sh
 
 ```text
 正式推荐: 192.168.100.11:18100
-压力目标: 192.168.100.11:18101
+压力目标1: 192.168.100.11:18101
+压力目标2: 192.168.100.11:18102
 ```
 
-压力目标使用真实 BRPC Health、protobuf 和 TCP，但不初始化 TRT-LLM。这样 BRPC 压力主要竞争 25G 网卡和网络栈，不直接占用推荐服务的 TensorRT-LLM Executor。
+两个压力目标进程位于同一个 Pod 和同一个 CPU cgroup，使用真实 BRPC Health、
+protobuf 和 TCP，但不初始化 TRT-LLM。这样可以绕过单个 BRPC 进程的吞吐拐点，
+同时保持总 CPU 配额不变；压力仍主要竞争25G网卡和网络栈，不直接占用推荐服务的
+TensorRT-LLM Executor。
 压力 Pod 固定申请 8 CPU、上限 16 CPU。8 CPU 实测在约 21.4k QPS、
 17.5Gbps 应用层载荷下仍有 `138/888=15.5%` 的 CFS period 发生限流，
 因此继续提高上限以避免压力服务先于 25G 链路成为瓶颈。apply 脚本会输出资源配置、
@@ -218,6 +222,16 @@ CASES=baseline REPEATS=10 \
 ```bash
 CASES=brpc-c10,brpc-c100,brpc-c1000 REPEATS=10 \
   BRPC_LOAD_ENDPOINT=192.168.100.11:18101 \
+  bash scripts/benchmark_brpc_kvc_pressure_matrix.sh
+```
+
+单进程 `c1000` 若比 `c100` 吞吐更低，不再继续增加单进程并发。改用双进程档位，
+总并发200会在两个端点间均分，每个压力进程保持100并发：
+
+```bash
+CASES=brpc-c100x2 REPEATS=3 \
+  BRPC_LOAD_ENDPOINT=192.168.100.11:18101 \
+  BRPC_LOAD_ENDPOINT_2=192.168.100.11:18102 \
   bash scripts/benchmark_brpc_kvc_pressure_matrix.sh
 ```
 

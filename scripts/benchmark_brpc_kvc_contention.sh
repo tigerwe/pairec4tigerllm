@@ -274,11 +274,13 @@ check_brpc_load_endpoint() {
     return
   fi
   log "Check BRPC pressure endpoint"
+  local endpoint_count
+  endpoint_count="$(awk -F, '{print NF}' <<<"$BRPC_LOAD_ENDPOINT")"
   "$BRPC_PROBE_BIN" \
     --endpoint="$BRPC_LOAD_ENDPOINT" \
     --method=health \
-    --requests=1 \
-    --concurrency=1 \
+    --requests="$endpoint_count" \
+    --concurrency="$endpoint_count" \
     --timeout_ms="$BRPC_LOAD_TIMEOUT_MS" \
     --max_retries=0 \
     >"${OUT_DIR}/brpc-pressure-endpoint-check.log" 2>&1 \

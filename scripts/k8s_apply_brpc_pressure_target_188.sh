@@ -4,7 +4,7 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-pairec}"
 MANIFEST="${MANIFEST:-k8s/deployment-brpc-pressure-target-188.yaml}"
 DEPLOYMENT="${DEPLOYMENT:-brpc-pressure-target}"
-ENDPOINT="${ENDPOINT:-192.168.100.11:18101}"
+ENDPOINT="${ENDPOINT:-192.168.100.11:18101,192.168.100.11:18102}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
 PROBE_BIN="${PROBE_BIN:-/tmp/probe-go-brpc-client}"
 
@@ -48,12 +48,13 @@ kubectl -n "$NAMESPACE" exec "$POD" -- bash -lc '
 GOPROXY="${GOPROXY:-off}" GOSUMDB="${GOSUMDB:-off}" \
   go build -mod=vendor -o "$PROBE_BIN" ./scripts/probe_go_brpc_client.go
 
+ENDPOINT_COUNT="$(awk -F, '{print NF}' <<<"$ENDPOINT")"
 "$PROBE_BIN" \
   --endpoint="$ENDPOINT" \
   --method=health \
-  --requests=1 \
-  --concurrency=1 \
+  --requests="$ENDPOINT_COUNT" \
+  --concurrency="$ENDPOINT_COUNT" \
   --timeout_ms=5000 \
   --max_retries=0
 
-echo "BRPC pressure target is ready: ${ENDPOINT}"
+echo "BRPC pressure targets are ready: ${ENDPOINT}"
