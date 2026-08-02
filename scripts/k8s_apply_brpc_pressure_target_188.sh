@@ -21,6 +21,23 @@ kubectl apply -f "$MANIFEST"
 kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout="$ROLLOUT_TIMEOUT"
 kubectl -n "$NAMESPACE" get pod -l "app=${DEPLOYMENT}" -o wide
 
+POD="$(kubectl -n "$NAMESPACE" get pod -l "app=${DEPLOYMENT}" \
+  -o jsonpath='{.items[0].metadata.name}')"
+[ -n "$POD" ] || die "pressure target pod was not found"
+kubectl -n "$NAMESPACE" get pod "$POD" \
+  -o jsonpath='requests={.spec.containers[0].resources.requests}{"\n"}limits={.spec.containers[0].resources.limits}{"\n"}'
+kubectl -n "$NAMESPACE" exec "$POD" -- bash -lc '
+  if test -f /sys/fs/cgroup/cpu.max; then
+    echo -n "cpu.max="
+    cat /sys/fs/cgroup/cpu.max
+  elif test -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us; then
+    echo -n "cpu.cfs_quota_us="
+    cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us
+    echo -n "cpu.cfs_period_us="
+    cat /sys/fs/cgroup/cpu/cpu.cfs_period_us
+  fi
+'
+
 GOPROXY="${GOPROXY:-off}" GOSUMDB="${GOSUMDB:-off}" \
   go build -mod=vendor -o "$PROBE_BIN" ./scripts/probe_go_brpc_client.go
 
