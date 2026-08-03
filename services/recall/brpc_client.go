@@ -97,6 +97,44 @@ func (c *BRPCRecommendClient) NewSession() *BRPCRecommendSession {
 	return &BRPCRecommendSession{client: c}
 }
 
+// Connect establishes the session TCP connection without sending an RPC. It
+// is used by synchronized probes that need to separate connection setup from
+// the measured request phase. Calling Connect on an established session is a
+// no-op.
+func (s *BRPCRecommendSession) Connect(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.conn != nil {
+		return nil
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < s.client.maxRetries; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, s.client.timeout)
+		var dialer net.Dialer
+		conn, err := dialer.DialContext(attemptCtx, "tcp", s.client.endpoint)
+		cancel()
+		if err == nil {
+			s.conn = conn
+			return nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if attempt < s.client.maxRetries-1 {
+			sleep := time.Duration(attempt+1) * brpcRetrySleepBase
+			select {
+			case <-time.After(sleep):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return fmt.Errorf("brpc preconnect failed after %d retries: %w", s.client.maxRetries, lastErr)
+}
+
 func (s *BRPCRecommendSession) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

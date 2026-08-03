@@ -87,6 +87,12 @@ func TestBRPCSessionReusesConnection(t *testing.T) {
 	}
 	session := client.NewSession()
 	defer session.Close()
+	connectCtx, connectCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := session.Connect(connectCtx); err != nil {
+		connectCancel()
+		t.Fatalf("preconnect: %v", err)
+	}
+	connectCancel()
 	for i := 0; i < 2; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		response, err := session.HealthCheckWithPayload(ctx, 102400)

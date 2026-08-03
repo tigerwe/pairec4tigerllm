@@ -47,6 +47,8 @@ func main() {
 	varyUserID := flag.Bool("vary_user_id", getenvBool("VARY_USER_ID", true), "append request index to synthetic user_id")
 	quiet := flag.Bool("quiet", getenvBool("QUIET", false), "suppress per-request success output")
 	reuseConnections := flag.Bool("reuse_connections", getenvBool("REUSE_CONNECTIONS", false), "reuse one brpc TCP connection per worker")
+	preconnect := flag.Bool("preconnect", getenvBool("PRECONNECT", false), "pre-establish one TCP session per Health worker, then synchronously release one measured request per connection")
+	preconnectHoldMs := flag.Int("preconnect_hold_ms", getenvInt("PRECONNECT_HOLD_MS", 0), "hold fully established Health sessions before request release for observation; excluded from request latency")
 	readyFile := flag.String("ready_file", getenv("READY_FILE", ""), "write worker concurrency evidence after the target is reached")
 	statsFile := flag.String("stats_file", getenv("STATS_FILE", ""), "append periodic pressure statistics as JSON lines")
 	statsIntervalMs := flag.Int("stats_interval_ms", getenvInt("STATS_INTERVAL_MS", 1000), "pressure statistics interval in milliseconds")
@@ -64,8 +66,25 @@ func main() {
 			fmt.Fprintln(os.Stderr, "requests must be positive")
 			os.Exit(2)
 		}
+		if *preconnect && *requests != *concurrency {
+			fmt.Fprintln(os.Stderr, "preconnect requires requests to equal concurrency so every connection carries exactly one measured request")
+			os.Exit(2)
+		}
+		if *preconnect && *qps != 0 {
+			fmt.Fprintln(os.Stderr, "preconnect requires qps=0 because the measured requests are synchronously released")
+			os.Exit(2)
+		}
+		if *preconnectHoldMs < 0 {
+			fmt.Fprintln(os.Stderr, "preconnect_hold_ms must not be negative")
+			os.Exit(2)
+		}
+		if !*preconnect && *preconnectHoldMs > 0 {
+			fmt.Fprintln(os.Stderr, "preconnect_hold_ms requires preconnect=true")
+			os.Exit(2)
+		}
 		okCount := 0
 		totalStart := time.Now()
+		measurementStart := totalStart
 		workerCount := normalizedConcurrency(*requests, *concurrency)
 		var active int64
 		var maxActive int64
@@ -86,13 +105,49 @@ func main() {
 			}
 			clients[index] = client
 		}
+		useSessions := *reuseConnections || *preconnect
 		sessions := make([]*recall.BRPCRecommendSession, workerCount)
-		if *reuseConnections {
+		if useSessions {
 			for worker := range sessions {
 				sessions[worker] = clients[worker%len(clients)].NewSession()
 				defer sessions[worker].Close()
 			}
 		}
+
+		connectedSessions := 0
+		if *preconnect {
+			connectResults, _ := runSynchronizedBurst(workerCount, nil, nil,
+				func(index int, _ time.Time) probeResult {
+					worker := index - 1
+					result := probeResult{
+						index:    index,
+						endpoint: endpoints[worker%len(endpoints)],
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
+					result.err = sessions[worker].Connect(ctx)
+					cancel()
+					return result
+				})
+			for _, result := range connectResults {
+				if result.err != nil {
+					fmt.Fprintf(os.Stderr, "preconnect failed index=%d endpoint=%s error=%v\n",
+						result.index, result.endpoint, result.err)
+					continue
+				}
+				connectedSessions++
+			}
+			fmt.Printf("preconnect summary connected_sessions=%d total_sessions=%d\n",
+				connectedSessions, workerCount)
+			if connectedSessions != workerCount {
+				os.Exit(1)
+			}
+			if *preconnectHoldMs > 0 {
+				fmt.Printf("preconnect observation hold_ms=%d connected_sessions=%d\n", *preconnectHoldMs, connectedSessions)
+				time.Sleep(time.Duration(*preconnectHoldMs) * time.Millisecond)
+			}
+			measurementStart = time.Now()
+		}
+
 		if *statsFile != "" {
 			if *statsIntervalMs <= 0 {
 				fmt.Fprintln(os.Stderr, "stats_interval_ms must be positive")
@@ -101,11 +156,17 @@ func main() {
 			_ = os.Remove(*statsFile)
 			statsStop = make(chan struct{})
 			go reportPressureStats(*statsFile, time.Duration(*statsIntervalMs)*time.Millisecond,
-				totalStart, *payloadBytes, &pressure, &active, &maxActive, statsStop)
+				measurementStart, *payloadBytes, &pressure, &active, &maxActive, statsStop)
 		}
-		results := runIndexedWithWorker(*requests, *concurrency, *qps, func(worker, index int) (result probeResult) {
+
+		healthCall := func(worker, index int, releaseTime time.Time) (result probeResult) {
 			target := endpoints[worker%len(endpoints)]
 			callStarted := time.Now()
+			result.index = index
+			result.endpoint = target
+			if !releaseTime.IsZero() {
+				result.startOffsetUs = callStarted.Sub(releaseTime).Microseconds()
+			}
 			defer func() {
 				atomic.AddInt64(&pressure.calls, 1)
 				atomic.AddInt64(&pressure.latencyUs, time.Since(callStarted).Microseconds())
@@ -120,8 +181,13 @@ func main() {
 			updateAtomicMaximum(&maxActive, currentActive)
 			if currentActive >= int64(workerCount) && *readyFile != "" {
 				readyOnce.Do(func() {
-					content := fmt.Sprintf("workers=%d max_active=%d endpoints=%d payload_bytes=%d reuse_connections=%t\n",
-						workerCount, atomic.LoadInt64(&maxActive), len(endpoints), *payloadBytes, *reuseConnections)
+					armed := 0
+					if *preconnect {
+						armed = workerCount
+					}
+					content := fmt.Sprintf("workers=%d armed_workers=%d max_active=%d endpoints=%d payload_bytes=%d reuse_connections=%t preconnect=%t synchronized_start=%t\n",
+						workerCount, armed, atomic.LoadInt64(&maxActive), len(endpoints), *payloadBytes,
+						useSessions, *preconnect, *preconnect)
 					if err := os.WriteFile(*readyFile, []byte(content), 0o644); err != nil {
 						fmt.Fprintf(os.Stderr, "write ready file failed: %v\n", err)
 					}
@@ -130,40 +196,63 @@ func main() {
 			defer atomic.AddInt64(&active, -1)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
 			started := time.Now()
-			if *reuseConnections {
+			if useSessions {
 				resp, err := sessions[worker].HealthCheckWithPayload(ctx, *payloadBytes)
 				cancel()
-				elapsed := time.Since(started).Milliseconds()
+				result.latencyUs = time.Since(started).Microseconds()
+				result.latencyMs = result.latencyUs / 1000
 				if err != nil {
-					return probeResult{index: index, endpoint: target, latencyMs: elapsed, err: err}
+					result.err = err
+					return result
 				}
-				return probeResult{
-					index:     index,
-					endpoint:  target,
-					latencyMs: elapsed,
-					code:      resp.Code,
-					status:    resp.Status,
-					backend:   resp.Backend,
-				}
+				result.code = resp.Code
+				result.status = resp.Status
+				result.backend = resp.Backend
+				return result
 			}
 			resp, err := clients[worker%len(clients)].HealthCheckWithPayload(ctx, *payloadBytes)
 			cancel()
-			elapsed := time.Since(started).Milliseconds()
+			result.latencyUs = time.Since(started).Microseconds()
+			result.latencyMs = result.latencyUs / 1000
 			if err != nil {
-				return probeResult{index: index, endpoint: target, latencyMs: elapsed, err: err}
+				result.err = err
+				return result
 			}
-			return probeResult{
-				index:     index,
-				endpoint:  target,
-				latencyMs: elapsed,
-				code:      resp.Code,
-				status:    resp.Status,
-				backend:   resp.Backend,
+			result.code = resp.Code
+			result.status = resp.Status
+			result.backend = resp.Backend
+			return result
+		}
+
+		var results []probeResult
+		requestTotalMs := 0.0
+		requestStartSkewUs := int64(0)
+		armedWorkers := 0
+		if *preconnect {
+			armedWorkers = workerCount
+			var releasedAt time.Time
+			var releasedActive int64
+			var releasedMaxActive int64
+			results, releasedAt = runSynchronizedBurst(workerCount, &releasedActive, &releasedMaxActive,
+				func(index int, releaseTime time.Time) probeResult {
+					return healthCall(index-1, index, releaseTime)
+				})
+			requestTotalMs = float64(time.Since(releasedAt).Microseconds()) / 1000
+			startOffsets := make([]int64, 0, len(results))
+			for _, result := range results {
+				startOffsets = append(startOffsets, result.startOffsetUs)
 			}
-		})
+			requestStartSkewUs = spreadInt64(startOffsets)
+		} else {
+			results = runIndexedWithWorker(*requests, *concurrency, *qps,
+				func(worker, index int) probeResult {
+					return healthCall(worker, index, time.Time{})
+				})
+			requestTotalMs = float64(time.Since(measurementStart).Microseconds()) / 1000
+		}
 		if *statsFile != "" {
 			close(statsStop)
-			writePressureStats(*statsFile, totalStart, *payloadBytes, &pressure, &active, &maxActive, true)
+			writePressureStats(*statsFile, measurementStart, *payloadBytes, &pressure, &active, &maxActive, true)
 		}
 		for _, result := range results {
 			if result.err != nil {
@@ -178,8 +267,10 @@ func main() {
 			}
 		}
 		totalElapsed := time.Since(totalStart).Milliseconds()
-		fmt.Printf("summary ok=%d total=%d total_ms=%d payload_bytes=%d concurrency=%d max_active=%d qps=%d reuse_connections=%t\n",
-			okCount, *requests, totalElapsed, *payloadBytes, workerCount, atomic.LoadInt64(&maxActive), *qps, *reuseConnections)
+		fmt.Printf("summary ok=%d total=%d total_ms=%d request_total_ms=%.3f payload_bytes=%d concurrency=%d armed_workers=%d max_active=%d start_skew_us=%d qps=%d reuse_connections=%t preconnect=%t preconnect_hold_ms=%d connected_sessions=%d synchronized_start=%t\n",
+			okCount, *requests, totalElapsed, requestTotalMs, *payloadBytes, workerCount, armedWorkers,
+			atomic.LoadInt64(&maxActive), requestStartSkewUs, *qps, useSessions, *preconnect, *preconnectHoldMs,
+			connectedSessions, *preconnect)
 		if okCount != *requests {
 			os.Exit(1)
 		}
@@ -612,8 +703,8 @@ func runIndexedWithWorker(total int, concurrency int, qps int, fn func(worker, i
 	return results
 }
 
-// runSynchronizedBurst stages every lane before releasing any RPC. Active
-// workers are counted only after release and until the real call returns.
+// runSynchronizedBurst stages every lane before releasing any RPC. When
+// counters are provided, workers are counted from release until the call returns.
 func runSynchronizedBurst(total int, active, maxActive *int64,
 	fn func(index int, releasedAt time.Time) probeResult) ([]probeResult, time.Time) {
 	results := make([]probeResult, total)
@@ -629,9 +720,13 @@ func runSynchronizedBurst(total int, active, maxActive *int64,
 			defer completed.Done()
 			armed.Done()
 			<-callGate
-			currentActive := atomic.AddInt64(active, 1)
-			updateAtomicMaximum(maxActive, currentActive)
-			defer atomic.AddInt64(active, -1)
+			if active != nil {
+				currentActive := atomic.AddInt64(active, 1)
+				if maxActive != nil {
+					updateAtomicMaximum(maxActive, currentActive)
+				}
+				defer atomic.AddInt64(active, -1)
+			}
 			results[index-1] = fn(index, releasedAt)
 		}(index)
 	}

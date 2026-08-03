@@ -10,6 +10,8 @@ CONCURRENCY="${CONCURRENCY:-1}"
 PAYLOAD_BYTES="${PAYLOAD_BYTES:-102400}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
+PRECONNECT="${PRECONNECT:-0}"
+PRECONNECT_HOLD_MS="${PRECONNECT_HOLD_MS:-0}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT_DIR="${OUT_DIR:-/tmp/go_brpc_payload_latency/${RUN_ID}}"
@@ -106,6 +108,22 @@ print(f"  health_events={len(events)}")
 if concurrency:
     print(f"  concurrency={concurrency}")
 print(f"  payload_bytes={','.join(str(v) for v in payloads) if payloads else 'unknown'}")
+summary_event = summary_events[-1] if summary_events else {}
+preconnect = summary_event.get("preconnect", "false")
+print(f"  preconnect={preconnect}")
+if preconnect == "true":
+    print(f"  preconnect_hold_ms={summary_event.get('preconnect_hold_ms', '0')}")
+    print(
+        "  connection_setup "
+        f"connected_sessions={summary_event.get('connected_sessions', 'unknown')}"
+    )
+    print(
+        "  synchronized_request "
+        f"armed_workers={summary_event.get('armed_workers', 'unknown')} "
+        f"max_active={summary_event.get('max_active', 'unknown')} "
+        f"start_skew_us={summary_event.get('start_skew_us', 'unknown')} "
+        f"request_total_ms={summary_event.get('request_total_ms', 'unknown')}"
+    )
 if latency_stats:
     print(
         "  health_rpc_ms "
@@ -126,6 +144,17 @@ summary = {
     "counts": {"health_events": len(events)},
     "concurrency": int(concurrency) if concurrency else None,
     "payload_bytes": payloads,
+    "preconnect": preconnect == "true",
+    "preconnect_hold_ms": int(summary_event.get("preconnect_hold_ms", "0")),
+    "connection_setup": {
+        "connected_sessions": int(summary_event.get("connected_sessions", "0")),
+    },
+    "synchronized_request": {
+        "armed_workers": int(summary_event.get("armed_workers", "0")),
+        "max_active": int(summary_event.get("max_active", "0")),
+        "start_skew_us": int(summary_event.get("start_skew_us", "0")),
+        "request_total_ms": as_float(summary_event.get("request_total_ms")),
+    },
     "brpc": {"health_rpc_ms": latency_stats},
 }
 with open(summary_json, "w", encoding="utf-8") as handle:
@@ -145,6 +174,8 @@ echo "  endpoint:      ${ENDPOINT}"
 echo "  requests:      ${REQUESTS}"
 echo "  concurrency:   ${CONCURRENCY}"
 echo "  payload_bytes: ${PAYLOAD_BYTES}"
+echo "  preconnect:    ${PRECONNECT}"
+echo "  hold_ms:       ${PRECONNECT_HOLD_MS}"
 echo "  out_dir:       ${OUT_DIR}"
 echo
 
@@ -159,6 +190,8 @@ go run -mod=vendor ./scripts/probe_go_brpc_client.go \
   --payload_bytes="$PAYLOAD_BYTES" \
   --timeout_ms="$TIMEOUT_MS" \
   --max_retries="$MAX_RETRIES" \
+  --preconnect="$PRECONNECT" \
+  --preconnect_hold_ms="$PRECONNECT_HOLD_MS" \
   >"$PROBE_LOG" 2>&1
 PROBE_CODE="$?"
 set -e
