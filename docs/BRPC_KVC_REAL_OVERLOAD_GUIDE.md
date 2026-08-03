@@ -210,7 +210,7 @@ source /tmp/brpc-kvc-cache-shape/<run_id>/selected.env
 
 ## 4. 按阶段调压
 
-### 优先校准同实例 burst
+### 优先测量同实例 burst p99
 
 需要测量突发请求对单次正式推荐 BRPC 通信时延的影响时，使用 burst Wrapper，
 不要用持续 Health 压力的平均时延代替正式请求。每个 burst 固定包含：
@@ -226,32 +226,41 @@ Wrapper 单独报告：
 - `max_active_workers`：释放后真实调用尚未返回的最大 lane 数；
 - `start_skew_us`：最早与最晚 lane 进入调用函数的时间差；
 - `business_client_wall_ms`、`business_inference_ms`；
+- `business_runner_generate_ms`：TRT runner.generate 耗时；
 - `business_brpc_delta_ms = client_wall_ms - inference_ms`。
 
-先用一档快速验证：
+先用少量样本验证实验链路：
 
 ```bash
 ENDPOINT=192.168.100.11:18100 \
-BURST_CONCURRENCY_LEVELS=100 \
+BURST_CONCURRENCY_LEVELS='10 100' \
 REPEATS=3 \
 PRESSURE_PAYLOAD_BYTES=102400 \
-TARGET_BRPC_DELTA_MIN_MS=30 \
-TARGET_BRPC_DELTA_MAX_MS=40 \
   bash scripts/benchmark_go_brpc_burst_wrapper.sh
 ```
 
-正式校准使用默认 `10,25,50,100,200,400,600,800,1000` 阶梯和每档20轮。
-若相邻档位跨过30-40ms区间，脚本会在该区间增加三个并发点继续细化。只有所有
-Recommend成功、所有Health成功、`max_active_workers >= N*95%`、Pod身份和重启数
-不变且没有崩溃标记时，档位才可入选。成功后加载：
+该命令会自动增加并发1的无压力 Recommend 基线，结果标记为 `PASS_SMOKE`，不能作为
+正式p99。正式测试每档至少执行1000轮：
 
 ```bash
-source /tmp/go_brpc_burst_wrapper/<run_id>/selected.env
+ENDPOINT=192.168.100.11:18100 \
+BURST_CONCURRENCY_LEVELS='10 100 1000' \
+REPEATS=1000 \
+PRESSURE_PAYLOAD_BYTES=102400 \
+  bash scripts/benchmark_go_brpc_burst_wrapper.sh
 ```
 
-这里的30-40ms是正式Recommend的BRPC通信差值，不是Health请求平均时延，也不是
-推荐E2E。`1000`路、`100KB` burst已经观察到单个Health平均约130ms，因此不能预设
-并发1000就是目标档位，必须通过上述阶梯寻找拐点。
+每个burst只产生一个正式Recommend样本。报告分别给出 client wall、服务端
+inference、`runner_generate` 和 BRPC差值的p50/p95/p99/p999/max，并给出它们相对
+并发1基线的p99变化。脚本不要求并发100或任何档位命中30-40ms，也不会按时延选择
+并发档位。基线与压力档位按轮次交错执行，降低温度和缓存随时间漂移造成的偏差。
+失败请求单独计数，不会被静默排除后仍将实验判为有效。
+
+所有请求都发往同一个推理实例时，Health虽然不执行TRT/KVC，仍会竞争BRPC worker、
+CPU、内存分配和网络队列，因此可能抬高正式推理时延。若 `runner_generate` p99也明显
+上升，说明模型执行受到干扰；若主要是BRPC差值上升，则更偏向连接、排队和协议开销。
+只有Recommend和Health全部成功、`max_active_workers >= N*95%`、Pod身份和重启数不变
+且没有崩溃标记时，该档位才有效。
 
 ### 持续压力矩阵
 

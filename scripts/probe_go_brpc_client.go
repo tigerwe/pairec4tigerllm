@@ -265,6 +265,7 @@ func main() {
 					result.inferenceMs = resp.InferenceTimeMs
 					if resp.Trace != nil {
 						result.backend = resp.Trace.Backend
+						result.runnerGenerateMs = resp.Trace.RunnerGenerateMs
 					}
 					if result.items == 0 {
 						result.err = fmt.Errorf("Recommend returned no items")
@@ -300,9 +301,10 @@ func main() {
 					fmt.Fprintf(os.Stderr, "burst business failed endpoint=%s request_id=%s client_wall_ms=%.3f error=%v\n",
 						result.endpoint, result.requestID, float64(result.latencyUs)/1000, result.err)
 				} else {
-					fmt.Printf("burst business ok endpoint=%s request_id=%s client_wall_ms=%.3f inference_ms=%.3f brpc_delta_ms=%.3f items=%d backend=%s\n",
+					fmt.Printf("burst business ok endpoint=%s request_id=%s client_wall_ms=%.3f inference_ms=%.3f runner_generate_ms=%.3f brpc_delta_ms=%.3f items=%d backend=%s\n",
 						result.endpoint, result.requestID, float64(result.latencyUs)/1000, result.inferenceMs,
-						float64(result.latencyUs)/1000-result.inferenceMs, result.items, result.backend)
+						result.runnerGenerateMs, float64(result.latencyUs)/1000-result.inferenceMs,
+						result.items, result.backend)
 				}
 				continue
 			}
@@ -350,6 +352,7 @@ func main() {
 			BusinessError:        businessError,
 			BusinessClientWallMs: float64(business.latencyUs) / 1000,
 			BusinessInferenceMs:  business.inferenceMs,
+			BusinessRunnerMs:     business.runnerGenerateMs,
 			BusinessBRPCDeltaMs:  float64(business.latencyUs)/1000 - business.inferenceMs,
 			BusinessItems:        business.items,
 			BusinessCode:         business.code,
@@ -460,20 +463,21 @@ func main() {
 }
 
 type probeResult struct {
-	index         int
-	endpoint      string
-	role          string
-	requestID     string
-	latencyMs     int64
-	latencyUs     int64
-	startOffsetUs int64
-	err           error
-	code          int
-	status        string
-	backend       string
-	userID        string
-	items         int
-	inferenceMs   float64
+	index            int
+	endpoint         string
+	role             string
+	requestID        string
+	latencyMs        int64
+	latencyUs        int64
+	startOffsetUs    int64
+	err              error
+	code             int
+	status           string
+	backend          string
+	userID           string
+	items            int
+	inferenceMs      float64
+	runnerGenerateMs float64
 }
 
 type burstSummary struct {
@@ -497,6 +501,7 @@ type burstSummary struct {
 	BusinessError        string  `json:"business_error,omitempty"`
 	BusinessClientWallMs float64 `json:"business_client_wall_ms"`
 	BusinessInferenceMs  float64 `json:"business_inference_ms"`
+	BusinessRunnerMs     float64 `json:"business_runner_generate_ms"`
 	BusinessBRPCDeltaMs  float64 `json:"business_brpc_delta_ms"`
 	BusinessItems        int     `json:"business_items"`
 	BusinessCode         int     `json:"business_code"`
