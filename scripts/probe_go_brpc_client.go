@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,7 +26,7 @@ type probeRequest struct {
 func main() {
 	endpoint := flag.String("endpoint", getenv("BRPC_ENDPOINT", "127.0.0.1:18100"), "brpc endpoint host:port")
 	service := flag.String("service", getenv("BRPC_SERVICE", "pairec.inference.RecommendService"), "brpc service name")
-	method := flag.String("method", getenv("BRPC_METHOD", "recommend"), "health or recommend")
+	method := flag.String("method", getenv("BRPC_METHOD", "recommend"), "health, recommend, or burst")
 	userID := flag.String("user_id", getenv("USER_ID", "go_brpc_probe"), "user id for recommend")
 	topk := flag.Int("topk", getenvInt("TOPK", 10), "recommend topk")
 	requests := flag.Int("requests", getenvInt("REQUESTS", 1), "number of recommend requests")
@@ -33,6 +35,10 @@ func main() {
 	timeoutMs := flag.Int("timeout_ms", getenvInt("TIMEOUT_MS", 5000), "request timeout in ms")
 	maxRetries := flag.Int("max_retries", getenvInt("MAX_RETRIES", 1), "max retries")
 	payloadBytes := flag.Int("payload_bytes", getenvInt("PAYLOAD_BYTES", 0), "extra protobuf payload padding bytes")
+	pressurePayloadBytes := flag.Int("pressure_payload_bytes", getenvInt("PRESSURE_PAYLOAD_BYTES", -1), "Health payload bytes in burst mode; defaults to payload_bytes")
+	businessPayloadBytes := flag.Int("business_payload_bytes", getenvInt("BUSINESS_PAYLOAD_BYTES", 0), "Recommend payload bytes in burst mode")
+	burstConcurrency := flag.Int("burst_concurrency", getenvInt("BURST_CONCURRENCY", 0), "total burst lanes; 1 Recommend plus N-1 Health; defaults to concurrency")
+	resultJSON := flag.String("result_json", getenv("RESULT_JSON", ""), "write the burst result as JSON")
 	historySource := flag.String("history_source", getenv("HISTORY_SOURCE", "synthetic"), "synthetic or user_features")
 	uids := flag.String("uids", getenv("UIDS", ""), "comma-separated user ids for user_features history source")
 	userFeaturesPath := flag.String("user_features_path", getenv("USER_FEATURES_PATH", "data/user_features.json"), "user_features.json path")
@@ -177,6 +183,197 @@ func main() {
 		if okCount != *requests {
 			os.Exit(1)
 		}
+	case "burst":
+		if len(endpoints) != 1 {
+			fmt.Fprintln(os.Stderr, "burst method requires exactly one endpoint")
+			os.Exit(2)
+		}
+		totalLanes := *burstConcurrency
+		if totalLanes == 0 {
+			totalLanes = *concurrency
+		}
+		if totalLanes < 1 {
+			fmt.Fprintln(os.Stderr, "burst_concurrency must be positive")
+			os.Exit(2)
+		}
+		pressureBytes := *pressurePayloadBytes
+		if pressureBytes < 0 {
+			pressureBytes = *payloadBytes
+		}
+		if pressureBytes < 0 || *businessPayloadBytes < 0 {
+			fmt.Fprintln(os.Stderr, "payload byte counts must not be negative")
+			os.Exit(2)
+		}
+
+		selectedUIDs := *uids
+		if *historySource == "user_features" && strings.TrimSpace(selectedUIDs) == "" {
+			selectedUIDs = *userID
+		}
+		requestPlans, err := buildProbeRequests(*historySource, *userID, selectedUIDs,
+			*userFeaturesPath, *semanticMapPath, *historyMaxLength, false, 1)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "build burst business request failed: %v\n", err)
+			os.Exit(1)
+		}
+		client, err := recall.NewBRPCRecommendClient(
+			endpoints[0],
+			*service,
+			time.Duration(*timeoutMs)*time.Millisecond,
+			*maxRetries,
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create client failed endpoint=%s: %v\n", endpoints[0], err)
+			os.Exit(1)
+		}
+
+		requestID := fmt.Sprintf("go-brpc-burst-%d", time.Now().UnixNano())
+		businessPlan := requestPlans[0]
+		var active int64
+		var maxActive int64
+		totalStarted := time.Now()
+		results, releasedAt := runSynchronizedBurst(totalLanes, &active, &maxActive,
+			func(index int, releaseTime time.Time) probeResult {
+				callStarted := time.Now()
+				result := probeResult{
+					index:         index,
+					endpoint:      endpoints[0],
+					startOffsetUs: callStarted.Sub(releaseTime).Microseconds(),
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
+				defer cancel()
+				if index == 1 {
+					result.role = "business"
+					result.requestID = requestID
+					req := &recall.RecommendRequest{
+						UserID:              businessPlan.userID,
+						History:             businessPlan.history,
+						Topk:                *topk,
+						Temperature:         1.0,
+						BeamWidth:           1,
+						PayloadPaddingBytes: *businessPayloadBytes,
+					}
+					resp, callErr := client.Recommend(ctx, req, requestID)
+					result.latencyUs = time.Since(callStarted).Microseconds()
+					result.latencyMs = result.latencyUs / 1000
+					if callErr != nil {
+						result.err = callErr
+						return result
+					}
+					result.code = resp.Code
+					result.userID = resp.UserID
+					result.items = len(resp.Recommendations)
+					result.inferenceMs = resp.InferenceTimeMs
+					if resp.Trace != nil {
+						result.backend = resp.Trace.Backend
+					}
+					if result.items == 0 {
+						result.err = fmt.Errorf("Recommend returned no items")
+					}
+					return result
+				}
+
+				result.role = "pressure"
+				resp, callErr := client.HealthCheckWithPayload(ctx, pressureBytes)
+				result.latencyUs = time.Since(callStarted).Microseconds()
+				result.latencyMs = result.latencyUs / 1000
+				if callErr != nil {
+					result.err = callErr
+					return result
+				}
+				result.code = resp.Code
+				result.status = resp.Status
+				result.backend = resp.Backend
+				if resp.Code != 200 {
+					result.err = fmt.Errorf("Health returned code %d", resp.Code)
+				}
+				return result
+			})
+
+		business := results[0]
+		pressureOK := 0
+		pressureLatencies := make([]int64, 0, totalLanes-1)
+		startOffsets := make([]int64, 0, totalLanes)
+		for _, result := range results {
+			startOffsets = append(startOffsets, result.startOffsetUs)
+			if result.role == "business" {
+				if result.err != nil {
+					fmt.Fprintf(os.Stderr, "burst business failed endpoint=%s request_id=%s client_wall_ms=%.3f error=%v\n",
+						result.endpoint, result.requestID, float64(result.latencyUs)/1000, result.err)
+				} else {
+					fmt.Printf("burst business ok endpoint=%s request_id=%s client_wall_ms=%.3f inference_ms=%.3f brpc_delta_ms=%.3f items=%d backend=%s\n",
+						result.endpoint, result.requestID, float64(result.latencyUs)/1000, result.inferenceMs,
+						float64(result.latencyUs)/1000-result.inferenceMs, result.items, result.backend)
+				}
+				continue
+			}
+			if result.err != nil {
+				fmt.Fprintf(os.Stderr, "burst pressure failed index=%d endpoint=%s payload_bytes=%d latency_ms=%.3f error=%v\n",
+					result.index, result.endpoint, pressureBytes, float64(result.latencyUs)/1000, result.err)
+				continue
+			}
+			pressureOK++
+			pressureLatencies = append(pressureLatencies, result.latencyUs)
+			if !*quiet {
+				fmt.Printf("burst pressure ok index=%d endpoint=%s payload_bytes=%d latency_ms=%.3f code=%d status=%s backend=%s\n",
+					result.index, result.endpoint, pressureBytes, float64(result.latencyUs)/1000,
+					result.code, result.status, result.backend)
+			}
+		}
+
+		businessError := ""
+		if business.err != nil {
+			businessError = business.err.Error()
+		}
+		pressureTotal := totalLanes - 1
+		pressureSuccessRate := 1.0
+		if pressureTotal > 0 {
+			pressureSuccessRate = float64(pressureOK) / float64(pressureTotal)
+		}
+		summary := burstSummary{
+			Event:                "brpc_burst_result",
+			Endpoint:             endpoints[0],
+			BurstConcurrency:     totalLanes,
+			ArmedWorkers:         totalLanes,
+			MaxActiveWorkers:     atomic.LoadInt64(&maxActive),
+			StartSkewUs:          spreadInt64(startOffsets),
+			TotalMs:              float64(time.Since(totalStarted).Microseconds()) / 1000,
+			PressurePayloadBytes: pressureBytes,
+			PressureRequests:     pressureTotal,
+			PressureSuccess:      pressureOK,
+			PressureErrors:       pressureTotal - pressureOK,
+			PressureSuccessRate:  pressureSuccessRate,
+			PressureLatencyAvgMs: averageMicroseconds(pressureLatencies),
+			PressureLatencyP95Ms: percentileMicroseconds(pressureLatencies, 0.95),
+			ReleasedAtUnixNano:   releasedAt.UnixNano(),
+			BusinessRequestID:    business.requestID,
+			BusinessSuccess:      business.err == nil,
+			BusinessError:        businessError,
+			BusinessClientWallMs: float64(business.latencyUs) / 1000,
+			BusinessInferenceMs:  business.inferenceMs,
+			BusinessBRPCDeltaMs:  float64(business.latencyUs)/1000 - business.inferenceMs,
+			BusinessItems:        business.items,
+			BusinessCode:         business.code,
+			BusinessUserID:       business.userID,
+			BusinessBackend:      business.backend,
+		}
+		encoded, err := json.Marshal(summary)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "marshal burst result failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(encoded))
+		if *resultJSON != "" {
+			if err := writeJSONFile(*resultJSON, encoded); err != nil {
+				fmt.Fprintf(os.Stderr, "write burst result failed: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		fmt.Printf("burst summary business_ok=%t pressure_ok=%d pressure_total=%d armed_workers=%d max_active=%d start_skew_us=%d total_ms=%.3f\n",
+			summary.BusinessSuccess, pressureOK, pressureTotal, totalLanes, summary.MaxActiveWorkers,
+			summary.StartSkewUs, summary.TotalMs)
+		if !summary.BusinessSuccess || pressureOK != pressureTotal {
+			os.Exit(1)
+		}
 	case "recommend":
 		if len(endpoints) != 1 {
 			fmt.Fprintln(os.Stderr, "recommend method requires exactly one endpoint")
@@ -263,17 +460,48 @@ func main() {
 }
 
 type probeResult struct {
-	index       int
-	endpoint    string
-	requestID   string
-	latencyMs   int64
-	err         error
-	code        int
-	status      string
-	backend     string
-	userID      string
-	items       int
-	inferenceMs float64
+	index         int
+	endpoint      string
+	role          string
+	requestID     string
+	latencyMs     int64
+	latencyUs     int64
+	startOffsetUs int64
+	err           error
+	code          int
+	status        string
+	backend       string
+	userID        string
+	items         int
+	inferenceMs   float64
+}
+
+type burstSummary struct {
+	Event                string  `json:"event"`
+	Endpoint             string  `json:"endpoint"`
+	BurstConcurrency     int     `json:"burst_concurrency"`
+	ArmedWorkers         int     `json:"armed_workers"`
+	MaxActiveWorkers     int64   `json:"max_active_workers"`
+	StartSkewUs          int64   `json:"start_skew_us"`
+	TotalMs              float64 `json:"total_ms"`
+	PressurePayloadBytes int     `json:"pressure_payload_bytes"`
+	PressureRequests     int     `json:"pressure_requests"`
+	PressureSuccess      int     `json:"pressure_success"`
+	PressureErrors       int     `json:"pressure_errors"`
+	PressureSuccessRate  float64 `json:"pressure_success_rate"`
+	PressureLatencyAvgMs float64 `json:"pressure_latency_avg_ms"`
+	PressureLatencyP95Ms float64 `json:"pressure_latency_p95_ms"`
+	ReleasedAtUnixNano   int64   `json:"released_at_unix_nano"`
+	BusinessRequestID    string  `json:"business_request_id"`
+	BusinessSuccess      bool    `json:"business_success"`
+	BusinessError        string  `json:"business_error,omitempty"`
+	BusinessClientWallMs float64 `json:"business_client_wall_ms"`
+	BusinessInferenceMs  float64 `json:"business_inference_ms"`
+	BusinessBRPCDeltaMs  float64 `json:"business_brpc_delta_ms"`
+	BusinessItems        int     `json:"business_items"`
+	BusinessCode         int     `json:"business_code"`
+	BusinessUserID       string  `json:"business_user_id"`
+	BusinessBackend      string  `json:"business_backend"`
 }
 
 func splitEndpoints(value string) []string {
@@ -379,6 +607,37 @@ func runIndexedWithWorker(total int, concurrency int, qps int, fn func(worker, i
 	return results
 }
 
+// runSynchronizedBurst stages every lane before releasing any RPC. Active
+// workers are counted only after release and until the real call returns.
+func runSynchronizedBurst(total int, active, maxActive *int64,
+	fn func(index int, releasedAt time.Time) probeResult) ([]probeResult, time.Time) {
+	results := make([]probeResult, total)
+	var armed sync.WaitGroup
+	var completed sync.WaitGroup
+	armed.Add(total)
+	completed.Add(total)
+	callGate := make(chan struct{})
+	var releasedAt time.Time
+
+	for index := 1; index <= total; index++ {
+		go func(index int) {
+			defer completed.Done()
+			armed.Done()
+			<-callGate
+			currentActive := atomic.AddInt64(active, 1)
+			updateAtomicMaximum(maxActive, currentActive)
+			defer atomic.AddInt64(active, -1)
+			results[index-1] = fn(index, releasedAt)
+		}(index)
+	}
+
+	armed.Wait()
+	releasedAt = time.Now()
+	close(callGate)
+	completed.Wait()
+	return results, releasedAt
+}
+
 func normalizedConcurrency(total int, concurrency int) int {
 	if concurrency < 1 {
 		concurrency = 1
@@ -396,6 +655,61 @@ func updateAtomicMaximum(target *int64, value int64) {
 			return
 		}
 	}
+}
+
+func averageMicroseconds(values []int64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	var total int64
+	for _, value := range values {
+		total += value
+	}
+	return float64(total) / float64(len(values)) / 1000
+}
+
+func percentileMicroseconds(values []int64, quantile float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	ordered := append([]int64(nil), values...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	if len(ordered) == 1 {
+		return float64(ordered[0]) / 1000
+	}
+	rank := float64(len(ordered)-1) * quantile
+	lower := int(math.Floor(rank))
+	upper := int(math.Ceil(rank))
+	value := float64(ordered[lower])
+	if lower != upper {
+		value += (float64(ordered[upper]) - value) * (rank - float64(lower))
+	}
+	return value / 1000
+}
+
+func spreadInt64(values []int64) int64 {
+	if len(values) == 0 {
+		return 0
+	}
+	minimum := values[0]
+	maximum := values[0]
+	for _, value := range values[1:] {
+		if value < minimum {
+			minimum = value
+		}
+		if value > maximum {
+			maximum = value
+		}
+	}
+	return maximum - minimum
+}
+
+func writeJSONFile(path string, encoded []byte) error {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(encoded, '\n'), 0o644)
 }
 
 func buildProbeRequests(historySource, baseUserID, uids, userFeaturesPath, semanticMapPath string, historyMaxLength int, varyUserID bool, requestCount int) ([]probeRequest, error) {

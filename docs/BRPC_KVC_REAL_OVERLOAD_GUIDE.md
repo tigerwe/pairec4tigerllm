@@ -210,6 +210,51 @@ source /tmp/brpc-kvc-cache-shape/<run_id>/selected.env
 
 ## 4. 按阶段调压
 
+### 优先校准同实例 burst
+
+需要测量突发请求对单次正式推荐 BRPC 通信时延的影响时，使用 burst Wrapper，
+不要用持续 Health 压力的平均时延代替正式请求。每个 burst 固定包含：
+
+```text
+1 路正式 Recommend + N-1 路 100KB Health
+```
+
+所有 lane 先进入客户端屏障，再同时向同一个 `18100` 推理实例发起短连接请求。
+Wrapper 单独报告：
+
+- `armed_workers`：已到达统一释放屏障的 lane 数；
+- `max_active_workers`：释放后真实调用尚未返回的最大 lane 数；
+- `start_skew_us`：最早与最晚 lane 进入调用函数的时间差；
+- `business_client_wall_ms`、`business_inference_ms`；
+- `business_brpc_delta_ms = client_wall_ms - inference_ms`。
+
+先用一档快速验证：
+
+```bash
+ENDPOINT=192.168.100.11:18100 \
+BURST_CONCURRENCY_LEVELS=100 \
+REPEATS=3 \
+PRESSURE_PAYLOAD_BYTES=102400 \
+TARGET_BRPC_DELTA_MIN_MS=30 \
+TARGET_BRPC_DELTA_MAX_MS=40 \
+  bash scripts/benchmark_go_brpc_burst_wrapper.sh
+```
+
+正式校准使用默认 `10,25,50,100,200,400,600,800,1000` 阶梯和每档20轮。
+若相邻档位跨过30-40ms区间，脚本会在该区间增加三个并发点继续细化。只有所有
+Recommend成功、所有Health成功、`max_active_workers >= N*95%`、Pod身份和重启数
+不变且没有崩溃标记时，档位才可入选。成功后加载：
+
+```bash
+source /tmp/go_brpc_burst_wrapper/<run_id>/selected.env
+```
+
+这里的30-40ms是正式Recommend的BRPC通信差值，不是Health请求平均时延，也不是
+推荐E2E。`1000`路、`100KB` burst已经观察到单个Health平均约130ms，因此不能预设
+并发1000就是目标档位，必须通过上述阶梯寻找拐点。
+
+### 持续压力矩阵
+
 先跑同缓存形态 baseline：
 
 ```bash
