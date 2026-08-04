@@ -274,10 +274,13 @@ CPU、内存分配和网络队列，因此可能抬高正式推理时延。若 `
        `- Health    -> Wrapper本地返回，不转发后端
 ```
 
-先重建包含 `brpc_burst_wrapper` 的轻量BRPC镜像并部署：
+先构建包含 `brpc_burst_wrapper` 的镜像。当前基础镜像约130GB，不要通过管理网全量
+传输镜像tar；从镜像提取Wrapper二进制，经25G链路复制到worker1，再以hostPath挂入
+worker1已经存在的同ABI BRPC运行时镜像：
 
 ```bash
 bash scripts/build_brpc_inference_image.sh
+bash scripts/ship_brpc_burst_wrapper_binary_to_worker.sh
 bash scripts/k8s_apply_brpc_burst_wrapper_188.sh
 ```
 

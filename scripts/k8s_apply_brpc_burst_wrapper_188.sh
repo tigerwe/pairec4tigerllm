@@ -7,6 +7,8 @@ DEPLOYMENT="${DEPLOYMENT:-brpc-burst-wrapper}"
 WRAPPER_ENDPOINT="${WRAPPER_ENDPOINT:-192.168.100.11:18103}"
 BACKEND_ENDPOINT="${BACKEND_ENDPOINT:-192.168.100.11:18100}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
+WRAPPER_HOST_BIN="${WRAPPER_HOST_BIN:-/home/zcx/bin/brpc_burst_wrapper}"
+WRAPPER_WORKER="${WRAPPER_WORKER:-root@192.168.100.11}"
 
 die() {
   echo "ERROR: $*" >&2
@@ -15,6 +17,13 @@ die() {
 
 [ -f "$MANIFEST" ] || die "manifest not found: $MANIFEST"
 command -v kubectl >/dev/null 2>&1 || die "kubectl is required"
+command -v ssh >/dev/null 2>&1 || die "ssh is required"
+
+echo "== Wrapper binary preflight on worker1 =="
+kubectl get node worker1 >/dev/null 2>&1 || die "Kubernetes node worker1 does not exist"
+ssh "$WRAPPER_WORKER" \
+  "test -x '${WRAPPER_HOST_BIN}' && ls -lh '${WRAPPER_HOST_BIN}'" \
+  || die "wrapper binary is missing on worker1: ${WRAPPER_HOST_BIN}"
 
 echo "== Backend preflight =="
 backend_host="${BACKEND_ENDPOINT%:*}"
