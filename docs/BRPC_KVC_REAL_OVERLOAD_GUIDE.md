@@ -219,7 +219,7 @@ source /tmp/brpc-kvc-cache-shape/<run_id>/selected.env
 1 路正式 Recommend + N-1 路 100KB Health
 ```
 
-所有 lane 先进入客户端屏障，再同时向同一个 `18100` 推理实例发起短连接请求。
+所有 lane 先建立独立TCP会话并进入客户端屏障，再由同一个屏障放行请求。
 Wrapper 单独报告：
 
 - `armed_workers`：已到达统一释放屏障的 lane 数；
@@ -259,8 +259,10 @@ inference、`runner_generate` 和 BRPC差值的p50/p95/p99/p999/max，并给出�
 所有请求都发往同一个推理实例时，Health虽然不执行TRT/KVC，仍会竞争BRPC worker、
 CPU、内存分配和网络队列，因此可能抬高正式推理时延。若 `runner_generate` p99也明显
 上升，说明模型执行受到干扰；若主要是BRPC差值上升，则更偏向连接、排队和协议开销。
-只有Recommend和Health全部成功、`max_active_workers >= N*95%`、Pod身份和重启数不变
-且没有崩溃标记时，该档位才有效。
+只有Recommend和Health全部成功、所有lane均到达屏障、预连接数等于配置并发、Pod身份和
+重启数不变且没有崩溃标记时，该档位才有效。`max_active_workers`和`start_skew_us`用于
+描述实际请求展开过程，默认不作为硬门禁；需要专门研究客户端同时在途比例时，可设置
+`REQUIRE_CLIENT_ACTIVE_RATIO=1`恢复`max_active_workers >= N*MIN_ACTIVE_RATIO`门禁。
 
 ### 使用独立服务端Wrapper隔离推理实例
 
@@ -294,6 +296,7 @@ bash scripts/k8s_apply_brpc_burst_wrapper_188.sh
 ENDPOINT=192.168.100.11:18103 \
 REQUIRE_SERVER_WRAPPER=1 \
 BURST_PRECONNECT=1 \
+REQUIRE_CLIENT_ACTIVE_RATIO=0 \
 BURST_CONCURRENCY_LEVELS='10 100 1000' \
 REPEATS=3 \
 PRESSURE_PAYLOAD_BYTES=102400 \
@@ -320,8 +323,14 @@ Recommend到达前已有Health返回是正常的，不能据此否定已由客�
 
 Wrapper基准默认启用`BURST_PRECONNECT=1`，业务Recommend和N-1路Health各占一条提前建立
 的TCP连接。建连阶段不计入业务延迟，统一屏障只放行RPC帧发送。这样1000档不会把TCP
-握手扩散误当成burst压力；有效性同时要求每轮`connected_sessions=N`且客户端实际
-`max_active_workers >= N*MIN_ACTIVE_RATIO`。
+握手扩散误当成burst压力；有效性要求每轮`connected_sessions=N`、`armed_workers=N`，
+并要求业务与压力RPC全部成功。
+
+对于1000路、每路100KB的burst，线上总数据约100MB；即使25Gbps链路无其他开销，纯串行
+发送也需要约32ms。前面的Health可能在后续lane进入系统调用前已经返回，因此
+`max_active_workers < N*95%`不代表屏障没有统一放行。报告仍保留实际峰值和起始偏差，
+但默认不据此判FAIL。正式Recommend所在lane会按轮次确定性轮换，避免固定第一路造成
+Go调度或发送顺序偏差。
 
 该模式测量的是增加前置Wrapper后的正式链路，不等同于客户端直连18100；如果后续将其
 用于业务结论，Wrapper必须成为正式服务入口，并单独报告新增的一跳转发开销。

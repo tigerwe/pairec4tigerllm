@@ -38,6 +38,7 @@ func main() {
 	pressurePayloadBytes := flag.Int("pressure_payload_bytes", getenvInt("PRESSURE_PAYLOAD_BYTES", -1), "Health payload bytes in burst mode; defaults to payload_bytes")
 	businessPayloadBytes := flag.Int("business_payload_bytes", getenvInt("BUSINESS_PAYLOAD_BYTES", 0), "Recommend payload bytes in burst mode")
 	burstConcurrency := flag.Int("burst_concurrency", getenvInt("BURST_CONCURRENCY", 0), "total burst lanes; 1 Recommend plus N-1 Health; defaults to concurrency")
+	burstBusinessLane := flag.Int("burst_business_lane", getenvInt("BURST_BUSINESS_LANE", 1), "1-based Recommend lane within a synchronized burst")
 	resultJSON := flag.String("result_json", getenv("RESULT_JSON", ""), "write the burst result as JSON")
 	historySource := flag.String("history_source", getenv("HISTORY_SOURCE", "synthetic"), "synthetic or user_features")
 	uids := flag.String("uids", getenv("UIDS", ""), "comma-separated user ids for user_features history source")
@@ -47,7 +48,7 @@ func main() {
 	varyUserID := flag.Bool("vary_user_id", getenvBool("VARY_USER_ID", true), "append request index to synthetic user_id")
 	quiet := flag.Bool("quiet", getenvBool("QUIET", false), "suppress per-request success output")
 	reuseConnections := flag.Bool("reuse_connections", getenvBool("REUSE_CONNECTIONS", false), "reuse one brpc TCP connection per worker")
-	preconnect := flag.Bool("preconnect", getenvBool("PRECONNECT", false), "pre-establish one TCP session per Health worker, then synchronously release one measured request per connection")
+	preconnect := flag.Bool("preconnect", getenvBool("PRECONNECT", false), "pre-establish one TCP session per worker, then synchronously release one measured request per connection")
 	preconnectHoldMs := flag.Int("preconnect_hold_ms", getenvInt("PRECONNECT_HOLD_MS", 0), "hold fully established Health sessions before request release for observation; excluded from request latency")
 	readyFile := flag.String("ready_file", getenv("READY_FILE", ""), "write worker concurrency evidence after the target is reached")
 	statsFile := flag.String("stats_file", getenv("STATS_FILE", ""), "append periodic pressure statistics as JSON lines")
@@ -287,6 +288,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "burst_concurrency must be positive")
 			os.Exit(2)
 		}
+		if *burstBusinessLane < 1 || *burstBusinessLane > totalLanes {
+			fmt.Fprintf(os.Stderr, "burst_business_lane must be in [1,%d]\n", totalLanes)
+			os.Exit(2)
+		}
 		pressureBytes := *pressurePayloadBytes
 		if pressureBytes < 0 {
 			pressureBytes = *payloadBytes
@@ -364,7 +369,7 @@ func main() {
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
 				defer cancel()
-				if index == 1 {
+				if index == *burstBusinessLane {
 					result.role = "business"
 					result.requestID = requestID
 					req := &recall.RecommendRequest{
@@ -439,7 +444,7 @@ func main() {
 				return result
 			})
 
-		business := results[0]
+		business := results[*burstBusinessLane-1]
 		pressureOK := 0
 		pressureLatencies := make([]int64, 0, totalLanes-1)
 		startOffsets := make([]int64, 0, totalLanes)
@@ -487,6 +492,7 @@ func main() {
 			Event:                "brpc_burst_result",
 			Endpoint:             endpoints[0],
 			BurstConcurrency:     totalLanes,
+			BusinessLane:         *burstBusinessLane,
 			ArmedWorkers:         totalLanes,
 			MaxActiveWorkers:     atomic.LoadInt64(&maxActive),
 			StartSkewUs:          spreadInt64(startOffsets),
@@ -534,8 +540,8 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		fmt.Printf("burst summary business_ok=%t pressure_ok=%d pressure_total=%d armed_workers=%d max_active=%d start_skew_us=%d preconnect=%t connected_sessions=%d total_ms=%.3f\n",
-			summary.BusinessSuccess, pressureOK, pressureTotal, totalLanes, summary.MaxActiveWorkers,
+		fmt.Printf("burst summary business_ok=%t business_lane=%d pressure_ok=%d pressure_total=%d armed_workers=%d max_active=%d start_skew_us=%d preconnect=%t connected_sessions=%d total_ms=%.3f\n",
+			summary.BusinessSuccess, summary.BusinessLane, pressureOK, pressureTotal, totalLanes, summary.MaxActiveWorkers,
 			summary.StartSkewUs, summary.Preconnect, summary.ConnectedSessions, summary.TotalMs)
 		if !summary.BusinessSuccess || pressureOK != pressureTotal {
 			os.Exit(1)
@@ -662,6 +668,7 @@ type burstSummary struct {
 	Event                string  `json:"event"`
 	Endpoint             string  `json:"endpoint"`
 	BurstConcurrency     int     `json:"burst_concurrency"`
+	BusinessLane         int     `json:"business_lane"`
 	ArmedWorkers         int     `json:"armed_workers"`
 	MaxActiveWorkers     int64   `json:"max_active_workers"`
 	StartSkewUs          int64   `json:"start_skew_us"`

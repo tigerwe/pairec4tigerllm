@@ -16,6 +16,7 @@ MIN_ACTIVE_RATIO="${MIN_ACTIVE_RATIO:-0.95}"
 REQUIRE_SERVER_WRAPPER="${REQUIRE_SERVER_WRAPPER:-0}"
 REQUIRE_SERVER_OVERLAP="${REQUIRE_SERVER_OVERLAP:-0}"
 BURST_PRECONNECT="${BURST_PRECONNECT:-1}"
+REQUIRE_CLIENT_ACTIVE_RATIO="${REQUIRE_CLIENT_ACTIVE_RATIO:-0}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-0}"
 COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-0}"
@@ -97,6 +98,10 @@ case "$BURST_PRECONNECT" in
   0|1) ;;
   *) echo "ERROR: BURST_PRECONNECT must be 0 or 1" >&2; exit 2 ;;
 esac
+case "$REQUIRE_CLIENT_ACTIVE_RATIO" in
+  0|1) ;;
+  *) echo "ERROR: REQUIRE_CLIENT_ACTIVE_RATIO must be 0 or 1" >&2; exit 2 ;;
+esac
 
 BURST_CONCURRENCY_LEVELS="${BURST_CONCURRENCY_LEVELS//,/ }"
 read -r -a LEVELS <<<"$BURST_CONCURRENCY_LEVELS"
@@ -137,12 +142,14 @@ for repeat in $(seq 1 "$REPEATS"); do
     level_dir="${OUT_DIR}/runs/c${concurrency}"
     result_json="${level_dir}/run-$(printf '%04d' "$repeat").json"
     run_log="${level_dir}/run-$(printf '%04d' "$repeat").log"
-    echo "-- concurrency=${concurrency} repeat=${repeat}/${REPEATS} --"
+    business_lane=$(( (repeat * 7919) % concurrency + 1 ))
+    echo "-- concurrency=${concurrency} repeat=${repeat}/${REPEATS} business_lane=${business_lane} --"
     set +e
     "$PROBE_BIN" \
       --endpoint="$ENDPOINT" \
       --method=burst \
       --burst_concurrency="$concurrency" \
+      --burst_business_lane="$business_lane" \
       --pressure_payload_bytes="$PRESSURE_PAYLOAD_BYTES" \
       --business_payload_bytes="$BUSINESS_PAYLOAD_BYTES" \
       --history_source="$HISTORY_SOURCE" \
@@ -203,7 +210,8 @@ fi
 python3 - "$RUN_INDEX" "$SUMMARY_JSON" "$REPEATS" "$MIN_ACTIVE_RATIO" \
   "$K8S_STATE_OK" "$CRASH_MARKER_COUNT" "$PRESSURE_PAYLOAD_BYTES" \
   "$BUSINESS_PAYLOAD_BYTES" "$ENDPOINT" "$REQUIRE_SERVER_WRAPPER" \
-  "$REQUIRE_SERVER_OVERLAP" "$BURST_PRECONNECT" "${LEVELS[@]}" <<'PY'
+  "$REQUIRE_SERVER_OVERLAP" "$BURST_PRECONNECT" \
+  "$REQUIRE_CLIENT_ACTIVE_RATIO" "${LEVELS[@]}" <<'PY'
 import json
 import math
 import pathlib
@@ -221,7 +229,8 @@ endpoint = sys.argv[9]
 require_server_wrapper = sys.argv[10] == "1"
 require_server_overlap = sys.argv[11] == "1"
 burst_preconnect = sys.argv[12] == "1"
-levels = [int(value) for value in sys.argv[13:]]
+require_client_active_ratio = sys.argv[13] == "1"
+levels = [int(value) for value in sys.argv[14:]]
 
 def percentile(values, quantile):
     values = sorted(values)
@@ -287,10 +296,11 @@ for concurrency in levels:
     valid = (
         len(records) == repeats and len(results) == repeats and process_ok == repeats
         and len(successful) == repeats and pressure_ok == repeats
-        and active_ok == repeats and armed_ok == repeats and k8s_state_ok
+        and armed_ok == repeats and k8s_state_ok
         and (not require_server_wrapper or wrapper_trace_ok == repeats)
         and (not require_server_overlap or wrapper_overlap_ok == repeats)
         and (not burst_preconnect or preconnect_ok == repeats)
+        and (not require_client_active_ratio or active_ok == repeats)
     )
     cases.append({
         "concurrency": concurrency,
@@ -301,6 +311,7 @@ for concurrency in levels:
         "business_failure": repeats - len(successful),
         "full_pressure_success": pressure_ok,
         "active_pass": active_ok,
+        "client_active_ratio_required": require_client_active_ratio,
         "armed_pass": armed_ok,
         "active_threshold": threshold,
         "max_active_min": min(
@@ -314,6 +325,7 @@ for concurrency in levels:
         "connected_sessions_min": min(
             (int(r.get("connected_sessions", 0)) for r in successful), default=0
         ),
+        "business_lanes": [int(r.get("business_lane", 1)) for r in successful],
         "wrapper_required": require_server_wrapper,
         "wrapper_overlap_required": require_server_overlap,
         "wrapper_trace_pass": wrapper_trace_ok,
@@ -360,6 +372,7 @@ summary = {
     "require_server_wrapper": require_server_wrapper,
     "require_server_overlap": require_server_overlap,
     "burst_preconnect": burst_preconnect,
+    "require_client_active_ratio": require_client_active_ratio,
     "latency_samples": "successful business Recommend requests only; failures are reported separately",
     "baseline_concurrency": 1 if baseline else None,
     "k8s_state_ok": k8s_state_ok,
@@ -401,6 +414,8 @@ print("note=inference/runner deltas versus concurrency=1 reveal backend inferenc
 print("note=overlap_min is diagnostic: local Health callbacks can complete before Recommend reaches the server")
 print(f"note=server overlap hard gate enabled={require_server_overlap}")
 print(f"note=preconnect enabled={burst_preconnect}; connected_min must equal configured concurrency")
+print(f"note=client active ratio hard gate enabled={require_client_active_ratio}; active_min is diagnostic")
+print("note=business lane rotates deterministically across repeats to avoid scheduler-order bias")
 print(f"summary_json={summary_path}")
 print(f"RESULT={status}")
 PY
