@@ -149,9 +149,12 @@ for request_id in $(tail -n +2 "$OUT_DIR/requests.tsv" | cut -f4); do
   grep -F "request_id=${request_id}" "$OUT_DIR/${INFERENCE_DEPLOYMENT}.log" >/dev/null \
     || die "inference trace missing request_id=${request_id}"
 done
-if grep -Eqi 'from=cache|fallback|brpc request failed|Segmentation|core dumped|Out of memory' \
-    "$OUT_DIR/${PAIREC_DEPLOYMENT}.log" "$OUT_DIR/${WRAPPER_DEPLOYMENT}.log" "$OUT_DIR/${INFERENCE_DEPLOYMENT}.log"; then
-  die "cache, fallback, RPC failure, or crash marker detected"
+error_markers="$(grep -Ein \
+  'from=cache|result_cache_source=cache|fallback to HTTP|fallback_to_http[^a-zA-Z0-9]+true|brpc request failed|Segmentation|core dumped|Out of memory' \
+  "$OUT_DIR/${PAIREC_DEPLOYMENT}.log" "$OUT_DIR/${WRAPPER_DEPLOYMENT}.log" "$OUT_DIR/${INFERENCE_DEPLOYMENT}.log" || true)"
+if test -n "$error_markers"; then
+  printf '%s\n' "$error_markers" >&2
+  die "cache hit, HTTP fallback, RPC failure, or crash marker detected"
 fi
 
 echo "PAIREC_BRPC_BURST_BENCHMARK_OK concurrency=${EXPECTED_CONCURRENCY} samples=${REQUESTS}"
