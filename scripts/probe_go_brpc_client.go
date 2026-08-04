@@ -357,6 +357,13 @@ func main() {
 					if resp.Trace != nil {
 						result.backend = resp.Trace.Backend
 						result.runnerGenerateMs = resp.Trace.RunnerGenerateMs
+						result.wrapperTotalMs = resp.Trace.WrapperTotalMs
+						result.wrapperBackendRPCMs = resp.Trace.WrapperBackendRPCMs
+						result.wrapperOverheadMs = resp.Trace.WrapperOverheadMs
+						result.wrapperHealthAtStart = resp.Trace.WrapperHealthAtStart
+						result.wrapperMaxActiveHealth = resp.Trace.WrapperMaxActiveHealth
+						result.wrapperMaxActiveTotal = resp.Trace.WrapperMaxActiveTotal
+						result.wrapperBackendBRPCMs = resp.Trace.WrapperBackendBRPCMs
 					}
 					if result.items == 0 {
 						result.err = fmt.Errorf("Recommend returned no items")
@@ -392,9 +399,12 @@ func main() {
 					fmt.Fprintf(os.Stderr, "burst business failed endpoint=%s request_id=%s client_wall_ms=%.3f error=%v\n",
 						result.endpoint, result.requestID, float64(result.latencyUs)/1000, result.err)
 				} else {
-					fmt.Printf("burst business ok endpoint=%s request_id=%s client_wall_ms=%.3f inference_ms=%.3f runner_generate_ms=%.3f brpc_delta_ms=%.3f items=%d backend=%s\n",
+					fmt.Printf("burst business ok endpoint=%s request_id=%s client_wall_ms=%.3f inference_ms=%.3f runner_generate_ms=%.3f brpc_delta_ms=%.3f front_brpc_ms=%.3f wrapper_total_ms=%.3f wrapper_backend_rpc_ms=%.3f wrapper_overhead_ms=%.3f wrapper_backend_brpc_ms=%.3f wrapper_health_at_start=%d wrapper_max_active_health=%d wrapper_max_active_total=%d items=%d backend=%s\n",
 						result.endpoint, result.requestID, float64(result.latencyUs)/1000, result.inferenceMs,
 						result.runnerGenerateMs, float64(result.latencyUs)/1000-result.inferenceMs,
+						result.frontBRPCMs(), result.wrapperTotalMs,
+						result.wrapperBackendRPCMs, result.wrapperOverheadMs, result.wrapperBackendBRPCMs,
+						result.wrapperHealthAtStart, result.wrapperMaxActiveHealth, result.wrapperMaxActiveTotal,
 						result.items, result.backend)
 				}
 				continue
@@ -449,6 +459,14 @@ func main() {
 			BusinessCode:         business.code,
 			BusinessUserID:       business.userID,
 			BusinessBackend:      business.backend,
+			BusinessFrontBRPCMs:  business.frontBRPCMs(),
+			WrapperTotalMs:       business.wrapperTotalMs,
+			WrapperBackendRPCMs:  business.wrapperBackendRPCMs,
+			WrapperOverheadMs:    business.wrapperOverheadMs,
+			WrapperHealthAtStart: business.wrapperHealthAtStart,
+			WrapperMaxHealth:     business.wrapperMaxActiveHealth,
+			WrapperMaxTotal:      business.wrapperMaxActiveTotal,
+			WrapperBackendBRPCMs: business.wrapperBackendBRPCMs,
 		}
 		encoded, err := json.Marshal(summary)
 		if err != nil {
@@ -554,21 +572,36 @@ func main() {
 }
 
 type probeResult struct {
-	index            int
-	endpoint         string
-	role             string
-	requestID        string
-	latencyMs        int64
-	latencyUs        int64
-	startOffsetUs    int64
-	err              error
-	code             int
-	status           string
-	backend          string
-	userID           string
-	items            int
-	inferenceMs      float64
-	runnerGenerateMs float64
+	index                  int
+	endpoint               string
+	role                   string
+	requestID              string
+	latencyMs              int64
+	latencyUs              int64
+	startOffsetUs          int64
+	err                    error
+	code                   int
+	status                 string
+	backend                string
+	userID                 string
+	items                  int
+	inferenceMs            float64
+	runnerGenerateMs       float64
+	wrapperTotalMs         float64
+	wrapperBackendRPCMs    float64
+	wrapperOverheadMs      float64
+	wrapperHealthAtStart   int64
+	wrapperMaxActiveHealth int64
+	wrapperMaxActiveTotal  int64
+	wrapperBackendBRPCMs   float64
+}
+
+func (result probeResult) frontBRPCMs() float64 {
+	clientWallMs := float64(result.latencyUs) / 1000
+	if result.wrapperTotalMs > 0 {
+		return clientWallMs - result.wrapperTotalMs
+	}
+	return clientWallMs - result.inferenceMs
 }
 
 type burstSummary struct {
@@ -598,6 +631,14 @@ type burstSummary struct {
 	BusinessCode         int     `json:"business_code"`
 	BusinessUserID       string  `json:"business_user_id"`
 	BusinessBackend      string  `json:"business_backend"`
+	BusinessFrontBRPCMs  float64 `json:"business_front_brpc_ms"`
+	WrapperTotalMs       float64 `json:"wrapper_total_ms"`
+	WrapperBackendRPCMs  float64 `json:"wrapper_backend_rpc_ms"`
+	WrapperOverheadMs    float64 `json:"wrapper_overhead_ms"`
+	WrapperHealthAtStart int64   `json:"wrapper_active_health_at_start"`
+	WrapperMaxHealth     int64   `json:"wrapper_max_active_health"`
+	WrapperMaxTotal      int64   `json:"wrapper_max_active_total"`
+	WrapperBackendBRPCMs float64 `json:"wrapper_backend_brpc_ms"`
 }
 
 func splitEndpoints(value string) []string {

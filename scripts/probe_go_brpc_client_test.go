@@ -57,3 +57,15 @@ func TestBurstStatistics(t *testing.T) {
 		t.Fatalf("spread = %dus, want 10us", got)
 	}
 }
+
+func TestProbeResultFrontBRPCMs(t *testing.T) {
+	direct := probeResult{latencyUs: 120000, inferenceMs: 115}
+	if got := direct.frontBRPCMs(); got != 5 {
+		t.Fatalf("direct front BRPC = %.3fms, want 5ms", got)
+	}
+
+	wrapped := probeResult{latencyUs: 130000, wrapperTotalMs: 125}
+	if got := wrapped.frontBRPCMs(); got != 5 {
+		t.Fatalf("wrapped front BRPC = %.3fms, want 5ms", got)
+	}
+}

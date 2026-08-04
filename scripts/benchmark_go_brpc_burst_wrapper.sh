@@ -4,6 +4,7 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-pairec}"
 INFERENCE_SERVICE="${INFERENCE_SERVICE:-inference-brpc-trtllm}"
 INFERENCE_APP="${INFERENCE_APP:-inference-brpc-trtllm}"
+WRAPPER_APP="${WRAPPER_APP:-brpc-burst-wrapper}"
 BRPC_PORT="${BRPC_PORT:-18100}"
 ENDPOINT="${ENDPOINT:-}"
 BURST_CONCURRENCY_LEVELS="${BURST_CONCURRENCY_LEVELS:-10 100 1000}"
@@ -12,6 +13,7 @@ REPEATS="${REPEATS:-1000}"
 PRESSURE_PAYLOAD_BYTES="${PRESSURE_PAYLOAD_BYTES:-102400}"
 BUSINESS_PAYLOAD_BYTES="${BUSINESS_PAYLOAD_BYTES:-0}"
 MIN_ACTIVE_RATIO="${MIN_ACTIVE_RATIO:-0.95}"
+REQUIRE_SERVER_WRAPPER="${REQUIRE_SERVER_WRAPPER:-0}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-0}"
 COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-0}"
@@ -54,8 +56,8 @@ resolve_endpoint() {
 }
 
 capture_pod_state() {
-  local output="$1"
-  kubectl -n "$NAMESPACE" get pods -l "app=${INFERENCE_APP}" -o json |
+  local output="$1" app="$2"
+  kubectl -n "$NAMESPACE" get pods -l "app=${app}" -o json |
     python3 -c '
 import json, sys
 pods = json.load(sys.stdin).get("items", [])
@@ -81,6 +83,10 @@ if [ -z "$ENDPOINT" ] || [ "$CHECK_K8S_STATE" = "1" ]; then
 fi
 resolve_endpoint
 validate_positive_integer REPEATS "$REPEATS"
+case "$REQUIRE_SERVER_WRAPPER" in
+  0|1) ;;
+  *) echo "ERROR: REQUIRE_SERVER_WRAPPER must be 0 or 1" >&2; exit 2 ;;
+esac
 
 BURST_CONCURRENCY_LEVELS="${BURST_CONCURRENCY_LEVELS//,/ }"
 read -r -a LEVELS <<<"$BURST_CONCURRENCY_LEVELS"
@@ -93,7 +99,10 @@ done
 mapfile -t LEVELS < <(printf '%s\n' "${LEVELS[@]}" | sort -n -u)
 
 if [ "$CHECK_K8S_STATE" = "1" ]; then
-  capture_pod_state "${OUT_DIR}/pod.before"
+  capture_pod_state "${OUT_DIR}/inference-pod.before" "$INFERENCE_APP"
+  if [ "$REQUIRE_SERVER_WRAPPER" = "1" ]; then
+    capture_pod_state "${OUT_DIR}/wrapper-pod.before" "$WRAPPER_APP"
+  fi
 fi
 
 echo "== Build Go BRPC burst probe =="
@@ -152,24 +161,37 @@ done
 K8S_STATE_OK=1
 CRASH_MARKER_COUNT=0
 if [ "$CHECK_K8S_STATE" = "1" ]; then
-  capture_pod_state "${OUT_DIR}/pod.after"
-  if ! cmp -s "${OUT_DIR}/pod.before" "${OUT_DIR}/pod.after"; then
+  capture_pod_state "${OUT_DIR}/inference-pod.after" "$INFERENCE_APP"
+  if ! cmp -s "${OUT_DIR}/inference-pod.before" "${OUT_DIR}/inference-pod.after"; then
     K8S_STATE_OK=0
     echo "ERROR: inference pod identity or restart count changed" >&2
-    diff -u "${OUT_DIR}/pod.before" "${OUT_DIR}/pod.after" || true
+    diff -u "${OUT_DIR}/inference-pod.before" "${OUT_DIR}/inference-pod.after" || true
   fi
-  pod_name="$(awk -F= '$1 == "pod" {print $2}' "${OUT_DIR}/pod.after")"
+  if [ "$REQUIRE_SERVER_WRAPPER" = "1" ]; then
+    capture_pod_state "${OUT_DIR}/wrapper-pod.after" "$WRAPPER_APP"
+    if ! cmp -s "${OUT_DIR}/wrapper-pod.before" "${OUT_DIR}/wrapper-pod.after"; then
+      K8S_STATE_OK=0
+      echo "ERROR: wrapper pod identity or restart count changed" >&2
+      diff -u "${OUT_DIR}/wrapper-pod.before" "${OUT_DIR}/wrapper-pod.after" || true
+    fi
+    wrapper_pod="$(awk -F= '$1 == "pod" {print $2}' "${OUT_DIR}/wrapper-pod.after")"
+    kubectl -n "$NAMESPACE" logs "$wrapper_pod" --since-time="$STARTED_AT" >"${OUT_DIR}/wrapper.log" 2>&1 || true
+    wrapper_crashes="$(grep -Eic 'Segmentation|core dumped|Out of memory|terminate called' "${OUT_DIR}/wrapper.log" || true)"
+    CRASH_MARKER_COUNT=$((CRASH_MARKER_COUNT + wrapper_crashes))
+  fi
+  pod_name="$(awk -F= '$1 == "pod" {print $2}' "${OUT_DIR}/inference-pod.after")"
   kubectl -n "$NAMESPACE" logs "$pod_name" --since-time="$STARTED_AT" >"${OUT_DIR}/inference.log" 2>&1 || true
-  CRASH_MARKER_COUNT="$(grep -Eic 'EngineCore failed|Segmentation|core dumped|Out of memory|terminate called' "${OUT_DIR}/inference.log" || true)"
+  inference_crashes="$(grep -Eic 'EngineCore failed|Segmentation|core dumped|Out of memory|terminate called' "${OUT_DIR}/inference.log" || true)"
+  CRASH_MARKER_COUNT=$((CRASH_MARKER_COUNT + inference_crashes))
   if [ "$CRASH_MARKER_COUNT" -ne 0 ]; then
     K8S_STATE_OK=0
-    echo "ERROR: inference crash markers detected: ${CRASH_MARKER_COUNT}" >&2
+    echo "ERROR: inference/wrapper crash markers detected: ${CRASH_MARKER_COUNT}" >&2
   fi
 fi
 
 python3 - "$RUN_INDEX" "$SUMMARY_JSON" "$REPEATS" "$MIN_ACTIVE_RATIO" \
   "$K8S_STATE_OK" "$CRASH_MARKER_COUNT" "$PRESSURE_PAYLOAD_BYTES" \
-  "$BUSINESS_PAYLOAD_BYTES" "$ENDPOINT" "${LEVELS[@]}" <<'PY'
+  "$BUSINESS_PAYLOAD_BYTES" "$ENDPOINT" "$REQUIRE_SERVER_WRAPPER" "${LEVELS[@]}" <<'PY'
 import json
 import math
 import pathlib
@@ -184,7 +206,8 @@ crash_marker_count = int(sys.argv[6])
 pressure_payload_bytes = int(sys.argv[7])
 business_payload_bytes = int(sys.argv[8])
 endpoint = sys.argv[9]
-levels = [int(value) for value in sys.argv[10:]]
+require_server_wrapper = sys.argv[10] == "1"
+levels = [int(value) for value in sys.argv[11:]]
 
 def percentile(values, quantile):
     values = sorted(values)
@@ -237,11 +260,18 @@ for concurrency in levels:
     threshold = math.ceil(concurrency * min_active_ratio)
     active_ok = sum(int(result.get("max_active_workers", 0)) >= threshold for result in results)
     armed_ok = sum(int(result.get("armed_workers", 0)) == concurrency for result in results)
+    wrapper_trace_ok = sum(float(result.get("wrapper_total_ms", 0.0)) > 0.0 for result in successful)
+    wrapper_overlap_ok = sum(
+        int(result.get("wrapper_max_active_total", 0)) >= threshold for result in successful
+    )
     process_ok = sum(record["exit_code"] == 0 and record["result"] is not None for record in records)
     valid = (
         len(records) == repeats and len(results) == repeats and process_ok == repeats
         and len(successful) == repeats and pressure_ok == repeats
         and active_ok == repeats and armed_ok == repeats and k8s_state_ok
+        and (not require_server_wrapper or (
+            wrapper_trace_ok == repeats and wrapper_overlap_ok == repeats
+        ))
     )
     cases.append({
         "concurrency": concurrency,
@@ -254,18 +284,32 @@ for concurrency in levels:
         "active_pass": active_ok,
         "armed_pass": armed_ok,
         "active_threshold": threshold,
+        "wrapper_required": require_server_wrapper,
+        "wrapper_trace_pass": wrapper_trace_ok,
+        "wrapper_overlap_pass": wrapper_overlap_ok,
+        "wrapper_max_active_total_min": min(
+            (int(r.get("wrapper_max_active_total", 0)) for r in successful), default=0
+        ),
         "sample_sufficient_for_p99": len(successful) >= 1000,
         "successful_requests_only": True,
         "client_wall": metric([float(r["business_client_wall_ms"]) for r in successful]),
         "inference": metric([float(r["business_inference_ms"]) for r in successful]),
         "runner_generate": metric([float(r.get("business_runner_generate_ms", 0.0)) for r in successful]),
         "brpc_delta": metric([float(r["business_brpc_delta_ms"]) for r in successful]),
+        "front_brpc": metric([float(r.get("business_front_brpc_ms", 0.0)) for r in successful]),
+        "wrapper_total": metric([float(r.get("wrapper_total_ms", 0.0)) for r in successful]),
+        "wrapper_backend_rpc": metric([float(r.get("wrapper_backend_rpc_ms", 0.0)) for r in successful]),
+        "wrapper_overhead": metric([float(r.get("wrapper_overhead_ms", 0.0)) for r in successful]),
+        "wrapper_backend_brpc": metric([float(r.get("wrapper_backend_brpc_ms", 0.0)) for r in successful]),
         "valid": valid,
     })
 
 baseline = next((case for case in cases if case["concurrency"] == 1 and case["valid"]), None)
 for case in cases:
-    for name in ("client_wall", "inference", "runner_generate", "brpc_delta"):
+    for name in (
+        "client_wall", "inference", "runner_generate", "brpc_delta", "front_brpc",
+        "wrapper_total", "wrapper_backend_rpc", "wrapper_overhead", "wrapper_backend_brpc",
+    ):
         current = case[name]["p99_ms"]
         base = baseline[name]["p99_ms"] if baseline else None
         delta = current - base if current is not None and base is not None else None
@@ -282,6 +326,7 @@ summary = {
     "pressure_payload_bytes": pressure_payload_bytes,
     "business_payload_bytes": business_payload_bytes,
     "minimum_active_ratio": min_active_ratio,
+    "require_server_wrapper": require_server_wrapper,
     "latency_samples": "successful business Recommend requests only; failures are reported separately",
     "baseline_concurrency": 1 if baseline else None,
     "k8s_state_ok": k8s_state_ok,
@@ -295,7 +340,7 @@ def show(value):
     return "n/a" if value is None else f"{value:.3f}"
 
 print("\n== BRPC burst p99 summary ==")
-print("concurrency valid samples formal client_p99 inference_p99 runner_p99 brpc_p99 inference_delta runner_delta failures status")
+print("concurrency valid samples formal client_p99 inference_p99 runner_p99 inference_delta runner_delta front_brpc_p99 wrapper_p99 backend_rpc_p99 backend_brpc_p99 overlap_min failures status")
 for case in cases:
     print(
         f"{case['concurrency']:>11} {str(case['valid']):>5} "
@@ -304,14 +349,20 @@ for case in cases:
         f"{show(case['client_wall']['p99_ms']):>10} "
         f"{show(case['inference']['p99_ms']):>13} "
         f"{show(case['runner_generate']['p99_ms']):>10} "
-        f"{show(case['brpc_delta']['p99_ms']):>8} "
         f"{show(case['inference']['p99_delta_vs_baseline_ms']):>15} "
         f"{show(case['runner_generate']['p99_delta_vs_baseline_ms']):>12} "
+        f"{show(case['front_brpc']['p99_ms']):>14} "
+        f"{show(case['wrapper_total']['p99_ms']):>11} "
+        f"{show(case['wrapper_backend_rpc']['p99_ms']):>15} "
+        f"{show(case['wrapper_backend_brpc']['p99_ms']):>16} "
+        f"{case['wrapper_max_active_total_min']:>11} "
         f"{case['business_failure']:>8} "
         f"{'PASS' if case['valid'] else 'FAIL'}"
     )
 print("note=p99 is measured from one business Recommend per synchronized burst; no latency target is enforced")
-print("note=inference/runner deltas versus concurrency=1 reveal same-instance inference interference")
+print("note=front_brpc is client wall minus Wrapper total; backend_brpc is Wrapper backend RPC minus backend inference")
+print("note=inference/runner deltas versus concurrency=1 reveal backend inference interference")
+print("note=overlap_min is the minimum server-observed active lane peak across successful bursts")
 print(f"summary_json={summary_path}")
 print(f"RESULT={status}")
 PY

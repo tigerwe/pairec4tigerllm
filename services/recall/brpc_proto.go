@@ -82,6 +82,13 @@ type traceInfoPB struct {
 	ResultCacheDSLookupMs    *float64 `protobuf:"fixed64,20,opt,name=result_cache_ds_lookup_ms,json=resultCacheDsLookupMs" json:"result_cache_ds_lookup_ms,omitempty"`
 	ResultCacheWriteSubmitMs *float64 `protobuf:"fixed64,21,opt,name=result_cache_write_submit_ms,json=resultCacheWriteSubmitMs" json:"result_cache_write_submit_ms,omitempty"`
 	Backend                  *string  `protobuf:"bytes,22,opt,name=backend" json:"backend,omitempty"`
+	WrapperTotalMs           *float64 `protobuf:"fixed64,23,opt,name=wrapper_total_ms,json=wrapperTotalMs" json:"wrapper_total_ms,omitempty"`
+	WrapperBackendRPCMs      *float64 `protobuf:"fixed64,24,opt,name=wrapper_backend_rpc_ms,json=wrapperBackendRpcMs" json:"wrapper_backend_rpc_ms,omitempty"`
+	WrapperOverheadMs        *float64 `protobuf:"fixed64,25,opt,name=wrapper_overhead_ms,json=wrapperOverheadMs" json:"wrapper_overhead_ms,omitempty"`
+	WrapperHealthAtStart     *int64   `protobuf:"varint,26,opt,name=wrapper_active_health_at_start,json=wrapperActiveHealthAtStart" json:"wrapper_active_health_at_start,omitempty"`
+	WrapperMaxActiveHealth   *int64   `protobuf:"varint,27,opt,name=wrapper_max_active_health,json=wrapperMaxActiveHealth" json:"wrapper_max_active_health,omitempty"`
+	WrapperMaxActiveTotal    *int64   `protobuf:"varint,28,opt,name=wrapper_max_active_total,json=wrapperMaxActiveTotal" json:"wrapper_max_active_total,omitempty"`
+	WrapperBackendBRPCMs     *float64 `protobuf:"fixed64,29,opt,name=wrapper_backend_brpc_ms,json=wrapperBackendBrpcMs" json:"wrapper_backend_brpc_ms,omitempty"`
 }
 
 func (m *traceInfoPB) Reset()         { *m = traceInfoPB{} }
@@ -216,6 +223,13 @@ func traceInfoFromProto(pb *traceInfoPB) *TraceInfo {
 		ResultCacheDSLookupMs:    float64Value(pb.ResultCacheDSLookupMs),
 		ResultCacheWriteSubmitMs: float64Value(pb.ResultCacheWriteSubmitMs),
 		Backend:                  stringValue(pb.Backend),
+		WrapperTotalMs:           float64Value(pb.WrapperTotalMs),
+		WrapperBackendRPCMs:      float64Value(pb.WrapperBackendRPCMs),
+		WrapperOverheadMs:        float64Value(pb.WrapperOverheadMs),
+		WrapperHealthAtStart:     int64Value(pb.WrapperHealthAtStart),
+		WrapperMaxActiveHealth:   int64Value(pb.WrapperMaxActiveHealth),
+		WrapperMaxActiveTotal:    int64Value(pb.WrapperMaxActiveTotal),
+		WrapperBackendBRPCMs:     float64Value(pb.WrapperBackendBRPCMs),
 	}
 }
 

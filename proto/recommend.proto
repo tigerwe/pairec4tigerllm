@@ -41,6 +41,13 @@ message TraceInfo {
   optional double result_cache_ds_lookup_ms = 20;
   optional double result_cache_write_submit_ms = 21;
   optional string backend = 22;
+  optional double wrapper_total_ms = 23;
+  optional double wrapper_backend_rpc_ms = 24;
+  optional double wrapper_overhead_ms = 25;
+  optional int64 wrapper_active_health_at_start = 26;
+  optional int64 wrapper_max_active_health = 27;
+  optional int64 wrapper_max_active_total = 28;
+  optional double wrapper_backend_brpc_ms = 29;
 }
 
 message Recommendation {

@@ -160,8 +160,15 @@ func TestRecommendProtoRoundTrip(t *testing.T) {
 			},
 		},
 		Trace: &traceInfoPB{
-			Backend:          proto.String("trtllm_cpp"),
-			RunnerGenerateMs: proto.Float64(99.9),
+			Backend:                proto.String("trtllm_cpp"),
+			RunnerGenerateMs:       proto.Float64(99.9),
+			WrapperTotalMs:         proto.Float64(105.5),
+			WrapperBackendRPCMs:    proto.Float64(102.0),
+			WrapperOverheadMs:      proto.Float64(3.5),
+			WrapperHealthAtStart:   proto.Int64(80),
+			WrapperMaxActiveHealth: proto.Int64(99),
+			WrapperMaxActiveTotal:  proto.Int64(100),
+			WrapperBackendBRPCMs:   proto.Float64(2.0),
 		},
 	}
 
@@ -174,6 +181,12 @@ func TestRecommendProtoRoundTrip(t *testing.T) {
 	}
 	if resp.Trace == nil || resp.Trace.Backend != "trtllm_cpp" || resp.Trace.RunnerGenerateMs != 99.9 {
 		t.Fatalf("unexpected trace: %+v", resp.Trace)
+	}
+	if resp.Trace.WrapperTotalMs != 105.5 || resp.Trace.WrapperBackendRPCMs != 102.0 ||
+		resp.Trace.WrapperOverheadMs != 3.5 || resp.Trace.WrapperHealthAtStart != 80 ||
+		resp.Trace.WrapperMaxActiveHealth != 99 || resp.Trace.WrapperMaxActiveTotal != 100 ||
+		resp.Trace.WrapperBackendBRPCMs != 2.0 {
+		t.Fatalf("unexpected wrapper trace: %+v", resp.Trace)
 	}
 }
 

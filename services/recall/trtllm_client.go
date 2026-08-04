@@ -29,25 +29,32 @@ type RecommendRequest struct {
 
 // TraceInfo 推理服务回传的性能追踪信息.
 type TraceInfo struct {
-	TotalMs                  float64 `json:"total_ms"`                     // 推理服务总耗时
-	PrepareInputMs           float64 `json:"prepare_input_ms"`             // 输入准备耗时
-	InferMs                  float64 `json:"infer_ms"`                     // 推理分支总耗时
-	ModelForwardMs           float64 `json:"model_forward_ms"`             // 模型前向耗时
-	GenerateMs               float64 `json:"generate_ms"`                  // 生成总耗时
-	PromptMs                 float64 `json:"prompt_ms"`                    // TRT prompt 构造和 tokenize 耗时
-	RunnerGenerateMs         float64 `json:"runner_generate_ms"`           // TRT runner.generate 累计耗时
-	ParseComboMs             float64 `json:"parse_combo_ms"`               // TRT token 组合解析耗时
-	OutputPadMs              float64 `json:"output_pad_ms"`                // TRT 输出补齐耗时
-	BackendTotalMs           float64 `json:"backend_total_ms"`             // TRT 后端 generate 总耗时
-	MapItemMs                float64 `json:"map_item_ms"`                  // 语义 ID 映射耗时
-	KvLookupMs               float64 `json:"kv_lookup_ms"`                 // KV Cache 查询耗时
-	KvWriteMs                float64 `json:"kv_write_ms"`                  // KV Cache 写入提交耗时
-	KvSource                 string  `json:"kv_source"`                    // KV Cache 来源
-	ResultCacheSource        string  `json:"result_cache_source"`          // 推荐结果缓存来源
-	ResultCacheLookupMs      float64 `json:"result_cache_lookup_ms"`       // HBM 结果缓存查询耗时
-	ResultCacheDSLookupMs    float64 `json:"result_cache_ds_lookup_ms"`    // DataSystem 结果缓存查询耗时
-	ResultCacheWriteSubmitMs float64 `json:"result_cache_write_submit_ms"` // 结果缓存异步写入提交耗时
-	Backend                  string  `json:"backend"`                      // 后端类型
+	TotalMs                  float64 `json:"total_ms"`                       // 推理服务总耗时
+	PrepareInputMs           float64 `json:"prepare_input_ms"`               // 输入准备耗时
+	InferMs                  float64 `json:"infer_ms"`                       // 推理分支总耗时
+	ModelForwardMs           float64 `json:"model_forward_ms"`               // 模型前向耗时
+	GenerateMs               float64 `json:"generate_ms"`                    // 生成总耗时
+	PromptMs                 float64 `json:"prompt_ms"`                      // TRT prompt 构造和 tokenize 耗时
+	RunnerGenerateMs         float64 `json:"runner_generate_ms"`             // TRT runner.generate 累计耗时
+	ParseComboMs             float64 `json:"parse_combo_ms"`                 // TRT token 组合解析耗时
+	OutputPadMs              float64 `json:"output_pad_ms"`                  // TRT 输出补齐耗时
+	BackendTotalMs           float64 `json:"backend_total_ms"`               // TRT 后端 generate 总耗时
+	MapItemMs                float64 `json:"map_item_ms"`                    // 语义 ID 映射耗时
+	KvLookupMs               float64 `json:"kv_lookup_ms"`                   // KV Cache 查询耗时
+	KvWriteMs                float64 `json:"kv_write_ms"`                    // KV Cache 写入提交耗时
+	KvSource                 string  `json:"kv_source"`                      // KV Cache 来源
+	ResultCacheSource        string  `json:"result_cache_source"`            // 推荐结果缓存来源
+	ResultCacheLookupMs      float64 `json:"result_cache_lookup_ms"`         // HBM 结果缓存查询耗时
+	ResultCacheDSLookupMs    float64 `json:"result_cache_ds_lookup_ms"`      // DataSystem 结果缓存查询耗时
+	ResultCacheWriteSubmitMs float64 `json:"result_cache_write_submit_ms"`   // 结果缓存异步写入提交耗时
+	Backend                  string  `json:"backend"`                        // 后端类型
+	WrapperTotalMs           float64 `json:"wrapper_total_ms"`               // 前置Wrapper处理总耗时
+	WrapperBackendRPCMs      float64 `json:"wrapper_backend_rpc_ms"`         // Wrapper到推理后端的BRPC墙钟耗时
+	WrapperOverheadMs        float64 `json:"wrapper_overhead_ms"`            // Wrapper本地处理和转发开销
+	WrapperHealthAtStart     int64   `json:"wrapper_active_health_at_start"` // 业务路进入时在途Health数
+	WrapperMaxActiveHealth   int64   `json:"wrapper_max_active_health"`      // 业务路执行期间Health峰值
+	WrapperMaxActiveTotal    int64   `json:"wrapper_max_active_total"`       // 业务路加Health的峰值
+	WrapperBackendBRPCMs     float64 `json:"wrapper_backend_brpc_ms"`        // 后端RPC墙钟减后端推理耗时
 }
 
 // Recommendation 推荐结果.

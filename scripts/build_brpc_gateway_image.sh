@@ -29,6 +29,7 @@ docker run --rm --entrypoint /bin/bash "$IMAGE" -lc '
   set -euo pipefail
   for bin in \
       /opt/pairec-brpc/bin/brpc_gateway \
+      /opt/pairec-brpc/bin/brpc_burst_wrapper \
       /opt/pairec-brpc/bin/brpc_recommend_client \
       /opt/pairec-brpc/bin/brpc_inference_server; do
     echo "== ldd $bin =="

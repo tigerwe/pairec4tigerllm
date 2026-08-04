@@ -54,12 +54,16 @@ if [ "$ENABLE_TRTLLM_CPP" = "ON" ] || [ "$ENABLE_TRTLLM_CPP" = "1" ]; then
     set -euo pipefail
     unset LD_PRELOAD || true
 
-    echo "== ldd /opt/pairec-brpc/bin/brpc_recommend_client =="
-    ldd /opt/pairec-brpc/bin/brpc_recommend_client | tee /tmp/brpc_recommend_client.ldd
-    if grep -q "not found" /tmp/brpc_recommend_client.ldd; then
-      echo "ERROR: missing runtime libraries for brpc_recommend_client" >&2
-      exit 1
-    fi
+    for bin in \
+        /opt/pairec-brpc/bin/brpc_burst_wrapper \
+        /opt/pairec-brpc/bin/brpc_recommend_client; do
+      echo "== ldd $bin =="
+      ldd "$bin" | tee "/tmp/$(basename "$bin").ldd"
+      if grep -q "not found" "/tmp/$(basename "$bin").ldd"; then
+        echo "ERROR: missing runtime libraries for $bin" >&2
+        exit 1
+      fi
+    done
 
     echo "== readelf -d /opt/pairec-brpc/bin/brpc_inference_server =="
     readelf -d /opt/pairec-brpc/bin/brpc_inference_server | grep NEEDED || true
@@ -70,6 +74,7 @@ else
     set -euo pipefail
     unset LD_PRELOAD || true
     for bin in \
+        /opt/pairec-brpc/bin/brpc_burst_wrapper \
         /opt/pairec-brpc/bin/brpc_inference_server \
         /opt/pairec-brpc/bin/brpc_recommend_client; do
       echo "== ldd $bin =="

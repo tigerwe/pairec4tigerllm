@@ -322,6 +322,18 @@ target_link_libraries(
     Threads::Threads
 )
 
+add_executable(brpc_burst_wrapper brpc_burst_wrapper.cpp)
+target_include_directories(brpc_burst_wrapper PRIVATE ${BRPC_INCLUDE_DIR})
+target_link_libraries(
+  brpc_burst_wrapper
+  PRIVATE
+    pairec_recommend_proto
+    ${BRPC_LIBRARY}
+    ${ABSL_EXTRA_LIBS}
+    ${BRPC_EXTRA_LIBS}
+    Threads::Threads
+)
+
 add_executable(brpc_recommend_client recommend_client.cpp)
 target_include_directories(brpc_recommend_client PRIVATE ${BRPC_INCLUDE_DIR})
 target_link_libraries(
@@ -386,4 +398,11 @@ if(PAIREC_ENABLE_DATASYSTEM_KV_PROBE)
   )
 endif()
 
-install(TARGETS brpc_gateway brpc_recommend_client brpc_inference_server RUNTIME DESTINATION bin)
+install(
+  TARGETS
+    brpc_gateway
+    brpc_burst_wrapper
+    brpc_recommend_client
+    brpc_inference_server
+  RUNTIME DESTINATION bin
+)

@@ -262,6 +262,56 @@ CPU、内存分配和网络队列，因此可能抬高正式推理时延。若 `
 只有Recommend和Health全部成功、`max_active_workers >= N*95%`、Pod身份和重启数不变
 且没有崩溃标记时，该档位才有效。
 
+### 使用独立服务端Wrapper隔离推理实例
+
+若目标是让业务Recommend与BRPC压力共享25G入口，但不让N-1路Health进入TRT进程，
+部署独立的BRPC-to-BRPC Wrapper：
+
+```text
+189客户端
+  -> 192.168.100.11:18103 BRPC Wrapper
+       |- Recommend -> 192.168.100.11:18100真实推理
+       `- Health    -> Wrapper本地返回，不转发后端
+```
+
+先重建包含 `brpc_burst_wrapper` 的轻量BRPC镜像并部署：
+
+```bash
+bash scripts/build_brpc_inference_image.sh
+bash scripts/k8s_apply_brpc_burst_wrapper_188.sh
+```
+
+部署脚本会验证Wrapper本地Health和经Wrapper转发的Recommend。Wrapper默认使用独立
+`18103`端口以及request=limit=8 CPU的Guaranteed资源配置；部署后仍需通过
+`Cpus_allowed_list`确认节点启用了静态CPU分配，并检查它与推理Pod不重叠。
+
+三轮功能和同步门smoke：
+
+```bash
+ENDPOINT=192.168.100.11:18103 \
+REQUIRE_SERVER_WRAPPER=1 \
+BURST_CONCURRENCY_LEVELS='10 100 1000' \
+REPEATS=3 \
+PRESSURE_PAYLOAD_BYTES=102400 \
+  bash scripts/benchmark_go_brpc_burst_wrapper.sh
+```
+
+Wrapper模式额外报告：
+
+- `front_brpc_ms = client_wall_ms - wrapper_total_ms`；
+- `wrapper_backend_rpc_ms`：Wrapper到真实推理服务的BRPC墙钟；
+- `wrapper_overhead_ms`：Wrapper本地处理和转发开销；
+- `wrapper_backend_brpc_ms = backend_rpc_ms - backend_inference_ms`；
+- `wrapper_active_health_at_start`与`wrapper_max_active_health`；
+- `wrapper_max_active_total`：业务路执行期间服务端实际重叠lane峰值。
+
+设置`REQUIRE_SERVER_WRAPPER=1`后，每一轮除了客户端并发门禁，还要求Trace中存在Wrapper
+指标，且`wrapper_max_active_total >= N*MIN_ACTIVE_RATIO`。这样不会把客户端已放行但已在
+Wrapper端快速结束的Health误记为业务路的有效重叠压力。
+
+该模式测量的是增加前置Wrapper后的正式链路，不等同于客户端直连18100；如果后续将其
+用于业务结论，Wrapper必须成为正式服务入口，并单独报告新增的一跳转发开销。
+
 ### 持续压力矩阵
 
 先跑同缓存形态 baseline：
