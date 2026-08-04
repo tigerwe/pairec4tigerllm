@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pairec-config-brpc-wrapper-c1
+  namespace: pairec
+data:
+  pairec_config.json: |
+    {
+      "RunMode": "daily",
+      "ListenConf": {
+        "HttpAddr": "0.0.0.0",
+        "HttpPort": 18080
+      },
+      "SceneConfs": {
+        "home_feed": {
+          "default": {
+            "RecallNames": ["generative_recall"]
+          }
+        }
+      },
+      "SortNames": {
+        "home_feed": ["boost_score_sort"]
+      },
+      "RecallConfs": [
+        {
+          "Name": "generative_recall",
+          "RecallType": "GenerativeRecall",
+          "RecallCount": 50,
+          "CacheTime": 0,
+          "CachePrefix": "gen_recall_wrapper_c1_",
+          "RecallAlgo": "{\"protocol\":\"brpc\",\"brpc_endpoint\":\"192.168.100.11:18103\",\"brpc_service_name\":\"pairec.inference.RecommendService\",\"brpc_fallback_to_http\":false,\"timeout_ms\":5000,\"max_retries\":0,\"topk\":10,\"temperature\":1.0,\"beam_width\":1,\"history_from\":\"user_feature\",\"history_feature_name\":\"click_history\",\"history_delimiter\":\",\",\"history_max_length\":20}"
+        }
+      ],
+      "SortConfs": [
+        {
+          "Name": "boost_score_sort",
+          "SortType": "BoostScoreSort"
+        }
+      ]
+    }

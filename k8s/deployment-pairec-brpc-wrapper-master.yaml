@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pairec-brpc-wrapper
+  namespace: pairec
+  labels:
+    app: pairec-brpc-wrapper
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pairec-brpc-wrapper
+  template:
+    metadata:
+      labels:
+        app: pairec-brpc-wrapper
+    spec:
+      nodeName: master
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: pairec
+          image: docker.io/library/pairec-server:k8s-arm64-brpc-v1
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command:
+            - /app/pairec-server
+          ports:
+            - containerPort: 18080
+              name: http
+          env:
+            - name: CONFIG_PATH
+              value: /app/configs/pairec_config.json
+            - name: PAIREC_TRACE_STDOUT
+              value: "1"
+          resources:
+            requests:
+              cpu: "8"
+              memory: "4Gi"
+            limits:
+              cpu: "8"
+              memory: "4Gi"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/configs
+              readOnly: true
+            - name: data-volume
+              mountPath: /data
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 18080
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 18080
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 18080
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config-volume
+          configMap:
+            name: pairec-config-brpc-wrapper-c1
+        - name: data-volume
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/data
+            type: Directory
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: pairec-brpc-wrapper
+  namespace: pairec
+  labels:
+    app: pairec-brpc-wrapper
+spec:
+  selector:
+    app: pairec-brpc-wrapper
+  ports:
+    - name: http
+      port: 18080
+      targetPort: 18080
+  type: ClusterIP
