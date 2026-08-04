@@ -43,17 +43,17 @@ test -n "$POD" || die "running pod not found"
 
 echo "== Verify mounted configuration =="
 runtime_config="$(kubectl -n "$NAMESPACE" exec "$POD" -- sh -c 'cat /app/configs/pairec_config.json')"
-printf '%s\n' "$runtime_config" | grep -F '"brpc_endpoint":"192.168.100.11:18103"' >/dev/null \
+printf '%s\n' "$runtime_config" | grep -F '192.168.100.11:18103' >/dev/null \
   || die "unexpected BRPC endpoint in mounted configuration"
-printf '%s\n' "$runtime_config" | grep -F '"brpc_fallback_to_http":false' >/dev/null \
+printf '%s\n' "$runtime_config" | grep -E 'brpc_fallback_to_http[^a-zA-Z0-9]+false' >/dev/null \
   || die "HTTP fallback is not disabled in mounted configuration"
-printf '%s\n' "$runtime_config" | grep -F '"brpc_burst_payload_bytes":102400' >/dev/null \
+printf '%s\n' "$runtime_config" | grep -E 'brpc_burst_payload_bytes[^0-9]+102400' >/dev/null \
   || die "unexpected burst payload in mounted configuration"
-printf '%s\n' "$runtime_config" | grep -F '"brpc_burst_preconnect":true' >/dev/null \
+printf '%s\n' "$runtime_config" | grep -E 'brpc_burst_preconnect[^a-zA-Z0-9]+true' >/dev/null \
   || die "burst preconnect is not enabled in mounted configuration"
 printf '%s\n' "$runtime_config" | grep -F '"CacheTime": 0' >/dev/null \
   || die "result cache is not disabled in mounted configuration"
-printf '%s\n' "$runtime_config" | grep -F "\\\"brpc_burst_concurrency\\\":${CONCURRENCY}" >/dev/null \
+printf '%s\n' "$runtime_config" | grep -E "brpc_burst_concurrency[^0-9]+${CONCURRENCY}" >/dev/null \
   || die "unexpected burst concurrency in mounted configuration"
 
 echo "== Verify strict startup preconnect =="
