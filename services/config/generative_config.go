@@ -21,15 +21,20 @@ type KafkaConfig struct {
 // GenerativeRecallConfig 生成式召回配置.
 type GenerativeRecallConfig struct {
 	// 服务配置
-	ServerURL          string        `json:"server_url" yaml:"server_url"`                       // TensorRT-LLM HTTP 服务地址
-	Protocol           string        `json:"protocol" yaml:"protocol"`                           // 推理服务协议: "http" 或 "brpc"
-	BRPCEndpoint       string        `json:"brpc_endpoint" yaml:"brpc_endpoint"`                 // brpc/TCP 服务地址, 例如 inference-brpc-trtllm:18100
-	BRPCServiceName    string        `json:"brpc_service_name" yaml:"brpc_service_name"`         // brpc service full name
-	BRPCFallbackToHTTP bool          `json:"brpc_fallback_to_http" yaml:"brpc_fallback_to_http"` // brpc 失败时是否回退 HTTP
-	BRPCPayloadBytes   int           `json:"brpc_payload_bytes" yaml:"brpc_payload_bytes"`       // brpc 压测用额外 payload 字节数, 默认 0
-	Timeout            time.Duration `json:"timeout" yaml:"timeout"`                             // 请求超时
-	MaxRetries         int           `json:"max_retries" yaml:"max_retries"`                     // 最大重试次数
-	MaxBatchSize       int           `json:"max_batch_size" yaml:"max_batch_size"`               // 最大批次大小
+	ServerURL                string        `json:"server_url" yaml:"server_url"`                       // TensorRT-LLM HTTP 服务地址
+	Protocol                 string        `json:"protocol" yaml:"protocol"`                           // 推理服务协议: "http" 或 "brpc"
+	BRPCEndpoint             string        `json:"brpc_endpoint" yaml:"brpc_endpoint"`                 // brpc/TCP 服务地址, 例如 inference-brpc-trtllm:18100
+	BRPCServiceName          string        `json:"brpc_service_name" yaml:"brpc_service_name"`         // brpc service full name
+	BRPCFallbackToHTTP       bool          `json:"brpc_fallback_to_http" yaml:"brpc_fallback_to_http"` // brpc 失败时是否回退 HTTP
+	BRPCPayloadBytes         int           `json:"brpc_payload_bytes" yaml:"brpc_payload_bytes"`       // brpc 压测用额外 payload 字节数, 默认 0
+	BRPCBurstEnabled         bool          `json:"brpc_burst_enabled" yaml:"brpc_burst_enabled"`
+	BRPCBurstConcurrency     int           `json:"brpc_burst_concurrency" yaml:"brpc_burst_concurrency"`
+	BRPCBurstPayloadBytes    int           `json:"brpc_burst_payload_bytes" yaml:"brpc_burst_payload_bytes"`
+	BRPCBurstPreconnect      bool          `json:"brpc_burst_preconnect" yaml:"brpc_burst_preconnect"`
+	BRPCBurstPressureTimeout time.Duration `json:"brpc_burst_pressure_timeout" yaml:"brpc_burst_pressure_timeout"`
+	Timeout                  time.Duration `json:"timeout" yaml:"timeout"`               // 请求超时
+	MaxRetries               int           `json:"max_retries" yaml:"max_retries"`       // 最大重试次数
+	MaxBatchSize             int           `json:"max_batch_size" yaml:"max_batch_size"` // 最大批次大小
 
 	// 推理参数
 	TopK        int     `json:"topk" yaml:"topk"`               // 推荐数量
@@ -90,6 +95,26 @@ func (c *GenerativeRecallConfig) Validate() error {
 	if c.BRPCPayloadBytes < 0 {
 		c.BRPCPayloadBytes = 0
 	}
+	if c.Timeout <= 0 {
+		c.Timeout = 3 * time.Second
+	}
+	if c.BRPCBurstEnabled {
+		if c.Protocol != "brpc" {
+			return fmt.Errorf("brpc burst requires protocol=brpc")
+		}
+		if c.BRPCBurstConcurrency <= 0 || c.BRPCBurstConcurrency > 1000 {
+			return fmt.Errorf("brpc_burst_concurrency must be in [1,1000]")
+		}
+		if c.BRPCBurstPayloadBytes < 0 || c.BRPCBurstPayloadBytes > 1<<20 {
+			return fmt.Errorf("brpc_burst_payload_bytes must be in [0,1048576]")
+		}
+		if !c.BRPCBurstPreconnect {
+			return fmt.Errorf("brpc burst requires brpc_burst_preconnect=true")
+		}
+		if c.BRPCBurstPressureTimeout <= 0 {
+			c.BRPCBurstPressureTimeout = c.Timeout
+		}
+	}
 
 	switch c.Protocol {
 	case "http":
@@ -119,10 +144,6 @@ func (c *GenerativeRecallConfig) Validate() error {
 
 	if c.HistoryMaxLength <= 0 {
 		c.HistoryMaxLength = 20
-	}
-
-	if c.Timeout <= 0 {
-		c.Timeout = 3 * time.Second
 	}
 
 	return nil

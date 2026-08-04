@@ -79,6 +79,7 @@ type TRTLLMClient struct {
 	config     *config.GenerativeRecallConfig
 	httpClient *http.Client
 	brpcClient *BRPCRecommendClient
+	burst      *BRPCBurstCoordinator
 }
 
 // NewTRTLLMClient 创建客户端.
@@ -88,12 +89,23 @@ func NewTRTLLMClient(cfg *config.GenerativeRecallConfig) (*TRTLLMClient, error) 
 	}
 
 	var brpcClient *BRPCRecommendClient
+	var burst *BRPCBurstCoordinator
 	if cfg.Protocol == "brpc" {
 		client, err := NewBRPCRecommendClient(cfg.BRPCEndpoint, cfg.BRPCServiceName, cfg.Timeout, cfg.MaxRetries)
 		if err != nil {
 			return nil, fmt.Errorf("create brpc client failed: %w", err)
 		}
 		brpcClient = client
+		if cfg.BRPCBurstEnabled {
+			burst, err = NewBRPCBurstCoordinator(client, BRPCBurstConfig{
+				Concurrency:     cfg.BRPCBurstConcurrency,
+				PayloadBytes:    cfg.BRPCBurstPayloadBytes,
+				PressureTimeout: cfg.BRPCBurstPressureTimeout,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("create brpc burst coordinator failed: %w", err)
+			}
+		}
 	}
 
 	return &TRTLLMClient{
@@ -102,6 +114,7 @@ func NewTRTLLMClient(cfg *config.GenerativeRecallConfig) (*TRTLLMClient, error) 
 			Timeout: cfg.Timeout,
 		},
 		brpcClient: brpcClient,
+		burst:      burst,
 	}, nil
 }
 
@@ -123,7 +136,13 @@ func (c *TRTLLMClient) Recommend(req *RecommendRequest, traceID string) (*Recomm
 	}
 
 	if c.config.Protocol == "brpc" {
-		resp, err := c.brpcClient.Recommend(context.Background(), req, traceID)
+		var resp *RecommendResponse
+		var err error
+		if c.burst != nil {
+			resp, err = c.burst.Recommend(req, traceID)
+		} else {
+			resp, err = c.brpcClient.Recommend(context.Background(), req, traceID)
+		}
 		if err == nil {
 			return resp, nil
 		}
@@ -243,5 +262,8 @@ func (c *TRTLLMClient) HealthCheck() bool {
 
 // Close 关闭客户端.
 func (c *TRTLLMClient) Close() {
+	if c.burst != nil {
+		c.burst.Close()
+	}
 	c.httpClient.CloseIdleConnections()
 }

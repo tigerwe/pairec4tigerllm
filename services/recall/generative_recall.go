@@ -80,23 +80,28 @@ type GenerativeRecall struct {
 
 // recallConfigJSON 用于从 RecallAlgo 字段解析配置
 type recallConfigJSON struct {
-	ServerURL          string              `json:"server_url"`
-	Protocol           string              `json:"protocol"`
-	BRPCEndpoint       string              `json:"brpc_endpoint"`
-	BRPCServiceName    string              `json:"brpc_service_name"`
-	BRPCFallbackToHTTP *bool               `json:"brpc_fallback_to_http"`
-	BRPCPayloadBytes   int                 `json:"brpc_payload_bytes"`
-	TimeoutMs          int                 `json:"timeout_ms"`
-	MaxRetries         int                 `json:"max_retries"`
-	TopK               int                 `json:"topk"`
-	Temperature        float64             `json:"temperature"`
-	BeamWidth          int                 `json:"beam_width"`
-	HistoryFrom        string              `json:"history_from"`
-	HistoryFeatureName string              `json:"history_feature_name"`
-	HistoryDelimiter   string              `json:"history_delimiter"`
-	HistoryMaxLength   int                 `json:"history_max_length"`
-	FeatureSource      string              `json:"feature_source"`
-	KafkaConfig        *config.KafkaConfig `json:"kafka_config"`
+	ServerURL                  string              `json:"server_url"`
+	Protocol                   string              `json:"protocol"`
+	BRPCEndpoint               string              `json:"brpc_endpoint"`
+	BRPCServiceName            string              `json:"brpc_service_name"`
+	BRPCFallbackToHTTP         *bool               `json:"brpc_fallback_to_http"`
+	BRPCPayloadBytes           int                 `json:"brpc_payload_bytes"`
+	BRPCBurstEnabled           bool                `json:"brpc_burst_enabled"`
+	BRPCBurstConcurrency       int                 `json:"brpc_burst_concurrency"`
+	BRPCBurstPayloadBytes      int                 `json:"brpc_burst_payload_bytes"`
+	BRPCBurstPreconnect        bool                `json:"brpc_burst_preconnect"`
+	BRPCBurstPressureTimeoutMs int                 `json:"brpc_burst_pressure_timeout_ms"`
+	TimeoutMs                  int                 `json:"timeout_ms"`
+	MaxRetries                 int                 `json:"max_retries"`
+	TopK                       int                 `json:"topk"`
+	Temperature                float64             `json:"temperature"`
+	BeamWidth                  int                 `json:"beam_width"`
+	HistoryFrom                string              `json:"history_from"`
+	HistoryFeatureName         string              `json:"history_feature_name"`
+	HistoryDelimiter           string              `json:"history_delimiter"`
+	HistoryMaxLength           int                 `json:"history_max_length"`
+	FeatureSource              string              `json:"feature_source"`
+	KafkaConfig                *config.KafkaConfig `json:"kafka_config"`
 }
 
 // NewGenerativeRecall 创建生成式召回实例.
@@ -117,26 +122,31 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 			writeDebugLog(" Parsed RecallAlgo: protocol=%s, server_url=%s, brpc_endpoint=%s, history_feature_name=%s\n",
 				algoConf.Protocol, algoConf.ServerURL, algoConf.BRPCEndpoint, algoConf.HistoryFeatureName)
 			genConfig = &config.GenerativeRecallConfig{
-				ServerURL:          algoConf.ServerURL,
-				Protocol:           algoConf.Protocol,
-				BRPCEndpoint:       algoConf.BRPCEndpoint,
-				BRPCServiceName:    algoConf.BRPCServiceName,
-				BRPCFallbackToHTTP: brpcFallback,
-				BRPCPayloadBytes:   algoConf.BRPCPayloadBytes,
-				Timeout:            time.Duration(algoConf.TimeoutMs) * time.Millisecond,
-				MaxRetries:         algoConf.MaxRetries,
-				TopK:               algoConf.TopK,
-				Temperature:        algoConf.Temperature,
-				BeamWidth:          algoConf.BeamWidth,
-				HistoryFrom:        algoConf.HistoryFrom,
-				HistoryFeatureName: algoConf.HistoryFeatureName,
-				HistoryDelimiter:   algoConf.HistoryDelimiter,
-				HistoryMaxLength:   algoConf.HistoryMaxLength,
-				FeatureSource:      algoConf.FeatureSource,
-				KafkaConfig:        algoConf.KafkaConfig,
-				CacheEnable:        conf.CacheAdapter != "",
-				CacheTime:          conf.CacheTime,
-				CachePrefix:        conf.CachePrefix,
+				ServerURL:                algoConf.ServerURL,
+				Protocol:                 algoConf.Protocol,
+				BRPCEndpoint:             algoConf.BRPCEndpoint,
+				BRPCServiceName:          algoConf.BRPCServiceName,
+				BRPCFallbackToHTTP:       brpcFallback,
+				BRPCPayloadBytes:         algoConf.BRPCPayloadBytes,
+				BRPCBurstEnabled:         algoConf.BRPCBurstEnabled,
+				BRPCBurstConcurrency:     algoConf.BRPCBurstConcurrency,
+				BRPCBurstPayloadBytes:    algoConf.BRPCBurstPayloadBytes,
+				BRPCBurstPreconnect:      algoConf.BRPCBurstPreconnect,
+				BRPCBurstPressureTimeout: time.Duration(algoConf.BRPCBurstPressureTimeoutMs) * time.Millisecond,
+				Timeout:                  time.Duration(algoConf.TimeoutMs) * time.Millisecond,
+				MaxRetries:               algoConf.MaxRetries,
+				TopK:                     algoConf.TopK,
+				Temperature:              algoConf.Temperature,
+				BeamWidth:                algoConf.BeamWidth,
+				HistoryFrom:              algoConf.HistoryFrom,
+				HistoryFeatureName:       algoConf.HistoryFeatureName,
+				HistoryDelimiter:         algoConf.HistoryDelimiter,
+				HistoryMaxLength:         algoConf.HistoryMaxLength,
+				FeatureSource:            algoConf.FeatureSource,
+				KafkaConfig:              algoConf.KafkaConfig,
+				CacheEnable:              conf.CacheAdapter != "",
+				CacheTime:                conf.CacheTime,
+				CachePrefix:              conf.CachePrefix,
 			}
 		}
 	}
