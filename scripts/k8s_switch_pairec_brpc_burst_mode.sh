@@ -42,16 +42,19 @@ POD="$(kubectl -n "$NAMESPACE" get pod -l "app=${DEPLOYMENT}" \
 test -n "$POD" || die "running pod not found"
 
 echo "== Verify mounted configuration =="
-actual="$(kubectl -n "$NAMESPACE" exec "$POD" -- python3 -c '
-import json
-config = json.load(open("/app/configs/pairec_config.json", encoding="utf-8"))
-algo = json.loads(config["RecallConfs"][0]["RecallAlgo"])
-print(algo["brpc_burst_concurrency"], algo["brpc_burst_payload_bytes"],
-      str(algo["brpc_burst_preconnect"]).lower(), str(algo["brpc_fallback_to_http"]).lower(),
-      config["RecallConfs"][0]["CacheTime"])
-')"
-test "$actual" = "$CONCURRENCY 102400 true false 0" \
-  || die "unexpected runtime configuration: ${actual}"
+runtime_config="$(kubectl -n "$NAMESPACE" exec "$POD" -- sh -c 'cat /app/configs/pairec_config.json')"
+printf '%s\n' "$runtime_config" | grep -F '"brpc_endpoint":"192.168.100.11:18103"' >/dev/null \
+  || die "unexpected BRPC endpoint in mounted configuration"
+printf '%s\n' "$runtime_config" | grep -F '"brpc_fallback_to_http":false' >/dev/null \
+  || die "HTTP fallback is not disabled in mounted configuration"
+printf '%s\n' "$runtime_config" | grep -F '"brpc_burst_payload_bytes":102400' >/dev/null \
+  || die "unexpected burst payload in mounted configuration"
+printf '%s\n' "$runtime_config" | grep -F '"brpc_burst_preconnect":true' >/dev/null \
+  || die "burst preconnect is not enabled in mounted configuration"
+printf '%s\n' "$runtime_config" | grep -F '"CacheTime": 0' >/dev/null \
+  || die "result cache is not disabled in mounted configuration"
+printf '%s\n' "$runtime_config" | grep -F "\\\"brpc_burst_concurrency\\\":${CONCURRENCY}" >/dev/null \
+  || die "unexpected burst concurrency in mounted configuration"
 
 echo "== Verify strict startup preconnect =="
 ready_line="$(kubectl -n "$NAMESPACE" logs "$POD" | grep '"event":"pairec_brpc_burst_ready"' | tail -1 || true)"
