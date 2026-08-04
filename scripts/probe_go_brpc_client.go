@@ -316,6 +316,38 @@ func main() {
 			fmt.Fprintf(os.Stderr, "create client failed endpoint=%s: %v\n", endpoints[0], err)
 			os.Exit(1)
 		}
+		sessions := make([]*recall.BRPCRecommendSession, totalLanes)
+		connectedSessions := 0
+		preconnectMs := 0.0
+		if *preconnect {
+			for lane := range sessions {
+				sessions[lane] = client.NewSession()
+				defer sessions[lane].Close()
+			}
+			connectStarted := time.Now()
+			connectResults, _ := runSynchronizedBurst(totalLanes, nil, nil,
+				func(index int, _ time.Time) probeResult {
+					result := probeResult{index: index, endpoint: endpoints[0]}
+					ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
+					result.err = sessions[index-1].Connect(ctx)
+					cancel()
+					return result
+				})
+			preconnectMs = float64(time.Since(connectStarted).Microseconds()) / 1000
+			for _, result := range connectResults {
+				if result.err != nil {
+					fmt.Fprintf(os.Stderr, "burst preconnect failed index=%d endpoint=%s error=%v\n",
+						result.index, result.endpoint, result.err)
+					continue
+				}
+				connectedSessions++
+			}
+			fmt.Printf("burst preconnect summary connected_sessions=%d total_sessions=%d preconnect_ms=%.3f\n",
+				connectedSessions, totalLanes, preconnectMs)
+			if connectedSessions != totalLanes {
+				os.Exit(1)
+			}
+		}
 
 		requestID := fmt.Sprintf("go-brpc-burst-%d", time.Now().UnixNano())
 		businessPlan := requestPlans[0]
@@ -343,7 +375,13 @@ func main() {
 						BeamWidth:           1,
 						PayloadPaddingBytes: *businessPayloadBytes,
 					}
-					resp, callErr := client.Recommend(ctx, req, requestID)
+					var resp *recall.RecommendResponse
+					var callErr error
+					if *preconnect {
+						resp, callErr = sessions[index-1].Recommend(ctx, req, requestID)
+					} else {
+						resp, callErr = client.Recommend(ctx, req, requestID)
+					}
 					result.latencyUs = time.Since(callStarted).Microseconds()
 					result.latencyMs = result.latencyUs / 1000
 					if callErr != nil {
@@ -372,18 +410,31 @@ func main() {
 				}
 
 				result.role = "pressure"
-				resp, callErr := client.HealthCheckWithPayload(ctx, pressureBytes)
-				result.latencyUs = time.Since(callStarted).Microseconds()
-				result.latencyMs = result.latencyUs / 1000
-				if callErr != nil {
-					result.err = callErr
-					return result
+				if *preconnect {
+					resp, callErr := sessions[index-1].HealthCheckWithPayload(ctx, pressureBytes)
+					result.latencyUs = time.Since(callStarted).Microseconds()
+					result.latencyMs = result.latencyUs / 1000
+					if callErr != nil {
+						result.err = callErr
+						return result
+					}
+					result.code = resp.Code
+					result.status = resp.Status
+					result.backend = resp.Backend
+				} else {
+					resp, callErr := client.HealthCheckWithPayload(ctx, pressureBytes)
+					result.latencyUs = time.Since(callStarted).Microseconds()
+					result.latencyMs = result.latencyUs / 1000
+					if callErr != nil {
+						result.err = callErr
+						return result
+					}
+					result.code = resp.Code
+					result.status = resp.Status
+					result.backend = resp.Backend
 				}
-				result.code = resp.Code
-				result.status = resp.Status
-				result.backend = resp.Backend
-				if resp.Code != 200 {
-					result.err = fmt.Errorf("Health returned code %d", resp.Code)
+				if result.code != 200 {
+					result.err = fmt.Errorf("Health returned code %d", result.code)
 				}
 				return result
 			})
@@ -467,6 +518,9 @@ func main() {
 			WrapperMaxHealth:     business.wrapperMaxActiveHealth,
 			WrapperMaxTotal:      business.wrapperMaxActiveTotal,
 			WrapperBackendBRPCMs: business.wrapperBackendBRPCMs,
+			Preconnect:           *preconnect,
+			ConnectedSessions:    connectedSessions,
+			PreconnectMs:         preconnectMs,
 		}
 		encoded, err := json.Marshal(summary)
 		if err != nil {
@@ -480,9 +534,9 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		fmt.Printf("burst summary business_ok=%t pressure_ok=%d pressure_total=%d armed_workers=%d max_active=%d start_skew_us=%d total_ms=%.3f\n",
+		fmt.Printf("burst summary business_ok=%t pressure_ok=%d pressure_total=%d armed_workers=%d max_active=%d start_skew_us=%d preconnect=%t connected_sessions=%d total_ms=%.3f\n",
 			summary.BusinessSuccess, pressureOK, pressureTotal, totalLanes, summary.MaxActiveWorkers,
-			summary.StartSkewUs, summary.TotalMs)
+			summary.StartSkewUs, summary.Preconnect, summary.ConnectedSessions, summary.TotalMs)
 		if !summary.BusinessSuccess || pressureOK != pressureTotal {
 			os.Exit(1)
 		}
@@ -639,6 +693,9 @@ type burstSummary struct {
 	WrapperMaxHealth     int64   `json:"wrapper_max_active_health"`
 	WrapperMaxTotal      int64   `json:"wrapper_max_active_total"`
 	WrapperBackendBRPCMs float64 `json:"wrapper_backend_brpc_ms"`
+	Preconnect           bool    `json:"preconnect"`
+	ConnectedSessions    int     `json:"connected_sessions"`
+	PreconnectMs         float64 `json:"preconnect_ms"`
 }
 
 func splitEndpoints(value string) []string {

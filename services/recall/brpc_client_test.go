@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -49,9 +50,22 @@ func TestBRPCSessionReusesConnection(t *testing.T) {
 				serverDone <- err
 				return
 			}
-			responsePayload, err := proto.Marshal(&healthResponsePB{
-				Code: proto.Int32(200), Status: proto.String("healthy"), Backend: proto.String("test"),
-			})
+			var responseMessage proto.Message
+			switch stringValue(requestMeta.Request.MethodName) {
+			case "Health":
+				responseMessage = &healthResponsePB{
+					Code: proto.Int32(200), Status: proto.String("healthy"), Backend: proto.String("test"),
+				}
+			case "Recommend":
+				responseMessage = &recommendResponsePB{
+					Code: proto.Int32(200), UserID: proto.String("u1"),
+					Recommendations: []*recommendationPB{{ItemID: proto.Int32(42)}},
+				}
+			default:
+				serverDone <- fmt.Errorf("unexpected method: %s", stringValue(requestMeta.Request.MethodName))
+				return
+			}
+			responsePayload, err := proto.Marshal(responseMessage)
 			if err != nil {
 				serverDone <- err
 				return
@@ -93,16 +107,23 @@ func TestBRPCSessionReusesConnection(t *testing.T) {
 		t.Fatalf("preconnect: %v", err)
 	}
 	connectCancel()
-	for i := 0; i < 2; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		response, err := session.HealthCheckWithPayload(ctx, 102400)
-		cancel()
-		if err != nil {
-			t.Fatalf("health %d: %v", i, err)
-		}
-		if response.Code != 200 || response.Status != "healthy" {
-			t.Fatalf("health %d response: %+v", i, response)
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	healthResponse, err := session.HealthCheckWithPayload(ctx, 102400)
+	cancel()
+	if err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if healthResponse.Code != 200 || healthResponse.Status != "healthy" {
+		t.Fatalf("health response: %+v", healthResponse)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	recommendResponse, err := session.Recommend(ctx, &RecommendRequest{UserID: "u1", Topk: 1}, "request-1")
+	cancel()
+	if err != nil {
+		t.Fatalf("recommend: %v", err)
+	}
+	if recommendResponse.Code != 200 || len(recommendResponse.Recommendations) != 1 {
+		t.Fatalf("recommend response: %+v", recommendResponse)
 	}
 	if err := <-serverDone; err != nil {
 		t.Fatalf("server: %v", err)

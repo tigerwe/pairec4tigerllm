@@ -149,6 +149,19 @@ func (s *BRPCRecommendSession) HealthCheckWithPayload(ctx context.Context, paylo
 	return healthResponseFromProto(&responsePB), nil
 }
 
+func (s *BRPCRecommendSession) Recommend(ctx context.Context, req *RecommendRequest, requestID string) (*RecommendResponse, error) {
+	requestPB := recommendRequestToProto(req, requestID)
+	var responsePB recommendResponsePB
+	if err := s.call(ctx, "Recommend", requestPB, &responsePB); err != nil {
+		return nil, err
+	}
+	resp := recommendResponseFromProto(&responsePB)
+	if resp.Code != 200 {
+		return nil, fmt.Errorf("service error: %s", resp.Error)
+	}
+	return resp, nil
+}
+
 func (s *BRPCRecommendSession) call(ctx context.Context, method string, request proto.Message, response proto.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
