@@ -309,8 +309,10 @@ Wrapper模式额外报告：
 - `wrapper_max_active_total`：业务路执行期间服务端实际重叠lane峰值。
 
 设置`REQUIRE_SERVER_WRAPPER=1`后，每一轮除了客户端并发门禁，还要求Trace中存在Wrapper
-指标，且`wrapper_max_active_total >= N*MIN_ACTIVE_RATIO`。这样不会把客户端已放行但已在
-Wrapper端快速结束的Health误记为业务路的有效重叠压力。
+指标。`wrapper_max_active_total`默认只作为诊断值：Health在Wrapper本地快速完成，业务
+Recommend到达前已有Health返回是正常的，不能据此否定已由客户端统一屏障放行并成功完成
+的burst。只有专门研究服务端回调同时在途数时，才设置`REQUIRE_SERVER_OVERLAP=1`将
+`wrapper_max_active_total >= N*MIN_ACTIVE_RATIO`恢复为硬门禁。
 
 该模式测量的是增加前置Wrapper后的正式链路，不等同于客户端直连18100；如果后续将其
 用于业务结论，Wrapper必须成为正式服务入口，并单独报告新增的一跳转发开销。

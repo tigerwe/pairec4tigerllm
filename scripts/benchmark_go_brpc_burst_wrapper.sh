@@ -14,6 +14,7 @@ PRESSURE_PAYLOAD_BYTES="${PRESSURE_PAYLOAD_BYTES:-102400}"
 BUSINESS_PAYLOAD_BYTES="${BUSINESS_PAYLOAD_BYTES:-0}"
 MIN_ACTIVE_RATIO="${MIN_ACTIVE_RATIO:-0.95}"
 REQUIRE_SERVER_WRAPPER="${REQUIRE_SERVER_WRAPPER:-0}"
+REQUIRE_SERVER_OVERLAP="${REQUIRE_SERVER_OVERLAP:-0}"
 TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 MAX_RETRIES="${MAX_RETRIES:-0}"
 COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-0}"
@@ -86,6 +87,10 @@ validate_positive_integer REPEATS "$REPEATS"
 case "$REQUIRE_SERVER_WRAPPER" in
   0|1) ;;
   *) echo "ERROR: REQUIRE_SERVER_WRAPPER must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$REQUIRE_SERVER_OVERLAP" in
+  0|1) ;;
+  *) echo "ERROR: REQUIRE_SERVER_OVERLAP must be 0 or 1" >&2; exit 2 ;;
 esac
 
 BURST_CONCURRENCY_LEVELS="${BURST_CONCURRENCY_LEVELS//,/ }"
@@ -191,7 +196,8 @@ fi
 
 python3 - "$RUN_INDEX" "$SUMMARY_JSON" "$REPEATS" "$MIN_ACTIVE_RATIO" \
   "$K8S_STATE_OK" "$CRASH_MARKER_COUNT" "$PRESSURE_PAYLOAD_BYTES" \
-  "$BUSINESS_PAYLOAD_BYTES" "$ENDPOINT" "$REQUIRE_SERVER_WRAPPER" "${LEVELS[@]}" <<'PY'
+  "$BUSINESS_PAYLOAD_BYTES" "$ENDPOINT" "$REQUIRE_SERVER_WRAPPER" \
+  "$REQUIRE_SERVER_OVERLAP" "${LEVELS[@]}" <<'PY'
 import json
 import math
 import pathlib
@@ -207,7 +213,8 @@ pressure_payload_bytes = int(sys.argv[7])
 business_payload_bytes = int(sys.argv[8])
 endpoint = sys.argv[9]
 require_server_wrapper = sys.argv[10] == "1"
-levels = [int(value) for value in sys.argv[11:]]
+require_server_overlap = sys.argv[11] == "1"
+levels = [int(value) for value in sys.argv[12:]]
 
 def percentile(values, quantile):
     values = sorted(values)
@@ -269,9 +276,8 @@ for concurrency in levels:
         len(records) == repeats and len(results) == repeats and process_ok == repeats
         and len(successful) == repeats and pressure_ok == repeats
         and active_ok == repeats and armed_ok == repeats and k8s_state_ok
-        and (not require_server_wrapper or (
-            wrapper_trace_ok == repeats and wrapper_overlap_ok == repeats
-        ))
+        and (not require_server_wrapper or wrapper_trace_ok == repeats)
+        and (not require_server_overlap or wrapper_overlap_ok == repeats)
     )
     cases.append({
         "concurrency": concurrency,
@@ -285,6 +291,7 @@ for concurrency in levels:
         "armed_pass": armed_ok,
         "active_threshold": threshold,
         "wrapper_required": require_server_wrapper,
+        "wrapper_overlap_required": require_server_overlap,
         "wrapper_trace_pass": wrapper_trace_ok,
         "wrapper_overlap_pass": wrapper_overlap_ok,
         "wrapper_max_active_total_min": min(
@@ -327,6 +334,7 @@ summary = {
     "business_payload_bytes": business_payload_bytes,
     "minimum_active_ratio": min_active_ratio,
     "require_server_wrapper": require_server_wrapper,
+    "require_server_overlap": require_server_overlap,
     "latency_samples": "successful business Recommend requests only; failures are reported separately",
     "baseline_concurrency": 1 if baseline else None,
     "k8s_state_ok": k8s_state_ok,
@@ -362,7 +370,8 @@ for case in cases:
 print("note=p99 is measured from one business Recommend per synchronized burst; no latency target is enforced")
 print("note=front_brpc is client wall minus Wrapper total; backend_brpc is Wrapper backend RPC minus backend inference")
 print("note=inference/runner deltas versus concurrency=1 reveal backend inference interference")
-print("note=overlap_min is the minimum server-observed active lane peak across successful bursts")
+print("note=overlap_min is diagnostic: local Health callbacks can complete before Recommend reaches the server")
+print(f"note=server overlap hard gate enabled={require_server_overlap}")
 print(f"summary_json={summary_path}")
 print(f"RESULT={status}")
 PY
