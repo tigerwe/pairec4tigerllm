@@ -1,0 +1,58 @@
+# ============================================
+# Milvus 灌库 Job
+# ============================================
+#
+# 前置条件：
+#   - Milvus standalone 已 Running（k8s/deployment-milvus-standalone.yaml）
+#   - master 节点存在 /home/zcx/workspace/pairec4tigerllm/dssm_out/export
+#     （item_vectors.npy / item_ids.json）
+#   - 镜像 pairec-dssm-recall:k8s-arm64-v1 已导入本地 containerd
+#
+# 使用：kubectl apply -f k8s/job-load-milvus.yaml
+# 查看日志：kubectl -n pairec logs job/milvus-loader -f
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: milvus-loader
+  namespace: pairec
+spec:
+  template:
+    spec:
+      nodeName: master
+      restartPolicy: OnFailure
+      containers:
+        - name: loader
+          image: docker.io/library/pairec-dssm-recall:k8s-arm64-v1
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - /workspace/scripts/load_item_embeddings_to_milvus.py
+            - --milvus_host
+            - milvus-standalone
+            - --milvus_port
+            - "19530"
+            - --export_dir
+            - /workspace/dssm_out/export
+            - --collection
+            - dssm_item_vectors
+            - --drop
+          env:
+            - name: PYTHONPATH
+              value: /workspace
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: workspace-volume
+              mountPath: /workspace
+              readOnly: true
+      volumes:
+        - name: workspace-volume
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm
+            type: Directory
