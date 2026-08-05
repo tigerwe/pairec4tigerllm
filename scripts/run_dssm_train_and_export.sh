@@ -24,7 +24,8 @@ echo "[dssm-pipeline] git branch:  $(git rev-parse --abbrev-ref HEAD)"
 # 默认使用一张空闲 GPU；如 GPU 5 被占用，请改为 6/7
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-5}
 
-CSV_PATH="/home/workspace/zcx/pairec4tigerllm/data/ctr_data_1M.csv"
+# 数据路径可通过环境变量覆盖；188(ARM 4090D) 用 /home/zcx/workspace/pairec4tigerllm/data/ctr_data_1M.csv
+CSV_PATH="${CSV_PATH:-/home/workspace/zcx/pairec4tigerllm/data/ctr_data_1M.csv}"
 OUT_DIR="dssm_out"
 EXPORT_DIR="${OUT_DIR}/export"
 
