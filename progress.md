@@ -1,5 +1,7 @@
 # 工作进度
 
+> 2026-08-05 不加压完整推荐链路 + KVC 3+2 基线跑通（分支 `pairec-multi-recall-ranking`）：新增 `k8s/deployment-inference-brpc-trtllm-25g.yaml`，固定 inference 在 worker1/188、DataSystem 走 25G master `192.168.100.12:18482`、scheduler=`max_utilization`、host_cache_size=100MiB，并去掉 ETCD pool。使用 `scripts/calibrate_brpc_kvc_cache_shape.sh` 校准出 `PRIME_REQUESTS=195`，每轮重启 inference 清 HBM 后连续 3 轮确认稳定 `offload=3 onboard=2`。基线指标：E2E avg/p99≈141.7/142.9ms、brpc/TCP≈2.3ms、KVC total≈34.2ms（offload≈21.0ms、onboard≈13.2ms）、server-other≈92.5ms。注意：3+2 不是单次 Recommend 天然固定触发，而是特定 HBM 容量/scheduler/prompt 历史/prime 次数共同形成的缓存状态，必须严格按 `RESET_INFERENCE_BEFORE_ROUND=1` + `PRIME_REQUESTS=195` 复现；默认 DataSystem pool worker（188:18481）仍报 `Worker not ready`，Set 会失败，不能用于该基线。
+
 > 2026-08-05 分支切换：KVC burst wrapper 暂停在 `1eebb0c`，保留分支 `kvc-burst-wrapper-wip`；当前开发分支为 `pairec-multi-recall-ranking`，下一主线是接入 PaiRec 多路召回（Milvus 向量）和精排。
 
 > 最后更新: 2026-08-04 | 当前状态: F14 已实现独立实验 PaiRec 和内嵌 BRPC burst coordinator；本地并发/race/构建验证通过，待远端按 c1 三次 smoke、c1000 三次/100次/1000次顺序验收。严格25G历史结果见 `docs/F14_STRICT_25G_PRESSURE_RESULTS_2026-08-02.md`；F15 NPU迁移记录继续保留。
