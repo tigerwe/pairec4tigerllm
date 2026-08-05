@@ -1,0 +1,142 @@
+# ============================================
+# Native C++ brpc inference + TRT-LLM + 25G DataSystem worker on master
+# ============================================
+#
+# This manifest fixes the inference DataSystem endpoint to the dedicated
+# 25G worker (datasystem-25g-master: 192.168.100.12:18482). It drops
+# ServiceDiscovery / pool affinity so the C++ KVClient connects directly.
+# It also uses max_utilization scheduler + 100MiB host cache, matching the
+# configuration that historically produced "3 Set + 2 Get" KV offload/onboard.
+#
+# Verified topology:
+#   PaiRec (master) -> brpc/TCP -> inference-brpc-trtllm (worker1)
+#   -> DataSystem worker (master 25G 192.168.100.12:18482)
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-brpc-trtllm
+  namespace: pairec
+  labels:
+    app: inference-brpc-trtllm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: inference-brpc-trtllm
+  template:
+    metadata:
+      labels:
+        app: inference-brpc-trtllm
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        pairec/gpu: "true"
+      containers:
+        - name: brpc-inference
+          image: docker.io/library/pairec-brpc-inference:k8s-arm64-trtllm-v1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+            - name: DATASYSTEM_HOST
+              value: "192.168.100.12"
+            - name: DATASYSTEM_PORT
+              value: "18482"
+            - name: DATASYSTEM_CONNECT_TIMEOUT_MS
+              value: "60000"
+            - name: DATASYSTEM_REQUEST_TIMEOUT_MS
+              value: "10000"
+            - name: LD_LIBRARY_PATH
+              value: "/opt/openEuler/gcc-toolset-14/root/usr/lib64:/TensorRT-LLM/cpp/build/tensorrt_llm:/TensorRT-LLM/cpp/build/tensorrt_llm/plugins:/home/TensorRT-LLM/cpp/build/tensorrt_llm:/home/TensorRT-LLM/cpp/build/tensorrt_llm/plugins:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/local/cuda/lib64:/usr/lib64:/usr/local/lib:/usr/local/lib64"
+            - name: LD_PRELOAD
+              value: "/opt/pairec/lib/block_ds_consumer.so /opt/pairec/lib/stub_gpu.so /usr/lib64/libnvidia-ml.so.570.124.06 /usr/local/lib/python3.11/site-packages/yr/datasystem/lib/libabseil_dll.so.2407.0.0"
+          command:
+            - /opt/pairec-brpc/bin/brpc_inference_server
+          args:
+            - --listen_port=18100
+            - --backend=trtllm_cpp
+            - --semantic_map_path=/app/data/tenrec/processed/semantic_id_map.json
+            - --trt_engine_dir=/app/trt_engines/qwen3_rec_v4
+            - --trt_tokenizer_config_path=/app/exported/qwen3_rec/pairec_cpp_tokenizer.txt
+            - --trt_max_input_len=64
+            - --trt_max_new_tokens=32
+            - --trt_num_samples=1
+            - --trt_top_k=50
+            - --trt_temperature=0.7
+            - --trt_max_kv_tokens=256
+            - --trt_kv_cache_host_cache_size=104857600
+            - --trt_scheduler_policy=max_utilization
+            - --trt_request_timeout_ms=30000
+          ports:
+            - containerPort: 18100
+              name: brpc
+          resources:
+            requests:
+              cpu: "2"
+              memory: "64Gi"
+            limits:
+              cpu: "4"
+              memory: "128Gi"
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: trt-engines
+              mountPath: /app/trt_engines
+              readOnly: true
+            - name: exported
+              mountPath: /app/exported
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+              readOnly: true
+          startupProbe:
+            tcpSocket:
+              port: 18100
+            periodSeconds: 5
+            failureThreshold: 72
+          readinessProbe:
+            tcpSocket:
+              port: 18100
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 18100
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: trt-engines
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/trt_engines
+            type: Directory
+        - name: exported
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/exported
+            type: Directory
+        - name: data
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/data
+            type: Directory
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-brpc-trtllm
+  namespace: pairec
+  labels:
+    app: inference-brpc-trtllm
+spec:
+  selector:
+    app: inference-brpc-trtllm
+  ports:
+    - name: brpc
+      port: 18100
+      targetPort: 18100
+      protocol: TCP
+  type: ClusterIP
