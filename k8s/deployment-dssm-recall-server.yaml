@@ -52,7 +52,7 @@ spec:
             - name: PYTHONPATH
               value: /workspace
             - name: DSSM_CHECKPOINT
-              value: /workspace/dssm_out/checkpoint.pt
+              value: /workspace/dssm_out/dssm_model.pt
             - name: DSSM_VOCAB
               value: /workspace/dssm_out/vocab.json
             - name: DSSM_EXPORT_DIR
