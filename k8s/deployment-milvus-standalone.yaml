@@ -1,0 +1,105 @@
+# ============================================
+# Milvus standalone (single Pod on master) for DSSM vector recall
+# ============================================
+#
+# - image milvusdb/milvus is multi-arch (linux/amd64 + linux/arm64) since 2.3;
+#   verify the tag on the target cluster before apply.
+# - embedded etcd + local storage, no minio dependency.
+# - data persisted to hostPath /home/zcx/milvus-data on master.
+# - gRPC :19530, metrics/health :9091 (/healthz).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: milvus-standalone
+  namespace: pairec
+  labels:
+    app: milvus-standalone
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: milvus-standalone
+  template:
+    metadata:
+      labels:
+        app: milvus-standalone
+    spec:
+      nodeName: master
+      containers:
+        - name: milvus
+          image: milvusdb/milvus:v2.4.15
+          imagePullPolicy: IfNotPresent
+          command: ["milvus", "run", "standalone"]
+          securityContext:
+            runAsNonRoot: false
+          env:
+            - name: ETCD_USE_EMBEDDED
+              value: "true"
+            - name: ETCD_DATA_DIR
+              value: /var/lib/milvus/etcd/
+            - name: ETCD_CONFIG_PATH
+              value: /milvus/configs/embedEtcd.yaml
+            - name: COMMON_STORAGETYPE
+              value: local
+          ports:
+            - containerPort: 19530
+              name: grpc
+            - containerPort: 9091
+              name: metrics
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: milvus-data
+              mountPath: /var/lib/milvus
+      volumes:
+        - name: milvus-data
+          hostPath:
+            path: /home/zcx/milvus-data
+            type: DirectoryOrCreate
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: milvus-standalone
+  namespace: pairec
+  labels:
+    app: milvus-standalone
+spec:
+  selector:
+    app: milvus-standalone
+  ports:
+    - name: grpc
+      port: 19530
+      targetPort: 19530
+      protocol: TCP
+    - name: metrics
+      port: 9091
+      targetPort: 9091
+      protocol: TCP
+  type: ClusterIP

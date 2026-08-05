@@ -1,0 +1,116 @@
+# ============================================
+# DSSM 向量召回服务 (Milvus)
+# ============================================
+#
+# 调用方：PaiRec 的 MilvusRecall 通过 Service `dssm-recall-server:18200`
+#        访问本服务的 /recall。
+#
+# 前置条件：
+#   - master 节点已有 /home/zcx/workspace/pairec4tigerllm 工作目录
+#   - 已生成 DSSM checkpoint / vocab / 导出的 item 向量与用户画像
+#   - Milvus standalone 已部署（k8s/deployment-milvus-standalone.yaml）
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dssm-recall-server
+  namespace: pairec
+  labels:
+    app: dssm-recall-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dssm-recall-server
+  template:
+    metadata:
+      labels:
+        app: dssm-recall-server
+    spec:
+      nodeName: master
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: dssm-recall
+          image: docker.io/library/pairec-dssm-recall:k8s-arm64-v1
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command:
+            - python
+            - /workspace/inference/dssm_recall_server.py
+          ports:
+            - containerPort: 18200
+              name: http
+          env:
+            - name: PYTHONPATH
+              value: /workspace
+            - name: DSSM_CHECKPOINT
+              value: /workspace/dssm_out/checkpoint.pt
+            - name: DSSM_VOCAB
+              value: /workspace/dssm_out/vocab.json
+            - name: DSSM_EXPORT_DIR
+              value: /workspace/dssm_out/export
+            - name: DSSM_RECALL_PORT
+              value: "18200"
+            - name: MILVUS_HOST
+              value: milvus-standalone
+            - name: MILVUS_PORT
+              value: "19530"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 18200
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 18200
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: workspace-volume
+              mountPath: /workspace
+              readOnly: true
+      volumes:
+        - name: workspace-volume
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm
+            type: Directory
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: dssm-recall-server
+  namespace: pairec
+  labels:
+    app: dssm-recall-server
+spec:
+  selector:
+    app: dssm-recall-server
+  ports:
+    - name: http
+      port: 18200
+      targetPort: 18200
+      protocol: TCP
+  type: ClusterIP

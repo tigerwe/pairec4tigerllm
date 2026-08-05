@@ -1,0 +1,35 @@
+# PaiRec4TigerLLM - DSSM 向量召回服务镜像
+#
+# 仅安装 Python 运行时依赖；代码与数据通过 hostPath 挂载到 /workspace。
+# 运行入口：python /workspace/inference/dssm_recall_server.py
+#
+# 构建示例（在 ARM64 机器上执行）：
+#   docker build -f docker/Dockerfile.dssm_recall \
+#     -t docker.io/library/pairec-dssm-recall:k8s-arm64-v1 .
+
+FROM python:3.10-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# 安装基础工具与 Python 依赖（CPU 版 torch 足够做 embedding 推理）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* && apt-get clean \
+    && pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir \
+        torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir \
+        numpy flask requests werkzeug pymilvus==2.4.10 tqdm
+
+WORKDIR /workspace
+
+# 默认端口
+EXPOSE 18200
+
+# 健康检查
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -fsS http://localhost:18200/health || exit 1
+
+CMD ["python", "/workspace/inference/dssm_recall_server.py"]

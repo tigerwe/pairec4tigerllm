@@ -1,3 +1,5 @@
+> 2026-08-05 PaiRec 多路召回（Milvus + DSSM）PaiRec 侧代码落地：新增 `services/recall/milvus_recall.go`，遵循 vendor `BaseRecall` + `RecallAlgo` JSON 配置模式，通过 HTTP 调用 `dssm_recall_server` 的 `/recall`，失败返回 nil 由 generative_recall 兜底；`services/main.go` 注册 `MilvusRecall` 分支；`k8s/configmap-brpc.yaml` 将 `milvus_recall` 加入 `home_feed` 召回路。新增 `docker/Dockerfile.dssm_recall` 与 `k8s/deployment-dssm-recall-server.yaml`，用于远端部署 DSSM 召回服务。本地验证：`go build -mod=vendor ./services/...`、`python3 -m py_compile` 覆盖 DSSM 训练/推理/Milvus 灌库脚本、`yaml.safe_load_all` 覆盖新增 K8s manifest 与 configmap 均通过。下一步远端全量训练/导出/灌库并部署，验证 PaiRec E2E code=200 且召回结果含两路 item。
+>
 # 工作进度
 
 > 2026-08-05 不加压完整推荐链路 + KVC 3+2 基线跑通（分支 `pairec-multi-recall-ranking`）：新增 `k8s/deployment-inference-brpc-trtllm-25g.yaml`，固定 inference 在 worker1/188、DataSystem 走 25G master `192.168.100.12:18482`、scheduler=`max_utilization`、host_cache_size=100MiB，并去掉 ETCD pool。使用 `scripts/calibrate_brpc_kvc_cache_shape.sh` 校准出 `PRIME_REQUESTS=195`，每轮重启 inference 清 HBM 后连续 3 轮确认稳定 `offload=3 onboard=2`。基线指标：E2E avg/p99≈141.7/142.9ms、brpc/TCP≈2.3ms、KVC total≈34.2ms（offload≈21.0ms、onboard≈13.2ms）、server-other≈92.5ms。注意：3+2 不是单次 Recommend 天然固定触发，而是特定 HBM 容量/scheduler/prompt 历史/prime 次数共同形成的缓存状态，必须严格按 `RESET_INFERENCE_BEFORE_ROUND=1` + `PRIME_REQUESTS=195` 复现；默认 DataSystem pool worker（188:18481）仍报 `Worker not ready`，Set 会失败，不能用于该基线。
@@ -45,6 +47,7 @@
 
 | 日期 | 进度 |
 |------|------|
+| **2026-08-05** | **PaiRec 多路召回（Milvus + DSSM）PaiRec 侧代码落地：`services/recall/milvus_recall.go`、`services/main.go` 注册 `MilvusRecall`、`configmap-brpc.yaml` 增加 `milvus_recall`；新增 DSSM 召回服务 Dockerfile 与 K8s Deployment/Service；本地 go build / py_compile / YAML parse 通过，远端 E2E 待执行。** |
 | **7/23** | **dsbench真实负载观测v4完成本地实现：新增prepared/start门控和GET/SET分项calls/QPS/Gbps/max_inflight；压力预填充移到inference重启与prime之前；修正mixed对象总量翻倍；严格门禁不再用ready线程冒充在途RPC。两阶段与正反汇总夹具通过，远端0.8.1增量编译和25G复测待执行。** |
 | **7/22** | **真实过载实验v3完成本地实现：严格校准3 Set+2 Get；dsbench新增长驻固定key持续模式；KVC改为3:2 mixed；BRPC压力拆到188独立18101进程；combined双压力、restart/crash和目标时延门禁已补齐。远端构建与25G实测待执行。** |
 | **7/22** | **压力矩阵v2跑出同形态baseline和BRPC 10/100/1000结果，E2E平均约108/144/369/496ms。修复BRPC压力QPS/Gbps/active汇总缺口；KVC 17.5MiB预填充60秒未ready，已将超时提升为300秒并降低单轮预填充总量。** |

@@ -155,6 +155,31 @@
       "validation_evidence": "2026-07-24至2026-07-28: checkpoint已导出到/data/models/qwen3_rec_vllm_ascend_v1，manifest校验tokenizer_size=152693、semantic_token_count=1024、input/output embedding rows=152693、weights_share_storage=true、missing/unexpected keys=0。vLLM-Ascend v0.19.1rc1在910B NPU完成加载与连续生成；32-token长驻OpenAI服务样本TTFT avg=57.481ms、TPOT avg=8.048ms、E2E avg=306.963ms。valid_prefix+temperature=0映射率达到100%，用于保证返回合法目录商品。最终ARM64镜像pairec-brpc-inference:vllm-ascend-npu-v1构建成功；容器pairec-vllm-ascend-brpc-chip1绑定物理Chip1/NUMA6/CPU144-167，state=running、health=healthy、restarts=0。brpc Health返回code=200/status=healthy/backend=vllm_ascend；并发2/4严格smoke共20请求全部成功，每请求items=8。PaiRec灰度/api/recommend返回code=200、size=8，HTTP->PaiRec->brpc->vLLM-Ascend->item mapping链路重复E2E约306.8-370.2ms。",
       "next_step": "基于当前健康镜像构建独立DataSystem变体，安装与现有Worker协议匹配的openyuanrong-datasystem，配置AscendStoreConnector/Yuanrong backend并验证连接、健康状态、失败回退和真实Set/Get指标。当前input<=64而Ascend默认KV block=128，预计默认配置每请求仍为0 Set+0 Get；先以实测确认，不硬凑TRT路径的3 Set+2 Get。若实验必须产生KVC时延，再优先调整真实输入工作负载跨越完整block；只有在该方案不满足目标时，才评估维护和验证32-token block的vLLM-Ascend定制分支。",
       "notes": "当前代码与远端验证提交位于gitcode/vllm-ascend-npu，最新已知提交299c0b8。当前工作树分支brpc-cross-node-189-ds188不包含这些NPU文件；F15未标done的唯一主因是DataSystem KVC尚未接入和验证。推荐质量hit/MRR不是当前切换门禁，当前门禁为合法、可映射、非空商品返回。"
+    },
+    {
+      "id": "F16",
+      "name": "PaiRec 多路召回（Milvus + DSSM）",
+      "status": "in_progress",
+      "description": "新增 DSSM 双塔向量召回链路：训练 DSSM、导出 item 向量、Milvus 向量库、DSSM 召回服务、PaiRec MilvusRecall 插件；与 GenerativeRecall 共同组成多路召回",
+      "files": [
+        "training/dssm/model.py",
+        "training/dssm/dataset.py",
+        "training/dssm/train.py",
+        "training/dssm/export_embeddings.py",
+        "inference/dssm_recall_server.py",
+        "scripts/load_item_embeddings_to_milvus.py",
+        "scripts/k8s_apply_milvus.sh",
+        "k8s/deployment-milvus-standalone.yaml",
+        "k8s/deployment-dssm-recall-server.yaml",
+        "docker/Dockerfile.dssm_recall",
+        "services/recall/milvus_recall.go",
+        "services/main.go",
+        "k8s/configmap-brpc.yaml"
+      ],
+      "validation_method": "PaiRec /api/recommend 返回 code=200，召回结果中同时包含 generative_recall 与 milvus_recall 来源的 item；Milvus 不可用时自动 fallback 到 generative 单路",
+      "validation_evidence": "本机：DSSM 训练/导出/召回服务 smoke 通过，Milvus 灌库脚本与 manifest 静态校验通过，PaiRec 侧 go build 通过；远端 E2E 待执行",
+      "next_step": "远端 ARM 全量训练 DSSM、导出向量、部署 Milvus + DSSM 召回服务、应用多路召回 configmap、跑通 PaiRec E2E",
+      "branch": "pairec-multi-recall-ranking"
     }
   ]
 }

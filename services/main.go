@@ -44,6 +44,12 @@ func main() {
 			recall.RegisterRecallWithConfig(conf, instance)
 			fmt.Printf("[DEBUG] Registered recall: name=%s, instance=%p\n", conf.Name, instance)
 		}
+		if conf.RecallType == "MilvusRecall" {
+			fmt.Printf("Registering MilvusRecall: %s\n", conf.Name)
+			instance := myrecall.NewMilvusRecall(conf)
+			recall.RegisterRecallWithConfig(conf, instance)
+			fmt.Printf("[DEBUG] Registered recall: name=%s, instance=%p\n", conf.Name, instance)
+		}
 	}
 
 	// 验证注册是否成功
