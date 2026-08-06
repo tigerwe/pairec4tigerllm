@@ -1,3 +1,5 @@
+> 2026-08-06 Milvus standalone 已跑通：embedded etcd + ConfigMap 固定 127.0.0.1:2379 方案验证成功，Pod `1/1 Running`，`/healthz` 返回 `OK`。下一步灌库并部署 DSSM 召回服务。
+>
 > 2026-08-06 DSSM ARM64 镜像国内源：master 从 Docker Hub 拉取 `python:3.10-slim` 约 30 分钟仍未完成，构建以 `context canceled` 结束。`docker/Dockerfile.dssm_recall` 现默认通过 DaoCloud 拉取 Docker Hub 基础镜像，使用清华 Debian/PyPI 镜像，并从 PyPI 安装具备 ARM64 wheel 的 `torch==2.1.2`，固定 `numpy==1.26.4`；所有源均保留 build-arg 回退入口。下一步在 master 重新构建、导入 containerd，再运行 Milvus loader。
 >
 > 2026-08-06 Milvus CrashLoop 第二轮定位与修复：完整日志确认 manifest 中 `ETCD_USE_EMBEDDED` 未被 Milvus 识别，应为 `ETCD_USE_EMBED`；修正后仍有 RootCoord/DataCoord 同时绑定 `19530`。结合 manifest 确认 ConfigMap 整目录挂载 `/milvus/configs`，遮蔽了镜像自带 `milvus.yaml`，导致各组件端口默认配置丢失。现改为 `embedEtcd.yaml` 与 `user.yaml` 两个 `subPath` 文件挂载，保留镜像默认配置；诊断脚本默认采集完整日志并新增 `MILVUS_CONFIG_DIRECTORY_MASKED_PORT_COLLISION` 分类。远端 apply 后已验收 RootCoord `53100`、DataCoord `13333`、Pod `1/1 Running`/重启 0、`/healthz=OK`；Milvus 部署阻塞解除，下一步灌入 DSSM item 向量。
@@ -55,6 +57,7 @@
 
 | 日期 | 进度 |
 |------|------|
+| **2026-08-06** | **Milvus standalone 部署成功：embedded etcd + ConfigMap 方案 Pod `1/1 Running`，healthz 返回 OK；准备灌库与部署 DSSM 召回服务。** |
 | **2026-08-06** | **PaiRec 多路召回阶段性收工：PaiRec 侧代码与 K8s manifest 推送；188 全量 DSSM 训练/导出完成（275413 item 向量）；Milvus standalone 部署探索 embedded etcd / 三容器 / ConfigMap 固定 127.0.0.1 三种方案，当前 Pod CrashLoopBackOff 待日志定位。** |
 | **2026-08-05** | **PaiRec 多路召回（Milvus + DSSM）PaiRec 侧代码落地：`services/recall/milvus_recall.go`、`services/main.go` 注册 `MilvusRecall`、`configmap-brpc.yaml` 增加 `milvus_recall`；新增 DSSM 召回服务 Dockerfile 与 K8s Deployment/Service；本地 go build / py_compile / YAML parse 通过，远端 E2E 待执行。** |
 | **7/23** | **dsbench真实负载观测v4完成本地实现：新增prepared/start门控和GET/SET分项calls/QPS/Gbps/max_inflight；压力预填充移到inference重启与prime之前；修正mixed对象总量翻倍；严格门禁不再用ready线程冒充在途RPC。两阶段与正反汇总夹具通过，远端0.8.1增量编译和25G复测待执行。** |
