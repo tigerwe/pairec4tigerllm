@@ -1,3 +1,5 @@
+> 2026-08-06 DSSM 镜像 APT/DNS 阻塞绕过：`python:3.10-slim` 基础层历时约 71 分钟后已完整下载并缓存，后续失败发生在 build 容器无法解析 `deb.debian.org`。`curl` 只用于镜像健康检查，不是运行依赖，因此 `docker/Dockerfile.dssm_recall` 已移除 `apt-get`/Debian 镜像依赖，改用 Python 标准库 `urllib.request` 健康检查；构建现在仅需访问可配置的 PyPI 源。下一步使用 `--network=host` 和清华 PyPI 参数复用已缓存基础层重新构建。
+>
 > 2026-08-06 Milvus standalone 已跑通：embedded etcd + ConfigMap 固定 127.0.0.1:2379 方案验证成功，Pod `1/1 Running`，`/healthz` 返回 `OK`。下一步灌库并部署 DSSM 召回服务。
 >
 > 2026-08-06 DSSM ARM64 镜像国内源：master 从 Docker Hub 拉取 `python:3.10-slim` 约 30 分钟仍未完成，构建以 `context canceled` 结束。`docker/Dockerfile.dssm_recall` 现默认通过 DaoCloud 拉取 Docker Hub 基础镜像，使用清华 Debian/PyPI 镜像，并从 PyPI 安装具备 ARM64 wheel 的 `torch==2.1.2`，固定 `numpy==1.26.4`；所有源均保留 build-arg 回退入口。下一步在 master 重新构建、导入 containerd，再运行 Milvus loader。
