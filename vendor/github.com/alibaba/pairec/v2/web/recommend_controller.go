@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/alibaba/pairec/v2/abtest"
@@ -132,7 +133,7 @@ func (c *RecommendController) doProcess(w http.ResponseWriter, r *http.Request) 
 		data = append(data, idata)
 	}
 
-	if len(data) < c.param.Size {
+	if len(data) < c.param.Size && !allowPartialRecommendResults(len(data)) {
 		response := RecommendResponse{
 			Size:  len(data),
 			Items: data,
@@ -145,6 +146,10 @@ func (c *RecommendController) doProcess(w http.ResponseWriter, r *http.Request) 
 		io.WriteString(w, response.ToString())
 		return
 	}
+	message := "success"
+	if len(data) < c.param.Size {
+		message = "partial success"
+	}
 
 	response := RecommendResponse{
 		Size:  len(data),
@@ -152,10 +157,14 @@ func (c *RecommendController) doProcess(w http.ResponseWriter, r *http.Request) 
 		Response: Response{
 			RequestId: c.RequestId,
 			Code:      200,
-			Message:   "success",
+			Message:   message,
 		},
 	}
 	io.WriteString(w, response.ToString())
+}
+
+func allowPartialRecommendResults(itemCount int) bool {
+	return itemCount > 0 && os.Getenv("PAIREC_ALLOW_PARTIAL_RESULTS") == "1"
 }
 func (c *RecommendController) makeRecommendContext() {
 	c.context = context.NewRecommendContext()
