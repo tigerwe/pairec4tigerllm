@@ -46,6 +46,10 @@ spec:
               value: 127.0.0.1:1
             - name: DSSM_HEALTH_URL
               value: http://127.0.0.1:1/health
+            - name: NO_PROXY
+              value: 127.0.0.1,localhost
+            - name: no_proxy
+              value: 127.0.0.1,localhost
           resources:
             requests:
               cpu: "1"
@@ -74,6 +78,7 @@ spec:
                 - /bin/sh
                 - -ec
                 - |
+                  unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
                   wget -q -T 2 -O - http://127.0.0.1:18080/ping | grep -q success
                   inference_host="${INFERENCE_ENDPOINT%:*}"
                   inference_port="${INFERENCE_ENDPOINT##*:}"

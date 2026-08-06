@@ -59,7 +59,7 @@ echo "dssm_url=${DSSM_URL}"
 
 echo
 echo "== Dependency preflight =="
-curl -fsS --connect-timeout 2 --max-time 5 "${DSSM_URL}/health" \
+curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 "${DSSM_URL}/health" \
   -o "${OUTPUT_DIR}/dssm-health.json"
 python3 - "${OUTPUT_DIR}/dssm-health.json" <<'PY'
 import json, pathlib, sys
@@ -70,7 +70,7 @@ assert data.get("milvus") is True, data
 print("DSSM_MILVUS_HEALTH_OK")
 PY
 
-curl -fsS --connect-timeout 2 --max-time 5 "${DSSM_URL}/recall" \
+curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 "${DSSM_URL}/recall" \
   -H 'Content-Type: application/json' \
   -d "{\"user_id\":\"${USER_ID}\",\"topk\":50}" \
   -o "${OUTPUT_DIR}/dssm-recall.json"
@@ -144,7 +144,9 @@ kubectl apply -f "$MANIFEST"
 kubectl -n "$NAMESPACE" set image "deployment/${DEPLOYMENT}" "pairec=${IMAGE}"
 kubectl -n "$NAMESPACE" set env "deployment/${DEPLOYMENT}" \
   "INFERENCE_ENDPOINT=${INFERENCE_ENDPOINT}" \
-  "DSSM_HEALTH_URL=${DSSM_URL}/health"
+  "DSSM_HEALTH_URL=${DSSM_URL}/health" \
+  "NO_PROXY=127.0.0.1,localhost,${INFERENCE_IP},${DSSM_HOST}" \
+  "no_proxy=127.0.0.1,localhost,${INFERENCE_IP},${DSSM_HOST}"
 kubectl -n "$NAMESPACE" rollout restart "deployment/${DEPLOYMENT}"
 kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout="$ROLLOUT_TIMEOUT"
 
@@ -205,7 +207,7 @@ run_phase() {
   for index in $(seq 1 "$requests"); do
     local response_file="${phase_dir}/response-${index}.json"
     local metrics_file="${phase_dir}/curl-${index}.txt"
-    curl -sS --connect-timeout 3 --max-time 10 "$PAIREC_URL" \
+    curl --noproxy '*' -sS --connect-timeout 3 --max-time 10 "$PAIREC_URL" \
       -H 'Content-Type: application/json' \
       -d "{\"scene_id\":\"${SCENE_ID}\",\"uid\":\"${USER_ID}\",\"size\":${RESULT_SIZE}}" \
       -o "$response_file" \
