@@ -55,7 +55,7 @@ spec:
             - run
             - standalone
           env:
-            - name: ETCD_USE_EMBEDDED
+            - name: ETCD_USE_EMBED
               value: "true"
             - name: ETCD_DATA_DIR
               value: /var/lib/milvus/etcd
@@ -79,7 +79,12 @@ spec:
             - name: milvus-data
               mountPath: /var/lib/milvus
             - name: milvus-config
-              mountPath: /milvus/configs
+              mountPath: /milvus/configs/embedEtcd.yaml
+              subPath: embedEtcd.yaml
+              readOnly: true
+            - name: milvus-config
+              mountPath: /milvus/configs/user.yaml
+              subPath: user.yaml
               readOnly: true
           readinessProbe:
             httpGet:

@@ -6,7 +6,7 @@ NAMESPACE="${NAMESPACE:-pairec}"
 DEPLOYMENT="${DEPLOYMENT:-milvus-standalone}"
 CONTAINER="${CONTAINER:-milvus}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/milvus-crashloop-diagnostic}"
-LOG_TAIL_LINES="${LOG_TAIL_LINES:-500}"
+LOG_TAIL_LINES="${LOG_TAIL_LINES:--1}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 OUTPUT_DIR="${OUTPUT_ROOT}/${TIMESTAMP}"
 
@@ -35,6 +35,9 @@ classify_log() {
     echo "MILVUS_DATA_DISK_FULL"
   elif matches 'permission denied|operation not permitted|read-only file system' "$input_file"; then
     echo "MILVUS_DATA_PERMISSION_FAILURE"
+  elif matches 'RootCoord listen on.*19530' "$input_file" &&
+      matches 'DataCoord fail to create net listener.*19530.*address already in use' "$input_file"; then
+    echo "MILVUS_CONFIG_DIRECTORY_MASKED_PORT_COLLISION"
   elif matches '(\[::1\]|localhost).*(2379|etcd)|connect.*\[::1\].*refused' "$input_file"; then
     echo "EMBEDDED_ETCD_IPV6_ENDPOINT_FAILURE"
   elif matches '(connection refused|deadline exceeded|unavailable).*(2379|etcd)|(2379|etcd).*(connection refused|deadline exceeded|unavailable)' "$input_file"; then
@@ -120,6 +123,8 @@ elif [[ "$CLASSIFICATION" == "MILVUS_DATA_DISK_FULL" ]]; then
   NEXT_ACTION="inspect free space and inode usage for /home/zcx/milvus-data on node ${NODE}"
 elif [[ "$CLASSIFICATION" == "MILVUS_DATA_PERMISSION_FAILURE" ]]; then
   NEXT_ACTION="inspect ownership and permissions of /home/zcx/milvus-data on node ${NODE}"
+elif [[ "$CLASSIFICATION" == "MILVUS_CONFIG_DIRECTORY_MASKED_PORT_COLLISION" ]]; then
+  NEXT_ACTION="preserve the image's milvus.yaml by mounting embedEtcd.yaml and user.yaml with subPath instead of replacing /milvus/configs"
 elif [[ "$CLASSIFICATION" == "EMBEDDED_ETCD_IPV6_ENDPOINT_FAILURE" ]]; then
   NEXT_ACTION="verify the mounted user.yaml and embedEtcd.yaml both use 127.0.0.1:2379"
 elif [[ "$CLASSIFICATION" == "EMBEDDED_ETCD_NOT_READY" ]]; then
