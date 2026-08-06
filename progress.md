@@ -1,3 +1,5 @@
+> 2026-08-06 PaiRec 多路召回（Milvus + DSSM）阶段性收工：PaiRec 侧 `services/recall/milvus_recall.go`、`services/main.go` 注册、`configmap-brpc.yaml` 多路召回配置已落地并推送；DSSM 训练/导出在 188 ARM 4090D 上全量跑通（10 epochs avg_loss=6.5701，275413 item 向量，7455 用户画像）；Milvus 部署探索了 embedded etcd（IPv6 localhost 解析问题）、三容器 standalone（etcd+minio+milvus）、以及回归单容器 embedded + ConfigMap 固定 127.0.0.1:2379，目前 Pod 仍 CrashLoopBackOff，待下次根据日志继续定位。新增 `docker/Dockerfile.dssm_recall`、`k8s/deployment-dssm-recall-server.yaml`、`k8s/job-load-milvus.yaml`、`scripts/run_dssm_train_and_export.sh`。代码已推送 gitcode `pairec-multi-recall-ranking`。
+>
 > 2026-08-05 PaiRec 多路召回（Milvus + DSSM）PaiRec 侧代码落地：新增 `services/recall/milvus_recall.go`，遵循 vendor `BaseRecall` + `RecallAlgo` JSON 配置模式，通过 HTTP 调用 `dssm_recall_server` 的 `/recall`，失败返回 nil 由 generative_recall 兜底；`services/main.go` 注册 `MilvusRecall` 分支；`k8s/configmap-brpc.yaml` 将 `milvus_recall` 加入 `home_feed` 召回路。新增 `docker/Dockerfile.dssm_recall` 与 `k8s/deployment-dssm-recall-server.yaml`，用于远端部署 DSSM 召回服务。本地验证：`go build -mod=vendor ./services/...`、`python3 -m py_compile` 覆盖 DSSM 训练/推理/Milvus 灌库脚本、`yaml.safe_load_all` 覆盖新增 K8s manifest 与 configmap 均通过。下一步远端全量训练/导出/灌库并部署，验证 PaiRec E2E code=200 且召回结果含两路 item。
 >
 # 工作进度
@@ -47,6 +49,7 @@
 
 | 日期 | 进度 |
 |------|------|
+| **2026-08-06** | **PaiRec 多路召回阶段性收工：PaiRec 侧代码与 K8s manifest 推送；188 全量 DSSM 训练/导出完成（275413 item 向量）；Milvus standalone 部署探索 embedded etcd / 三容器 / ConfigMap 固定 127.0.0.1 三种方案，当前 Pod CrashLoopBackOff 待日志定位。** |
 | **2026-08-05** | **PaiRec 多路召回（Milvus + DSSM）PaiRec 侧代码落地：`services/recall/milvus_recall.go`、`services/main.go` 注册 `MilvusRecall`、`configmap-brpc.yaml` 增加 `milvus_recall`；新增 DSSM 召回服务 Dockerfile 与 K8s Deployment/Service；本地 go build / py_compile / YAML parse 通过，远端 E2E 待执行。** |
 | **7/23** | **dsbench真实负载观测v4完成本地实现：新增prepared/start门控和GET/SET分项calls/QPS/Gbps/max_inflight；压力预填充移到inference重启与prime之前；修正mixed对象总量翻倍；严格门禁不再用ready线程冒充在途RPC。两阶段与正反汇总夹具通过，远端0.8.1增量编译和25G复测待执行。** |
 | **7/22** | **真实过载实验v3完成本地实现：严格校准3 Set+2 Get；dsbench新增长驻固定key持续模式；KVC改为3:2 mixed；BRPC压力拆到188独立18101进程；combined双压力、restart/crash和目标时延门禁已补齐。远端构建与25G实测待执行。** |
