@@ -1,9 +1,30 @@
 # ============================================
-# Milvus standalone (etcd + minio + milvus 同 Pod)
+# Milvus standalone with embedded etcd (single Pod)
 # ============================================
 #
-# 适用于 ARM64 K8s 节点。三个组件跑在同一个 Pod 内，通过 localhost 通信。
+# 使用官方 Milvus 镜像内置的 embedded etcd + local storage。
+# 通过 ConfigMap 注入 embedEtcd.yaml 和 user.yaml，把 etcd 端点固定到
+# 127.0.0.1:2379，避免默认 "localhost" 被解析到 IPv6 [::1] 导致连接失败。
 # 数据持久化到 master 节点的 hostPath /home/zcx/milvus-data。
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: milvus-embed-config
+  namespace: pairec
+data:
+  embedEtcd.yaml: |
+    listen-client-urls: http://127.0.0.1:2379
+    advertise-client-urls: http://127.0.0.1:2379
+    quota-backend-bytes: 4294967296
+    auto-compaction-mode: revision
+    auto-compaction-retention: '1000'
+  user.yaml: |
+    etcd:
+      endpoints:
+        - 127.0.0.1:2379
+
+---
 
 apiVersion: apps/v1
 kind: Deployment
@@ -26,74 +47,6 @@ spec:
     spec:
       nodeName: master
       containers:
-        - name: etcd
-          image: quay.io/coreos/etcd:v3.5.18
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: ETCD_AUTO_COMPACTION_MODE
-              value: "revision"
-            - name: ETCD_AUTO_COMPACTION_RETENTION
-              value: "1000"
-            - name: ETCD_QUOTA_BACKEND_BYTES
-              value: "4294967296"
-            - name: ALLOW_NONE_AUTHENTICATION
-              value: "yes"
-            - name: ETCD_DATA_DIR
-              value: "/etcd"
-            - name: ETCD_ADVERTISE_CLIENT_URLS
-              value: "http://localhost:2379"
-            - name: ETCD_LISTEN_CLIENT_URLS
-              value: "http://0.0.0.0:2379"
-          command:
-            - etcd
-          ports:
-            - containerPort: 2379
-              name: client
-          volumeMounts:
-            - name: etcd-data
-              mountPath: /etcd
-          readinessProbe:
-            exec:
-              command:
-                - /bin/sh
-                - -c
-                - "etcdctl --endpoints=http://localhost:2379 endpoint health"
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 30
-
-        - name: minio
-          image: minio/minio:RELEASE.2024-06-13T22-53-53Z
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: MINIO_ROOT_USER
-              value: "minioadmin"
-            - name: MINIO_ROOT_PASSWORD
-              value: "minioadmin"
-          command:
-            - minio
-            - server
-            - /data
-            - --console-address
-            - ":9001"
-          ports:
-            - containerPort: 9000
-              name: api
-            - containerPort: 9001
-              name: console
-          volumeMounts:
-            - name: minio-data
-              mountPath: /data
-          readinessProbe:
-            httpGet:
-              path: /minio/health/live
-              port: 9000
-            initialDelaySeconds: 10
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 30
-
         - name: milvus
           image: milvusdb/milvus:v2.4.15
           imagePullPolicy: IfNotPresent
@@ -102,20 +55,14 @@ spec:
             - run
             - standalone
           env:
-            - name: ETCD_ENDPOINTS
-              value: "localhost:2379"
-            - name: MINIO_ADDRESS
-              value: "localhost:9000"
-            - name: MINIO_ACCESS_KEY
-              value: "minioadmin"
-            - name: MINIO_SECRET_KEY
-              value: "minioadmin"
-            - name: MINIO_USE_SSL
-              value: "false"
-            - name: MINIO_BUCKET_NAME
-              value: "a-bucket"
-            - name: MINIO_REGION
-              value: "us-east-1"
+            - name: ETCD_USE_EMBEDDED
+              value: "true"
+            - name: ETCD_DATA_DIR
+              value: /var/lib/milvus/etcd
+            - name: ETCD_CONFIG_PATH
+              value: /milvus/configs/embedEtcd.yaml
+            - name: COMMON_STORAGETYPE
+              value: local
           ports:
             - containerPort: 19530
               name: grpc
@@ -131,6 +78,9 @@ spec:
           volumeMounts:
             - name: milvus-data
               mountPath: /var/lib/milvus
+            - name: milvus-config
+              mountPath: /milvus/configs
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -147,20 +97,14 @@ spec:
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 6
-
       volumes:
-        - name: etcd-data
-          hostPath:
-            path: /home/zcx/milvus-data/etcd
-            type: DirectoryOrCreate
-        - name: minio-data
-          hostPath:
-            path: /home/zcx/milvus-data/minio
-            type: DirectoryOrCreate
         - name: milvus-data
           hostPath:
-            path: /home/zcx/milvus-data/milvus
+            path: /home/zcx/milvus-data
             type: DirectoryOrCreate
+        - name: milvus-config
+          configMap:
+            name: milvus-embed-config
 
 ---
 
