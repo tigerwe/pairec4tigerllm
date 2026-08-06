@@ -178,7 +178,7 @@
         "k8s/configmap-brpc.yaml"
       ],
       "validation_method": "PaiRec /api/recommend 返回 code=200，召回结果中同时包含 generative_recall 与 milvus_recall 来源的 item；Milvus 不可用时自动 fallback 到 generative 单路",
-      "validation_evidence": "本机：DSSM 训练/导出/召回服务 smoke 通过，Milvus 灌库脚本与 manifest 静态校验通过，PaiRec 侧 go build 通过；新增只读 CrashLoop 诊断脚本，本地 bash 语法与分类夹具通过。远端：188 ARM 4090D 全量 DSSM 训练 10 epochs avg_loss=6.5701，导出 275413 item 向量与 7455 用户画像；Milvus standalone 完整日志确认 ETCD_USE_EMBEDDED 未生效，以及 ConfigMap 整目录挂载遮蔽镜像 milvus.yaml、导致 RootCoord/DataCoord 同用 19530 的端口冲突。代码已修正为 ETCD_USE_EMBED 和两个 subPath 文件挂载，待远端 apply 验收。",
+      "validation_evidence": "本机：DSSM 训练/导出/召回服务 smoke 通过，Milvus 灌库脚本与 manifest 静态校验通过，PaiRec 侧 go build 通过；新增只读 CrashLoop 诊断脚本，本地 bash 语法与分类夹具通过。远端：188 ARM 4090D 全量 DSSM 训练 10 epochs avg_loss=6.5701，导出 275413 item 向量与 7455 用户画像；Milvus standalone 修正 ETCD_USE_EMBED 和 subPath 配置挂载后，RootCoord=53100、DataCoord=13333、Pod 1/1 Running/restarts=0、healthz=OK。DSSM 镜像首次构建因 Docker Hub 极慢取消，Dockerfile 已改为国内基础镜像及 Debian/PyPI 源，待重新构建。",
       "next_step": "根据 Milvus CrashLoopBackOff 日志定位根因并修复；部署 Milvus + DSSM 召回服务 + 灌库；重建 PaiRec 镜像并应用多路召回 configmap；跑通 PaiRec E2E code=200 且召回结果含 generative_recall 与 milvus_recall 两路",
       "branch": "pairec-multi-recall-ranking"
     }

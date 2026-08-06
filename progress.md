@@ -1,4 +1,6 @@
-> 2026-08-06 Milvus CrashLoop 第二轮定位与修复：完整日志确认 manifest 中 `ETCD_USE_EMBEDDED` 未被 Milvus 识别，应为 `ETCD_USE_EMBED`；修正后仍有 RootCoord/DataCoord 同时绑定 `19530`。结合 manifest 确认 ConfigMap 整目录挂载 `/milvus/configs`，遮蔽了镜像自带 `milvus.yaml`，导致各组件端口默认配置丢失。现改为 `embedEtcd.yaml` 与 `user.yaml` 两个 `subPath` 文件挂载，保留镜像默认配置；诊断脚本默认采集完整日志并新增 `MILVUS_CONFIG_DIRECTORY_MASKED_PORT_COLLISION` 分类。下一步在 master apply 后验收 `UseEmbed:true`、Pod Ready 和 `/healthz`。
+> 2026-08-06 DSSM ARM64 镜像国内源：master 从 Docker Hub 拉取 `python:3.10-slim` 约 30 分钟仍未完成，构建以 `context canceled` 结束。`docker/Dockerfile.dssm_recall` 现默认通过 DaoCloud 拉取 Docker Hub 基础镜像，使用清华 Debian/PyPI 镜像，并从 PyPI 安装具备 ARM64 wheel 的 `torch==2.1.2`，固定 `numpy==1.26.4`；所有源均保留 build-arg 回退入口。下一步在 master 重新构建、导入 containerd，再运行 Milvus loader。
+>
+> 2026-08-06 Milvus CrashLoop 第二轮定位与修复：完整日志确认 manifest 中 `ETCD_USE_EMBEDDED` 未被 Milvus 识别，应为 `ETCD_USE_EMBED`；修正后仍有 RootCoord/DataCoord 同时绑定 `19530`。结合 manifest 确认 ConfigMap 整目录挂载 `/milvus/configs`，遮蔽了镜像自带 `milvus.yaml`，导致各组件端口默认配置丢失。现改为 `embedEtcd.yaml` 与 `user.yaml` 两个 `subPath` 文件挂载，保留镜像默认配置；诊断脚本默认采集完整日志并新增 `MILVUS_CONFIG_DIRECTORY_MASKED_PORT_COLLISION` 分类。远端 apply 后已验收 RootCoord `53100`、DataCoord `13333`、Pod `1/1 Running`/重启 0、`/healthz=OK`；Milvus 部署阻塞解除，下一步灌入 DSSM item 向量。
 >
 > 2026-08-06 Milvus CrashLoop 诊断脚本：新增 `scripts/diagnose_milvus_crashloop.sh`，只读收集 Deployment/Pod/ConfigMap/Service/Node、事件、当前日志和 previous 日志，并对镜像架构、OOM、磁盘、权限、embedded etcd IPv6/未就绪、配置、拉镜像和健康探针问题输出明确 `classification`。本地 `bash -n` 和分类夹具验证通过；下一步在 master 执行脚本，以远端证据确定 Milvus 当前崩溃根因。
 >

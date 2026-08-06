@@ -6,22 +6,38 @@
 # 构建示例（在 ARM64 机器上执行）：
 #   docker build -f docker/Dockerfile.dssm_recall \
 #     -t docker.io/library/pairec-dssm-recall:k8s-arm64-v1 .
+#
+# 默认通过国内镜像下载。若国内镜像不可用，可切回官方源：
+#   docker build -f docker/Dockerfile.dssm_recall \
+#     --build-arg PYTHON_BASE_IMAGE=docker.io/library/python:3.10-slim \
+#     --build-arg PIP_INDEX_URL=https://pypi.org/simple \
+#     -t docker.io/library/pairec-dssm-recall:k8s-arm64-v1 .
 
-FROM python:3.10-slim
+ARG PYTHON_BASE_IMAGE=m.daocloud.io/docker.io/library/python:3.10-slim
+FROM ${PYTHON_BASE_IMAGE}
+
+ARG DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn
+ARG PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 
 # 安装基础工具与 Python 依赖（CPU 版 torch 足够做 embedding 推理）
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i \
+        -e "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" \
+        -e "s|https://deb.debian.org|${DEBIAN_MIRROR}|g" \
+        -e "s|http://security.debian.org|${DEBIAN_MIRROR}|g" \
+        -e "s|https://security.debian.org|${DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* && apt-get clean \
     && pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir \
-        torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir \
-        numpy flask requests werkzeug pymilvus==2.4.10 tqdm
+        torch==2.1.2 numpy==1.26.4 \
+        flask requests werkzeug pymilvus==2.4.10 tqdm
 
 WORKDIR /workspace
 
