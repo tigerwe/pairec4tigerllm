@@ -169,6 +169,7 @@
         "inference/dssm_recall_server.py",
         "scripts/load_item_embeddings_to_milvus.py",
         "scripts/k8s_apply_milvus.sh",
+        "scripts/diagnose_milvus_crashloop.sh",
         "k8s/deployment-milvus-standalone.yaml",
         "k8s/deployment-dssm-recall-server.yaml",
         "docker/Dockerfile.dssm_recall",
@@ -177,7 +178,7 @@
         "k8s/configmap-brpc.yaml"
       ],
       "validation_method": "PaiRec /api/recommend 返回 code=200，召回结果中同时包含 generative_recall 与 milvus_recall 来源的 item；Milvus 不可用时自动 fallback 到 generative 单路",
-      "validation_evidence": "本机：DSSM 训练/导出/召回服务 smoke 通过，Milvus 灌库脚本与 manifest 静态校验通过，PaiRec 侧 go build 通过。远端：188 ARM 4090D 全量 DSSM 训练 10 epochs avg_loss=6.5701，导出 275413 item 向量与 7455 用户画像；Milvus standalone 部署探索 embedded etcd（IPv6 localhost 解析失败）、三容器（etcd+minio+milvus）、单容器 embedded + ConfigMap 固定 127.0.0.1:2379 三版，当前 Pod 仍 CrashLoopBackOff 待日志定位。",
+      "validation_evidence": "本机：DSSM 训练/导出/召回服务 smoke 通过，Milvus 灌库脚本与 manifest 静态校验通过，PaiRec 侧 go build 通过；新增只读 CrashLoop 诊断脚本，本地 bash 语法与分类夹具通过。远端：188 ARM 4090D 全量 DSSM 训练 10 epochs avg_loss=6.5701，导出 275413 item 向量与 7455 用户画像；Milvus standalone 部署探索 embedded etcd（IPv6 localhost 解析失败）、三容器（etcd+minio+milvus）、单容器 embedded + ConfigMap 固定 127.0.0.1:2379 三版，当前 Pod 仍 CrashLoopBackOff 待日志定位。",
       "next_step": "根据 Milvus CrashLoopBackOff 日志定位根因并修复；部署 Milvus + DSSM 召回服务 + 灌库；重建 PaiRec 镜像并应用多路召回 configmap；跑通 PaiRec E2E code=200 且召回结果含 generative_recall 与 milvus_recall 两路",
       "branch": "pairec-multi-recall-ranking"
     }
