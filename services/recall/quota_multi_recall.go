@@ -104,6 +104,14 @@ func (r *QuotaMultiRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		ctx.RecommendId, r.modelName, r.primaryRecallName, r.secondaryRecallName,
 		len(primaryItems), len(secondaryItems), stats.primarySelected, stats.secondarySelected,
 		stats.duplicateCount, len(items), degraded, utils.CostTime(start)))
+	writeTraceStdout(
+		"requestId=%s request_id=%s module=QuotaMultiRecall name=%s primary=%s secondary=%s"+
+			" primary_input=%d secondary_input=%d primary_selected=%d secondary_selected=%d"+
+			" duplicate_count=%d final_count=%d degraded=%t cost=%d",
+		ctx.RecommendId, ctx.RecommendId, r.modelName, r.primaryRecallName, r.secondaryRecallName,
+		len(primaryItems), len(secondaryItems), stats.primarySelected, stats.secondarySelected,
+		stats.duplicateCount, len(items), degraded, utils.CostTime(start),
+	)
 	return items
 }
 

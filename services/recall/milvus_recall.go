@@ -154,5 +154,10 @@ func (r *MilvusRecall) GetCandidateItems(user *module.User, ctx *context.Recomme
 	log.Info(fmt.Sprintf("requestId=%s\tmodule=MilvusRecall\tname=%s\tuser=%s\tcount=%d\tsource=%s\tservice_ms=%.3f\tcost=%d",
 		ctx.RecommendId, r.modelName, user.Id, len(items), recallResp.Source,
 		recallResp.LatencyMs, utils.CostTime(stageStart)))
+	writeTraceStdout(
+		"requestId=%s request_id=%s module=MilvusRecall from=service name=%s user=%s count=%d source=%s service_ms=%.3f cost=%d",
+		ctx.RecommendId, ctx.RecommendId, r.modelName, user.Id, len(items), recallResp.Source,
+		recallResp.LatencyMs, utils.CostTime(stageStart),
+	)
 	return items
 }
