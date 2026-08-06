@@ -19,6 +19,7 @@ RUNTIME_BASE="${RUNTIME_BASE:-docker.io/library/pairec-server:k8s-arm64-static}"
 BUILD_IMAGE="${BUILD_IMAGE:-1}"
 IMPORT_IMAGE="${IMPORT_IMAGE:-1}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-5m}"
+SERVICE_READY_TIMEOUT_SECONDS="${SERVICE_READY_TIMEOUT_SECONDS:-60}"
 CONFIG_TEMPLATE="${CONFIG_TEMPLATE:-configs/pairec_config.multi_recall_ip.json}"
 MANIFEST="${MANIFEST:-k8s/deployment-pairec-multi-recall.yaml}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-multi-recall/$(date +%Y%m%d-%H%M%S)}"
@@ -35,6 +36,8 @@ is_bool() {
 for value in "$SMOKE_REQUESTS" "$STABILITY_REQUESTS" "$RESULT_SIZE"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "request counts and RESULT_SIZE must be positive integers"
 done
+[[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+  || die "SERVICE_READY_TIMEOUT_SECONDS must be a positive integer"
 test "$RESULT_SIZE" = "50" || die "RESULT_SIZE must remain 50 for the confirmed 2+48 contract"
 is_bool "$RUN_STABILITY" || die "RUN_STABILITY must be 0 or 1"
 is_bool "$BUILD_IMAGE" || die "BUILD_IMAGE must be 0 or 1"
@@ -178,6 +181,32 @@ SERVICE_IP="$(kubectl -n "$NAMESPACE" get service "$DEPLOYMENT" -o jsonpath='{.s
 test -n "$SERVICE_IP" && test "$SERVICE_IP" != "None" \
   || die "service/${DEPLOYMENT} has no ClusterIP"
 PAIREC_URL="http://${SERVICE_IP}:18080/api/recommend"
+
+echo
+echo "== Wait for PaiRec Service endpoint =="
+service_deadline="$((SECONDS + SERVICE_READY_TIMEOUT_SECONDS))"
+service_ready=0
+while (( SECONDS < service_deadline )); do
+  ready_addresses="$(kubectl -n "$NAMESPACE" get endpoints "$DEPLOYMENT" \
+    -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}' 2>/dev/null || true)"
+  if [[ -n "$ready_addresses" ]]; then
+    if ping_response="$(curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 \
+        "http://${SERVICE_IP}:18080/ping" 2>/dev/null)" \
+      && grep -q success <<<"$ping_response"; then
+      service_ready=1
+      break
+    fi
+  fi
+  sleep 1
+done
+if [[ "$service_ready" != "1" ]]; then
+  kubectl -n "$NAMESPACE" get service "$DEPLOYMENT" -o wide || true
+  kubectl -n "$NAMESPACE" get endpoints "$DEPLOYMENT" -o yaml || true
+  kubectl -n "$NAMESPACE" get pod -l "app=${DEPLOYMENT}" -o wide || true
+  die "service/${DEPLOYMENT} did not become reachable within ${SERVICE_READY_TIMEOUT_SECONDS}s"
+fi
+ready_addresses_csv="$(tr '\n' ',' <<<"$ready_addresses" | sed 's/,$//')"
+echo "PAIREC_MULTI_RECALL_SERVICE_READY endpoint=${SERVICE_IP}:18080 addresses=${ready_addresses_csv}"
 
 pod_state() {
   kubectl -n "$NAMESPACE" get pod "$POD" -o json | python3 -c '
