@@ -1,3 +1,5 @@
+> 2026-08-06 CoreDNS ImagePullBackOff 修复脚本：确认集群 `coredns` 已持续 45 天处于 `0/1 ImagePullBackOff`，`kube-dns` Endpoints 只有 `notReadyAddresses`，因此 Pod 查询 `10.96.0.20:53` 返回 connection refused。新增 `scripts/repair_coredns_imagepullbackoff.sh`：备份现有 Deployment/Service/Endpoints，优先复用 master containerd 别名镜像或 Docker 本地镜像，其次执行限时 ARM64 拉取，再尝试从 worker1 containerd 传输；镜像就绪后将 Deployment 修正为 `docker.io/coredns/coredns:1.8.3` + `IfNotPresent`，并严格验证 rollout、ready endpoints 和内部 Service DNS。外部 DNS 单独报告，默认不阻止内部 DNS 修复；脚本不修改宿主 `/etc/resolv.conf`。下一步在 master 执行脚本并根据 summary 判断是否还需配置企业上游 DNS。
+>
 > 2026-08-06 DSSM 镜像 APT/DNS 阻塞绕过：`python:3.10-slim` 基础层历时约 71 分钟后已完整下载并缓存，后续失败发生在 build 容器无法解析 `deb.debian.org`。`curl` 只用于镜像健康检查，不是运行依赖，因此 `docker/Dockerfile.dssm_recall` 已移除 `apt-get`/Debian 镜像依赖，改用 Python 标准库 `urllib.request` 健康检查；构建现在仅需访问可配置的 PyPI 源。下一步使用 `--network=host` 和清华 PyPI 参数复用已缓存基础层重新构建。
 >
 > 2026-08-06 Milvus standalone 已跑通：embedded etcd + ConfigMap 固定 127.0.0.1:2379 方案验证成功，Pod `1/1 Running`，`/healthz` 返回 `OK`。下一步灌库并部署 DSSM 召回服务。
