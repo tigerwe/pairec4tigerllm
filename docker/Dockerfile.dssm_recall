@@ -7,17 +7,18 @@
 #   docker build -f docker/Dockerfile.dssm_recall \
 #     -t docker.io/library/pairec-dssm-recall:k8s-arm64-v1 .
 #
-# 默认通过国内镜像下载。若国内镜像不可用，可切回官方源：
+# 国内环境可切到镜像源：
 #   docker build -f docker/Dockerfile.dssm_recall \
-#     --build-arg PYTHON_BASE_IMAGE=docker.io/library/python:3.10-slim \
-#     --build-arg PIP_INDEX_URL=https://pypi.org/simple \
+#     --build-arg PYTHON_BASE_IMAGE=m.daocloud.io/docker.io/library/python:3.10-slim \
+#     --build-arg DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn \
+#     --build-arg PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
 #     -t docker.io/library/pairec-dssm-recall:k8s-arm64-v1 .
 
-ARG PYTHON_BASE_IMAGE=m.daocloud.io/docker.io/library/python:3.10-slim
+ARG PYTHON_BASE_IMAGE=docker.io/library/python:3.10-slim
 FROM ${PYTHON_BASE_IMAGE}
 
-ARG DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn
-ARG PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+ARG DEBIAN_MIRROR=https://deb.debian.org
+ARG PIP_INDEX_URL=https://pypi.org/simple
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
