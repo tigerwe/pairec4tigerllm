@@ -2,7 +2,7 @@
 set -euo pipefail
 
 CSV_PATH="${CSV_PATH:-/workspace/data/ctr_data_1M.csv}"
-OUTPUT_DIR="${OUTPUT_DIR:-dssm_full_out}"
+OUTPUT_DIR="${OUTPUT_DIR:-dssm_all_candidates_out}"
 DEVICE="${DEVICE:-cuda}"
 TRAIN_ROWS="${TRAIN_ROWS:-0}"
 VOCAB_ROWS="${VOCAB_ROWS:-0}"
@@ -17,11 +17,16 @@ EVAL_QUERY_BATCH_SIZE="${EVAL_QUERY_BATCH_SIZE:-32}"
 MIN_RECALL_AT_50="${MIN_RECALL_AT_50:-0}"
 ALLOW_EXISTING_OUTPUT="${ALLOW_EXISTING_OUTPUT:-0}"
 START_STAGE="${START_STAGE:-train}"
+CANDIDATE_MODE="${CANDIDATE_MODE:-all_rows}"
 
 test -s "$CSV_PATH" || { echo "ERROR: missing CSV: $CSV_PATH" >&2; exit 1; }
 case "$START_STAGE" in
   train|export|evaluate) ;;
   *) echo "ERROR: START_STAGE must be train, export, or evaluate" >&2; exit 1 ;;
+esac
+case "$CANDIDATE_MODE" in
+  all_rows|positive_rows) ;;
+  *) echo "ERROR: CANDIDATE_MODE must be all_rows or positive_rows" >&2; exit 1 ;;
 esac
 if [[ "$START_STAGE" == "train" && -d "$OUTPUT_DIR" &&
       -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" &&
@@ -40,6 +45,7 @@ echo "train_rows=$TRAIN_ROWS vocab_rows=$VOCAB_ROWS profile_rows=$PROFILE_ROWS"
 echo "batch_size=$BATCH_SIZE epochs=$EPOCHS patience=$PATIENCE"
 echo "val_fraction=$VAL_FRACTION seed=$SEED"
 echo "start_stage=$START_STAGE"
+echo "candidate_mode=$CANDIDATE_MODE"
 
 if [[ "$START_STAGE" == "train" ]]; then
   python -m training.dssm.train \
@@ -57,6 +63,7 @@ if [[ "$START_STAGE" == "train" ]]; then
     --out_dim 64 \
     --learning_rate 1e-3 \
     --temperature 0.05 \
+    --candidate_mode "$CANDIDATE_MODE" \
     --device "$DEVICE" \
     --log_every 100
 fi

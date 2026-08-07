@@ -10,8 +10,10 @@ import torch
 
 from training.deepfm.dataset import iter_split_batches
 from training.dssm.dataset import build_or_load_vocab, vocab_sizes
-from training.dssm.model import (DSSM, in_batch_recall_counts,
-                                 in_batch_softmax_loss)
+from training.dssm.model import (DSSM, RETRIEVAL_CANDIDATE_MODES,
+                                 in_batch_recall_counts,
+                                 in_batch_softmax_loss,
+                                 retrieval_batch_counts)
 
 
 def parse_args():
@@ -32,6 +34,9 @@ def parse_args():
     parser.add_argument("--out_dim", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=1e-3)
     parser.add_argument("--temperature", type=float, default=0.05)
+    parser.add_argument("--candidate_mode", choices=RETRIEVAL_CANDIDATE_MODES,
+                        default="all_rows",
+                        help="all_rows uses click=0 exposures as candidates")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--log_every", type=int, default=100)
     parser.add_argument("--load_checkpoint", default="")
@@ -49,6 +54,9 @@ def evaluate(model, args, vocab):
     positive_queries = 0
     batches = 0
     skipped = 0
+    candidate_rows = 0
+    unclicked_candidate_rows = 0
+    unique_candidates = 0
     hit_counts = {10: 0, 50: 0, 100: 0}
     for batch_np in iter_split_batches(
             args.csv_path, vocab, args.batch_size, "val",
@@ -57,18 +65,25 @@ def evaluate(model, args, vocab):
         user_vec, item_vec = model(batch)
         loss = in_batch_softmax_loss(
             user_vec, item_vec, batch["label"], args.temperature,
-            batch["item_id"]
+            batch["item_id"], args.candidate_mode
         )
         if loss is None:
             skipped += 1
             continue
         counts = in_batch_recall_counts(
-            user_vec, item_vec, batch["label"], batch["item_id"]
+            user_vec, item_vec, batch["label"], batch["item_id"],
+            candidate_mode=args.candidate_mode
+        )
+        batch_counts = retrieval_batch_counts(
+            batch["label"], batch["item_id"], args.candidate_mode
         )
         queries = counts["queries"]
         loss_sum += float(loss.item()) * queries
         positive_queries += queries
         batches += 1
+        candidate_rows += batch_counts["candidate_rows"]
+        unclicked_candidate_rows += batch_counts["unclicked_candidate_rows"]
+        unique_candidates += batch_counts["unique_candidates"]
         for k in hit_counts:
             hit_counts[k] += counts[f"hits_at_{k}"]
     if not positive_queries:
@@ -78,6 +93,9 @@ def evaluate(model, args, vocab):
         "val_positive_queries": positive_queries,
         "val_batches": batches,
         "val_skipped_batches": skipped,
+        "val_candidate_rows": candidate_rows,
+        "val_unclicked_candidate_rows": unclicked_candidate_rows,
+        "val_unique_candidates_per_batch_avg": unique_candidates / batches,
         **{
             f"val_in_batch_recall_at_{k}": hit_counts[k] / positive_queries
             for k in hit_counts
@@ -120,6 +138,9 @@ def main():
         batches = 0
         skipped = 0
         examples = 0
+        candidate_rows = 0
+        unclicked_candidate_rows = 0
+        unique_candidates = 0
         for batch_np in iter_split_batches(
                 args.csv_path, vocab, args.batch_size, "train",
                 args.val_fraction, args.seed, args.train_rows,
@@ -129,17 +150,23 @@ def main():
             user_vec, item_vec = model(batch)
             loss = in_batch_softmax_loss(
                 user_vec, item_vec, batch["label"], args.temperature,
-                batch["item_id"]
+                batch["item_id"], args.candidate_mode
             )
             if loss is None:
                 skipped += 1
                 continue
-            queries = int((batch["label"] > 0.5).sum())
+            batch_counts = retrieval_batch_counts(
+                batch["label"], batch["item_id"], args.candidate_mode
+            )
+            queries = batch_counts["queries"]
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             loss_sum += float(loss.item()) * queries
             positive_queries += queries
+            candidate_rows += batch_counts["candidate_rows"]
+            unclicked_candidate_rows += batch_counts["unclicked_candidate_rows"]
+            unique_candidates += batch_counts["unique_candidates"]
             batches += 1
             if batches % args.log_every == 0:
                 print(f"[DSSM] epoch={epoch} step={batches} "
@@ -153,6 +180,9 @@ def main():
             "train_positive_queries": positive_queries,
             "train_batches": batches,
             "train_skipped_batches": skipped,
+            "train_candidate_rows": candidate_rows,
+            "train_unclicked_candidate_rows": unclicked_candidate_rows,
+            "train_unique_candidates_per_batch_avg": unique_candidates / batches,
         }
         metrics.update(evaluate(model, args, vocab))
         metrics["elapsed_seconds"] = round(time.time() - started, 3)
@@ -170,6 +200,7 @@ def main():
                     "embed_dim": args.embed_dim,
                     "out_dim": args.out_dim,
                     "temperature": args.temperature,
+                    "candidate_mode": args.candidate_mode,
                     "vocab_path": args.vocab_path,
                     "vocab_sizes": sizes,
                     "val_fraction": args.val_fraction,
@@ -195,6 +226,7 @@ def main():
         "vocab_path": os.path.abspath(args.vocab_path),
         "train_rows": args.train_rows,
         "vocab_rows": args.vocab_rows,
+        "candidate_mode": args.candidate_mode,
         "quality_gate": False,
     }
     summary_path = os.path.join(args.checkpoint_dir, "training_summary.json")

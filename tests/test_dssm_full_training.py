@@ -12,7 +12,9 @@ import torch
 from training.deepfm.dataset import iter_split_batches
 from training.dssm.dataset import build_or_load_vocab
 from training.dssm.evaluate_retrieval import sample_validation_positives
-from training.dssm.model import in_batch_recall_counts, in_batch_softmax_loss
+from training.dssm.model import (in_batch_recall_counts,
+                                 in_batch_softmax_loss,
+                                 retrieval_batch_counts)
 
 
 def frame(row_count=200):
@@ -43,6 +45,47 @@ class DSSMFullTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(float(loss), 0.0, places=6)
         counts = in_batch_recall_counts(users, items, labels, item_ids, topk=(1,))
         self.assertEqual(counts, {"queries": 3, "hits_at_1": 3})
+
+    def test_all_rows_mode_uses_unclicked_exposures_as_candidates(self):
+        users = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
+        items = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
+        labels = torch.tensor([1.0, 1.0, 0.0])
+        item_ids = torch.tensor([7, 8, 9])
+
+        baseline = in_batch_softmax_loss(
+            users, items, labels, item_ids=item_ids,
+            candidate_mode="positive_rows",
+        )
+        all_rows = in_batch_softmax_loss(
+            users, items, labels, item_ids=item_ids,
+            candidate_mode="all_rows",
+        )
+        self.assertGreater(float(all_rows), float(baseline))
+        self.assertEqual(
+            retrieval_batch_counts(labels, item_ids, "all_rows"),
+            {
+                "queries": 2,
+                "candidate_rows": 3,
+                "unclicked_candidate_rows": 1,
+                "unique_candidates": 3,
+            },
+        )
+
+    def test_unclicked_duplicate_of_target_is_an_additional_positive(self):
+        users = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        items = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+        labels = torch.tensor([1.0, 0.0])
+        item_ids = torch.tensor([7, 7])
+        loss = in_batch_softmax_loss(
+            users, items, labels, item_ids=item_ids,
+            candidate_mode="all_rows",
+        )
+        self.assertAlmostEqual(float(loss), 0.0, places=6)
+        counts = in_batch_recall_counts(
+            users, items, labels, item_ids, topk=(1,),
+            candidate_mode="all_rows",
+        )
+        self.assertEqual(counts, {"queries": 1, "hits_at_1": 1})
 
     def test_zero_vocab_rows_scans_full_csv_and_positive_limit_is_exact(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -103,7 +146,16 @@ class DSSMFullTrainingTest(unittest.TestCase):
             training = json.loads((output / "training_summary.json").read_text())
             evaluation = json.loads((output / "retrieval_evaluation.json").read_text())
             self.assertEqual(training["best_epoch"], 1)
+            self.assertEqual(training["candidate_mode"], "all_rows")
+            self.assertGreater(
+                training["history"][0]["train_unclicked_candidate_rows"], 0
+            )
             self.assertEqual(evaluation["status"], "PASS")
+            self.assertEqual(
+                evaluation["classification"],
+                "METRICS_RECORDED_NO_QUALITY_GATE",
+            )
+            self.assertIsNone(evaluation["quality_gate_passed"])
             self.assertEqual(evaluation["evaluated_queries"], 10)
             self.assertIn("full_corpus_recall_at_50", evaluation["metrics"])
 

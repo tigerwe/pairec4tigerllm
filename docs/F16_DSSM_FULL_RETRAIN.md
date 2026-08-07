@@ -5,13 +5,19 @@ only the first 1,000,000 rows. The audit measured 0.831% training-row coverage,
 12.360% unique target-item coverage, and 80% sampled user OOV. Keep those
 artifacts as the deployed engineering baseline; do not overwrite them.
 
+The first full-data baseline in `dssm_full_out` fixed coverage but reached only
+Recall@10/50/100 = 0.14%/0.70%/1.14% on 10,000 held-out queries against
+2,354,248 items. Keep it as the positive-row-candidate quality baseline.
+
 ## New training contract
 
-- Output is isolated in `dssm_full_out`.
+- Output is isolated in `dssm_all_candidates_out`.
 - `TRAIN_ROWS=0`, `VOCAB_ROWS=0`, and `PROFILE_ROWS=0` mean the full CSV.
 - Rows use a deterministic 90/10 train/validation split.
 - Training chunks are deterministically shuffled for each epoch.
-- Repeated item IDs in a batch are treated as multiple positives.
+- Positive rows provide queries, while all valid batch rows provide item
+  candidates. This includes click=0 exposures as natural negatives.
+- Repeated item IDs in any candidate row are treated as multiple positives.
 - The best validation-loss checkpoint is exported.
 - Training reports validation in-batch Recall@10/50/100.
 - Post-export evaluation samples held-out positive rows across the complete CSV
@@ -27,14 +33,26 @@ git pull --ff-only gitcode pairec-multi-recall-ranking
 REPO_DIR=/home/zcx/workspace/pairec4tigerllm \
 GPU_DEVICE=all \
 EPOCHS=3 \
-EVAL_QUERY_LIMIT=1000 \
+EVAL_QUERY_LIMIT=10000 \
   bash scripts/run_dssm_full_retrain_worker1.sh \
   | tee /tmp/dssm-full-retrain.log
 ```
 
-The initial run intentionally has no hard Recall@50 threshold because the old
-model has no comparable held-out metric. Use the first complete run as the
-baseline, then set `MIN_RECALL_AT_50` for subsequent acceptance runs.
+The initial all-candidate run intentionally has no hard Recall@50 threshold.
+Compare it with the fixed `dssm_full_out` baseline above before choosing a
+quality gate. The training summary must report non-zero
+`train_unclicked_candidate_rows`; otherwise click=0 exposures were not
+used.
+
+For a code-path A/B using the old positive-only objective, use a separate
+output directory:
+
+```bash
+OUTPUT_DIR=/home/zcx/workspace/pairec4tigerllm/dssm_positive_candidates_out \
+CANDIDATE_MODE=positive_rows \
+EVAL_QUERY_LIMIT=10000 \
+  bash scripts/run_dssm_full_retrain_worker1.sh
+```
 
 If training completed but export or evaluation failed, restart from that stage:
 
@@ -56,7 +74,7 @@ DSSM run passes, retrain DeepFM into another isolated directory:
 
 ```bash
 CSV_PATH=/workspace/data/ctr_data_1M.csv \
-DSSM_VOCAB_PATH=dssm_full_out/vocab.json \
+DSSM_VOCAB_PATH=dssm_all_candidates_out/vocab.json \
 OUTPUT_DIR=deepfm_full_vocab_out \
   bash scripts/run_deepfm_train.sh
 ```

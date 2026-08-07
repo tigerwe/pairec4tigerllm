@@ -144,10 +144,19 @@ def evaluate(args):
         for k in hit_counts
     }
     metrics["full_corpus_mrr_at_100"] = reciprocal_rank_sum / evaluated
+    gate_enabled = args.min_recall_at_50 > 0
     passed = metrics["full_corpus_recall_at_50"] >= args.min_recall_at_50
+    if not gate_enabled:
+        classification = "METRICS_RECORDED_NO_QUALITY_GATE"
+    elif passed:
+        classification = "FULL_CORPUS_QUALITY_GATE_PASS"
+    else:
+        classification = "FULL_CORPUS_QUALITY_GATE_FAIL"
     return {
         "status": "PASS" if passed else "FAIL",
-        "quality_gate_enabled": args.min_recall_at_50 > 0,
+        "classification": classification,
+        "quality_gate_enabled": gate_enabled,
+        "quality_gate_passed": passed if gate_enabled else None,
         "min_recall_at_50": args.min_recall_at_50,
         "item_corpus_size": len(item_ids),
         "evaluated_queries": evaluated,
@@ -165,7 +174,11 @@ def main():
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
     print("[DSSM] " + json.dumps(report, sort_keys=True))
-    print(f"DSSM_FULL_CORPUS_EVALUATION_{report['status']} output={args.output}")
+    if report["quality_gate_enabled"]:
+        marker = f"DSSM_FULL_CORPUS_EVALUATION_{report['status']}"
+    else:
+        marker = "DSSM_FULL_CORPUS_EVALUATION_RECORDED"
+    print(f"{marker} output={args.output}")
     if report["status"] != "PASS":
         raise SystemExit(1)
 
