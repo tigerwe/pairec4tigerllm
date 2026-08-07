@@ -14,6 +14,7 @@ import (
 	"github.com/alibaba/pairec/v2/service/recall"
 
 	myrecall "pairec4tigerllm/services/recall"
+	ranksort "pairec4tigerllm/services/sort"
 )
 
 func main() {
@@ -56,6 +57,10 @@ func main() {
 			recall.RegisterRecallWithConfig(conf, instance)
 			fmt.Printf("[DEBUG] Registered recall: name=%s, instance=%p\n", conf.Name, instance)
 		}
+	}
+	if err := ranksort.RegisterFromConfig(); err != nil {
+		fmt.Printf("Failed to register DeepFM rank sort: %v\n", err)
+		os.Exit(1)
 	}
 
 	// 验证注册是否成功

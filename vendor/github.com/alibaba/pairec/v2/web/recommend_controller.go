@@ -117,6 +117,10 @@ func (c *RecommendController) doProcess(w http.ResponseWriter, r *http.Request) 
 	c.makeRecommendContext()
 	userRecommendService := service.NewUserRecommendService()
 	items := userRecommendService.Recommend(c.context)
+	if response := c.deepFMRankFailureResponse(); response != nil {
+		io.WriteString(w, response.ToString())
+		return
+	}
 	data := make([]*ItemData, 0)
 	for _, item := range items {
 		if c.param.Debug {
@@ -161,6 +165,21 @@ func (c *RecommendController) doProcess(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 	io.WriteString(w, response.ToString())
+}
+
+func (c *RecommendController) deepFMRankFailureResponse() *RecommendResponse {
+	if c.context == nil || c.context.GetContextParam("deepfm_rank_error") == nil {
+		return nil
+	}
+	return &RecommendResponse{
+		Size:  0,
+		Items: []*ItemData{},
+		Response: Response{
+			RequestId: c.RequestId,
+			Code:      SERVER_ERROR_CODE,
+			Message:   "deepfm rank failed",
+		},
+	}
 }
 
 func allowPartialRecommendResults(itemCount int) bool {

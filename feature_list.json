@@ -189,15 +189,21 @@
       "status": "pending",
       "description": "在生成式召回与 Milvus 向量召回合并得到的 50 个候选之后接入独立精排阶段，保持召回来源可观测并输出最终排序结果。",
       "files": [
-        "services/rank/",
+        "training/deepfm/",
+        "inference/deepfm_rank_server.py",
+        "services/sort/deepfm_rank_sort.go",
         "services/main.go",
-        "configs/",
-        "k8s/",
-        "scripts/"
+        "vendor/github.com/alibaba/pairec/v2/web/recommend_controller.go",
+        "configs/pairec_config.multi_recall_rank_ip.json",
+        "k8s/deployment-pairec-multi-recall-rank.yaml",
+        "scripts/run_deepfm_train.sh",
+        "scripts/run_deepfm_rank_container.sh",
+        "scripts/deploy_and_validate_pairec_deepfm_rank.sh",
+        "docs/F17_DEEPFM_RANKING.md"
       ],
-      "validation_method": "PaiRec /api/recommend 返回 code=200；精排输入为50个去重后的多路召回候选；输出数量、排序和来源符合配置；记录召回、精排及E2E的p50/p95/p99，并验证精排失败时的明确降级语义。",
-      "validation_evidence": "尚未开始。F16 已提供稳定的50候选输入基线：100次请求全部有效，组合分布1+49共5次、2+48共95次，E2E p99=110.601ms。",
-      "next_step": "先确认精排模型或规则、所需用户/商品特征、输入候选数、输出数量以及失败降级策略，再选择与现有 PaiRec rank 模块一致的接入点。",
+      "validation_method": "全量训练 DeepFM 并验证六类产物；Rank Service 连续100次严格返回同一50候选集合与模型版本；PaiRec size=50/10各3次smoke及size=10的100次稳定性全部code=200、分数降序、至少一次重排，记录召回/精排/E2E p50/p95/p99；停止Rank后实验Pod必须NotReady，直连Pod必须HTTP 200且业务code=500、空items，恢复后重新Ready。",
+      "validation_evidence": "本地工程验证完成：500行Tenrec格式数据完成1 epoch真实训练并导出deepfm_best.pt、feature_vocab.json、model_config.json、training_summary.json、item_categories.json、user_profiles.json；Rank Service对50候选成功打分，短数组和重复ID返回code=400；Python unittest 3/3、py_compile、Shell/JSON/YAML、Go race（sort/recall/config/web）及完整Go build通过。远端全量训练、独立Rank容器和PaiRec 3+3+100验收尚未执行，因此状态仍为pending。",
+      "next_step": "在远程GPU以现有DSSM vocab和完整ctr_data_1M.csv执行scripts/run_deepfm_train.sh；将deepfm_out同步到master后运行scripts/run_deepfm_rank_container.sh，再执行scripts/deploy_and_validate_pairec_deepfm_rank.sh采集正式稳定性与故障注入证据。",
       "branch": "pairec-multi-recall-ranking"
     }
   ]

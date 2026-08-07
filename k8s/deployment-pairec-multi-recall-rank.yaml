@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pairec-multi-recall-rank
+  namespace: pairec
+  labels:
+    app: pairec-multi-recall-rank
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pairec-multi-recall-rank
+  template:
+    metadata:
+      labels:
+        app: pairec-multi-recall-rank
+    spec:
+      nodeName: master
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: pairec
+          image: docker.io/library/pairec-server:k8s-arm64-brpc-v1
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command: [/app/pairec-server]
+          ports:
+            - name: http
+              containerPort: 18080
+          env:
+            - name: CONFIG_PATH
+              value: /app/configs/pairec_config.json
+            - name: PAIREC_TRACE_STDOUT
+              value: "1"
+            - name: PAIREC_ALLOW_PARTIAL_RESULTS
+              value: "0"
+            - name: INFERENCE_ENDPOINT
+              value: 127.0.0.1:1
+            - name: DSSM_HEALTH_URL
+              value: http://127.0.0.1:1/health
+            - name: DEEPFM_HEALTH_URL
+              value: http://127.0.0.1:1/health
+            - name: NO_PROXY
+              value: 127.0.0.1,localhost
+            - name: no_proxy
+              value: 127.0.0.1,localhost
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/configs
+              readOnly: true
+            - name: data-volume
+              mountPath: /data
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 18080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+                  wget -q -T 2 -O - http://127.0.0.1:18080/ping | grep -q success
+                  inference_host="${INFERENCE_ENDPOINT%:*}"
+                  inference_port="${INFERENCE_ENDPOINT##*:}"
+                  nc -z -w 2 "${inference_host}" "${inference_port}"
+                  wget -q -T 2 -O - "${DSSM_HEALTH_URL}" | grep -q '"milvus":true'
+                  wget -q -T 2 -O - "${DEEPFM_HEALTH_URL}" | grep -q '"status":"healthy"'
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 2
+      volumes:
+        - name: config-volume
+          configMap:
+            name: pairec-config-multi-recall-rank
+        - name: data-volume
+          hostPath:
+            path: /home/zcx/workspace/pairec4tigerllm/data
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pairec-multi-recall-rank
+  namespace: pairec
+  labels:
+    app: pairec-multi-recall-rank
+spec:
+  type: ClusterIP
+  selector:
+    app: pairec-multi-recall-rank
+  ports:
+    - name: http
+      port: 18080
+      targetPort: 18080
