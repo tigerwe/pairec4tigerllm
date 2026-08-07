@@ -166,7 +166,10 @@
         "training/dssm/dataset.py",
         "training/dssm/train.py",
         "training/dssm/export_embeddings.py",
+        "training/dssm/evaluate_retrieval.py",
         "inference/dssm_recall_server.py",
+        "scripts/run_dssm_full_retrain.sh",
+        "scripts/run_dssm_full_retrain_worker1.sh",
         "scripts/load_item_embeddings_to_milvus.py",
         "scripts/k8s_apply_milvus.sh",
         "scripts/diagnose_milvus_crashloop.sh",
@@ -178,8 +181,8 @@
         "k8s/configmap-brpc.yaml"
       ],
       "validation_method": "PaiRec /api/recommend 返回 code=200，召回结果中同时包含 generative_recall 与 milvus_recall 来源的 item；Milvus 不可用时自动 fallback 到 generative 单路",
-      "validation_evidence": "本机：DSSM 训练/导出/召回服务 smoke 通过，Milvus 灌库脚本与 manifest 静态校验通过，PaiRec 侧 Go race 测试及完整构建通过。远端：188 ARM 4090D 全量 DSSM 训练 10 epochs avg_loss=6.5701，导出 275413 item 向量与 7455 用户画像；Milvus standalone Pod 1/1 Running/restarts=0、healthz=OK，DSSM /recall 返回 source=milvus。独立 pairec-multi-recall Deployment 完成 3 次 smoke 与 100 次稳定性验证，全部 code=200、结果数50、两路 trace 完整；稳定性组合为1+49共5次、2+48共95次，E2E avg/p99/max=101.671/110.601/114.258ms，Milvus avg/p99/max=5.217/7.853/7.924ms，最终 classification=PAIREC_MULTI_RECALL_GENERATIVE_MINIMUM_OK、status=PASS。",
-      "next_step": "新建精排任务：确定精排模型、输入特征和候选截断策略，在当前50个多路召回结果之后接入排序，并单独验证排序质量与E2E时延。",
+      "validation_evidence": "本机：DSSM 训练/导出/召回服务 smoke 通过，Milvus 灌库脚本与 manifest 静态校验通过，PaiRec 侧 Go race 测试及完整构建通过。远端：188 ARM 4090D 使用前100万行训练DSSM 10 epochs，avg_loss=6.5701，导出275413 item向量与7455用户画像；该产物工程结构完整，但后续审计确认训练行覆盖0.831%、全量目标商品覆盖12.360%，500万行抽样user/target/history OOV分别为80.000%/12.398%/8.809%，且无held-out质量指标，因此不能视为全量质量模型。Milvus standalone Pod 1/1 Running/restarts=0、healthz=OK，DSSM /recall返回source=milvus。独立pairec-multi-recall完成3次smoke与100次稳定性，全部code=200、结果数50、两路trace完整；E2E avg/p99/max=101.671/110.601/114.258ms，最终classification=PAIREC_MULTI_RECALL_GENERATIVE_MINIMUM_OK。",
+      "next_step": "在worker1执行scripts/run_dssm_full_retrain_worker1.sh，输出隔离的dssm_full_out；验收全量词表、validation loss、in-batch Recall和全商品库Recall@10/50/100后，再以新词表重训DeepFM并灰度替换Milvus。",
       "branch": "pairec-multi-recall-ranking",
       "done_date": "2026-08-07"
     },
@@ -203,7 +206,7 @@
       ],
       "validation_method": "全量训练 DeepFM 并验证六类产物；Rank Service 连续100次严格返回同一50候选集合与模型版本；PaiRec size=50/10各3次smoke及size=10的100次稳定性全部code=200、分数降序、至少一次重排，记录召回/精排/E2E p50/p95/p99；停止Rank后实验Pod必须NotReady，直连Pod必须HTTP 200且业务code=500、空items，恢复后重新Ready。",
       "validation_evidence": "本地工程验证完成：500行Tenrec格式数据完成1 epoch真实训练并导出deepfm_best.pt、feature_vocab.json、model_config.json、training_summary.json、item_categories.json、user_profiles.json；Rank Service对50候选成功打分，短数组和重复ID返回code=400；Python unittest 3/3、py_compile、Shell/JSON/YAML、Go race（sort/recall/config/web）及完整Go build通过。远端worker1已完成全量10 epochs训练：每轮108308074 train + 12034232 validation样本，epoch10 train logloss=0.514731、val AUC=0.715087、val logloss=0.535314，best epoch=10，六类产物完整。独立Rank容器和PaiRec 3+3+100验收尚未执行，因此状态仍为pending。",
-      "next_step": "先在worker1执行scripts/audit_dssm_training_and_artifacts.sh，确认DeepFM复用的DSSM vocab在完整数据上的OOV与商品覆盖；通过后将deepfm_out同步到master，运行scripts/run_deepfm_rank_container.sh，再执行scripts/deploy_and_validate_pairec_deepfm_rank.sh采集正式稳定性与故障注入证据。",
+      "next_step": "先在worker1执行scripts/run_dssm_full_retrain_worker1.sh形成全量dssm_full_out；再以dssm_full_out/vocab.json重训到deepfm_full_vocab_out。两者质量与覆盖验收通过后，将新DeepFM同步到master，运行Rank容器和scripts/deploy_and_validate_pairec_deepfm_rank.sh。",
       "branch": "pairec-multi-recall-ranking"
     }
   ]

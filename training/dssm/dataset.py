@@ -44,8 +44,14 @@ def _new_vocab():
     }
 
 
+def _truncate_chunk(chunk, scanned, max_rows):
+    if max_rows and scanned + len(chunk) > max_rows:
+        return chunk.iloc[:max_rows - scanned]
+    return chunk
+
+
 def build_or_load_vocab(csv_path, vocab_path, max_rows=5_000_000):
-    """扫描 CSV 前 max_rows 行构建词表; 已存在则直接加载."""
+    """扫描 CSV 构建词表; max_rows=0 表示扫描完整文件."""
     if os.path.exists(vocab_path):
         with open(vocab_path) as f:
             return json.load(f)
@@ -62,18 +68,20 @@ def build_or_load_vocab(csv_path, vocab_path, max_rows=5_000_000):
 
     scanned = 0
     usecols = ["user_id", "item_id", "video_category", "gender", "age"] + HIST_COLUMNS
-    for chunk in pd.read_csv(csv_path, usecols=usecols, chunksize=500_000,
-                             na_values=NA_VALUES):
-        add(vocab["user2idx"], chunk["user_id"].values)
-        add(vocab["item2idx"], chunk["item_id"].values)
-        add(vocab["cat2idx"], chunk["video_category"].values)
-        add(vocab["gender2idx"], chunk["gender"].values)
-        add(vocab["age2idx"], chunk["age"].values)
-        for col in HIST_COLUMNS:
-            add(vocab["item2idx"], chunk[col].values)
-        scanned += len(chunk)
-        if scanned >= max_rows:
-            break
+    with pd.read_csv(csv_path, usecols=usecols, chunksize=500_000,
+                     na_values=NA_VALUES) as chunks:
+        for chunk in chunks:
+            chunk = _truncate_chunk(chunk, scanned, max_rows)
+            add(vocab["user2idx"], chunk["user_id"].values)
+            add(vocab["item2idx"], chunk["item_id"].values)
+            add(vocab["cat2idx"], chunk["video_category"].values)
+            add(vocab["gender2idx"], chunk["gender"].values)
+            add(vocab["age2idx"], chunk["age"].values)
+            for col in HIST_COLUMNS:
+                add(vocab["item2idx"], chunk[col].values)
+            scanned += len(chunk)
+            if max_rows and scanned >= max_rows:
+                break
 
     os.makedirs(os.path.dirname(vocab_path), exist_ok=True)
     with open(vocab_path, "w") as f:
@@ -119,27 +127,30 @@ def iter_batches(csv_path, vocab, max_rows, batch_size, start_row=0):
     """流式遍历 CSV, 产出 encode 后的 batch 字典 (numpy)."""
     buffer = None
     seen = 0
-    for chunk in pd.read_csv(csv_path, chunksize=batch_size * 8,
-                             skiprows=range(1, start_row + 1),
-                             na_values=NA_VALUES):
-        feats = encode_chunk(chunk, vocab)
-        n = len(feats["label"])
-        seen += n
-        if seen > max_rows:
-            keep = n - (seen - max_rows)
-            if keep <= 0:
+    with pd.read_csv(csv_path, chunksize=batch_size * 8,
+                     skiprows=range(1, start_row + 1),
+                     na_values=NA_VALUES) as chunks:
+        for chunk in chunks:
+            feats = encode_chunk(chunk, vocab)
+            n = len(feats["label"])
+            seen += n
+            if max_rows and seen > max_rows:
+                keep = n - (seen - max_rows)
+                if keep <= 0:
+                    break
+                feats = {k: v[:keep] for k, v in feats.items()}
+            if buffer is None:
+                buffer = feats
+            else:
+                buffer = {k: np.concatenate([buffer[k], feats[k]]) for k in feats}
+            while len(buffer["label"]) >= batch_size:
+                batch = {k: v[:batch_size] for k, v in buffer.items()}
+                buffer = {k: v[batch_size:] for k, v in buffer.items()}
+                yield batch
+            if max_rows and seen >= max_rows:
                 break
-            feats = {k: v[:keep] for k, v in feats.items()}
-        if buffer is None:
-            buffer = feats
-        else:
-            buffer = {k: np.concatenate([buffer[k], feats[k]]) for k in feats}
-        while len(buffer["label"]) >= batch_size:
-            batch = {k: v[:batch_size] for k, v in buffer.items()}
-            buffer = {k: v[batch_size:] for k, v in buffer.items()}
-            yield batch
-        if seen >= max_rows:
-            break
+    if buffer is not None and len(buffer["label"]):
+        yield buffer
 
 
 def export_item_categories(csv_path, max_rows, out_path):
@@ -147,19 +158,21 @@ def export_item_categories(csv_path, max_rows, out_path):
     mapping = {}
     scanned = 0
     usecols = ["item_id", "video_category"]
-    for chunk in pd.read_csv(csv_path, usecols=usecols, chunksize=500_000,
-                             na_values=NA_VALUES):
-        items = _int_array(chunk["item_id"].values)
-        cats = _int_array(chunk["video_category"].values)
-        for item_id, cat in zip(items, cats):
-            if item_id < 0 or cat < 0:
-                continue
-            key = str(int(item_id))
-            if key not in mapping:
-                mapping[key] = int(cat)
-        scanned += len(chunk)
-        if scanned >= max_rows:
-            break
+    with pd.read_csv(csv_path, usecols=usecols, chunksize=500_000,
+                     na_values=NA_VALUES) as chunks:
+        for chunk in chunks:
+            chunk = _truncate_chunk(chunk, scanned, max_rows)
+            items = _int_array(chunk["item_id"].values)
+            cats = _int_array(chunk["video_category"].values)
+            for item_id, cat in zip(items, cats):
+                if item_id < 0 or cat < 0:
+                    continue
+                key = str(int(item_id))
+                if key not in mapping:
+                    mapping[key] = int(cat)
+            scanned += len(chunk)
+            if max_rows and scanned >= max_rows:
+                break
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(mapping, f)
@@ -171,26 +184,28 @@ def export_user_profiles(csv_path, vocab, max_rows, out_path):
     profiles = {}
     scanned = 0
     usecols = ["user_id", "gender", "age"] + HIST_COLUMNS
-    for chunk in pd.read_csv(csv_path, usecols=usecols, chunksize=500_000,
-                             na_values=NA_VALUES):
-        users = _int_array(chunk["user_id"].values)
-        genders = _int_array(chunk["gender"].values)
-        ages = _int_array(chunk["age"].values)
-        hists = np.stack([_int_array(chunk[c].values) for c in HIST_COLUMNS], axis=1)
-        for i in range(len(users)):
-            if users[i] < 0:
-                continue
-            uid = str(int(users[i]))
-            if uid not in vocab["user2idx"]:
-                continue
-            profiles[uid] = {
-                "gender": int(genders[i]),
-                "age": int(ages[i]),
-                "hist": [int(v) for v in hists[i]],
-            }
-        scanned += len(chunk)
-        if scanned >= max_rows:
-            break
+    with pd.read_csv(csv_path, usecols=usecols, chunksize=500_000,
+                     na_values=NA_VALUES) as chunks:
+        for chunk in chunks:
+            chunk = _truncate_chunk(chunk, scanned, max_rows)
+            users = _int_array(chunk["user_id"].values)
+            genders = _int_array(chunk["gender"].values)
+            ages = _int_array(chunk["age"].values)
+            hists = np.stack([_int_array(chunk[c].values) for c in HIST_COLUMNS], axis=1)
+            for i in range(len(users)):
+                if users[i] < 0:
+                    continue
+                uid = str(int(users[i]))
+                if uid not in vocab["user2idx"]:
+                    continue
+                profiles[uid] = {
+                    "gender": int(genders[i]),
+                    "age": int(ages[i]),
+                    "hist": [int(v) for v in hists[i]],
+                }
+            scanned += len(chunk)
+            if max_rows and scanned >= max_rows:
+                break
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(profiles, f)

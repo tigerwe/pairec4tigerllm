@@ -2,7 +2,8 @@
 #
 # scripts/run_dssm_train_and_export.sh
 #
-# 在 L40S (x86) 上全量训练 DSSM 并导出 item 向量 / 用户画像。
+# 历史前 100 万行 DSSM 基线流水线，仅用于复现旧产物。
+# 新的全量训练请使用 scripts/run_dssm_full_retrain_worker1.sh。
 # 运行前请确保已在 pairec-multi-recall-ranking 分支且代码最新：
 #   git pull gitcode pairec-multi-recall-ranking
 #

@@ -62,19 +62,57 @@ class DSSM(nn.Module):
         return u, v
 
 
-def in_batch_softmax_loss(user_vec, item_vec, labels, temperature=0.05):
-    """in-batch negative softmax 损失.
-
-    只用正样本行 (label==1); logits[i,j] = <u_i, v_j> / temperature,
-    对角线为正样本.
-    """
+def _positive_retrieval_tensors(user_vec, item_vec, labels, item_ids=None):
     pos = labels > 0.5
     u = user_vec[pos]
     v = item_vec[pos]
+    ids = item_ids[pos] if item_ids is not None else None
+    return u, v, ids
+
+
+def in_batch_softmax_loss(user_vec, item_vec, labels, temperature=0.05,
+                          item_ids=None):
+    """in-batch negative softmax 损失.
+
+    只用正样本行 (label==1); logits[i,j] = <u_i, v_j> / temperature。
+    提供 item_ids 时，同一 item 的所有列均视为正样本。
+    """
+    u, v, ids = _positive_retrieval_tensors(
+        user_vec, item_vec, labels, item_ids
+    )
     if u.size(0) < 2:
         return None
     u = F.normalize(u, dim=-1)
     v = F.normalize(v, dim=-1)
     logits = u @ v.t() / temperature
-    target = torch.arange(u.size(0), device=u.device)
-    return F.cross_entropy(logits, target)
+    if ids is None:
+        target = torch.arange(u.size(0), device=u.device)
+        return F.cross_entropy(logits, target)
+
+    # Repeated items in one batch are additional positives, not false negatives.
+    positive_mask = ids[:, None].eq(ids[None, :])
+    positive_logits = logits.masked_fill(~positive_mask, float("-inf"))
+    return (torch.logsumexp(logits, dim=1) -
+            torch.logsumexp(positive_logits, dim=1)).mean()
+
+
+@torch.no_grad()
+def in_batch_recall_counts(user_vec, item_vec, labels, item_ids,
+                           topk=(10, 50, 100)):
+    """Return positive-query hit counts against the current validation batch."""
+    u, v, ids = _positive_retrieval_tensors(
+        user_vec, item_vec, labels, item_ids
+    )
+    count = int(u.size(0))
+    result = {"queries": count}
+    for k in topk:
+        result[f"hits_at_{k}"] = 0
+    if count < 2:
+        return result
+    logits = F.normalize(u, dim=-1) @ F.normalize(v, dim=-1).t()
+    max_k = min(max(topk), count)
+    candidates = ids[torch.topk(logits, max_k, dim=1).indices]
+    matches = candidates.eq(ids[:, None])
+    for k in topk:
+        result[f"hits_at_{k}"] = int(matches[:, :min(k, max_k)].any(dim=1).sum())
+    return result
