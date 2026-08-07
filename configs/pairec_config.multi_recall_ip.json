@@ -35,7 +35,7 @@
       "RecallType": "QuotaMultiRecall",
       "RecallCount": 50,
       "CacheTime": 0,
-      "RecallAlgo": "{\"primary_recall_name\":\"generative_recall\",\"secondary_recall_name\":\"milvus_recall\",\"primary_quota\":2,\"total_limit\":50}"
+      "RecallAlgo": "{\"primary_recall_name\":\"generative_recall\",\"secondary_recall_name\":\"milvus_recall\",\"primary_minimum\":1,\"primary_quota\":2,\"total_limit\":50}"
     }
   ]
 }

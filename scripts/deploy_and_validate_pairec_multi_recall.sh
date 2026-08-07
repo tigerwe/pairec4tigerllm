@@ -13,6 +13,7 @@ SCENE_ID="${SCENE_ID:-home_feed}"
 RESULT_SIZE="${RESULT_SIZE:-50}"
 SMOKE_REQUESTS="${SMOKE_REQUESTS:-3}"
 STABILITY_REQUESTS="${STABILITY_REQUESTS:-100}"
+WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
 RUN_STABILITY="${RUN_STABILITY:-1}"
 IMAGE="${IMAGE:-docker.io/library/pairec-server:k8s-arm64-brpc-v1}"
 RUNTIME_BASE="${RUNTIME_BASE:-docker.io/library/pairec-server:k8s-arm64-static}"
@@ -36,9 +37,10 @@ is_bool() {
 for value in "$SMOKE_REQUESTS" "$STABILITY_REQUESTS" "$RESULT_SIZE"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "request counts and RESULT_SIZE must be positive integers"
 done
+[[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be a non-negative integer"
 [[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
   || die "SERVICE_READY_TIMEOUT_SECONDS must be a positive integer"
-test "$RESULT_SIZE" = "50" || die "RESULT_SIZE must remain 50 for the confirmed 2+48 contract"
+test "$RESULT_SIZE" = "50" || die "RESULT_SIZE must remain 50 for the confirmed 1-2 plus Milvus contract"
 is_bool "$RUN_STABILITY" || die "RUN_STABILITY must be 0 or 1"
 is_bool "$BUILD_IMAGE" || die "BUILD_IMAGE must be 0 or 1"
 is_bool "$IMPORT_IMAGE" || die "IMPORT_IMAGE must be 0 or 1"
@@ -132,6 +134,7 @@ assert config["SortNames"]["home_feed"] == []
 assert gen["protocol"] == "brpc" and gen["brpc_endpoint"] == inference
 assert gen["brpc_fallback_to_http"] is False and gen["max_retries"] == 0
 assert milvus["server_url"] == dssm and milvus["timeout_ms"] == 300
+assert multi["primary_minimum"] == 1
 assert multi["primary_quota"] == 2 and multi["total_limit"] == 50
 pathlib.Path(target).write_text(json.dumps(config, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
 print("MULTI_RECALL_CONFIG_OK")
@@ -172,6 +175,7 @@ config = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 recalls = {item["Name"]: json.loads(item["RecallAlgo"]) for item in config["RecallConfs"]}
 assert recalls["generative_recall"]["brpc_endpoint"] == sys.argv[2]
 assert recalls["milvus_recall"]["server_url"] == sys.argv[3]
+assert recalls["multi_recall_2_48"]["primary_minimum"] == 1
 assert recalls["multi_recall_2_48"]["primary_quota"] == 2
 assert recalls["multi_recall_2_48"]["total_limit"] == 50
 print("MOUNTED_MULTI_RECALL_CONFIG_OK")
@@ -207,6 +211,34 @@ if [[ "$service_ready" != "1" ]]; then
 fi
 ready_addresses_csv="$(tr '\n' ',' <<<"$ready_addresses" | sed 's/,$//')"
 echo "PAIREC_MULTI_RECALL_SERVICE_READY endpoint=${SERVICE_IP}:18080 addresses=${ready_addresses_csv}"
+
+if (( WARMUP_REQUESTS > 0 )); then
+  echo
+  echo "== Warm up PaiRec: ${WARMUP_REQUESTS} requests (excluded from latency statistics) =="
+  warmup_dir="${OUTPUT_DIR}/warmup"
+  mkdir -p "$warmup_dir"
+  for index in $(seq 1 "$WARMUP_REQUESTS"); do
+    response_file="${warmup_dir}/response-${index}.json"
+    http_code="$(curl --noproxy '*' -sS --connect-timeout 3 --max-time 10 "$PAIREC_URL" \
+      -H 'Content-Type: application/json' \
+      -d "{\"scene_id\":\"${SCENE_ID}\",\"uid\":\"${USER_ID}\",\"size\":${RESULT_SIZE}}" \
+      -o "$response_file" -w '%{http_code}')"
+    test "$http_code" = "200" || die "warmup request ${index}: HTTP=${http_code}"
+    python3 - "$response_file" "$RESULT_SIZE" <<'PY'
+import collections, json, pathlib, sys
+data = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+size = int(sys.argv[2])
+counts = collections.Counter(item.get("retrieve_id", "") for item in data.get("items", []))
+generative = counts["generative_recall"]
+milvus = counts["milvus_recall"]
+assert data.get("code") == 200, data
+assert len(data.get("items", [])) == size, data
+assert 1 <= generative <= 2, counts
+assert milvus == size - generative, counts
+PY
+  done
+  echo "PAIREC_MULTI_RECALL_WARMUP_OK requests=${WARMUP_REQUESTS}"
+fi
 
 pod_state() {
   kubectl -n "$NAMESPACE" get pod "$POD" -o json | python3 -c '
@@ -256,8 +288,9 @@ PY
     test "$http_code" = "200" || die "${phase} request ${index}: HTTP=${http_code}"
     test "$response_code" = "200" || die "${phase} request ${index}: code=${response_code}"
     test "$item_count" = "$RESULT_SIZE" || die "${phase} request ${index}: items=${item_count}"
-    test "$generative_count" = "2" || die "${phase} request ${index}: generative_count=${generative_count}"
-    test "$milvus_count" = "$((RESULT_SIZE - 2))" \
+    (( generative_count >= 1 && generative_count <= 2 )) \
+      || die "${phase} request ${index}: generative_count=${generative_count}"
+    test "$milvus_count" = "$((RESULT_SIZE - generative_count))" \
       || die "${phase} request ${index}: milvus_count=${milvus_count}"
     local e2e_ms
     e2e_ms="$(python3 -c 'import sys; print(f"{float(sys.argv[1]) * 1000:.3f}")' "$e2e_seconds")"
@@ -283,6 +316,7 @@ def fields(line):
 generative_ms = []
 milvus_ms = []
 merge_ms = []
+compositions = {}
 for row in rows:
     rid = row["request_id"]
     matching = [line for line in log_lines if rid in line]
@@ -294,12 +328,19 @@ for row in rows:
     assert merged, f"missing QuotaMultiRecall trace for {rid}"
     gf, mf, qf = fields(gen[-1]), fields(milvus[-1]), fields(merged[-1])
     assert gf.get("protocol") == "brpc", (rid, gf)
-    assert int(gf.get("count", "0")) >= 2, (rid, gf)
-    assert int(mf.get("count", "0")) >= 48, (rid, mf)
-    assert qf.get("primary_selected") == "2", (rid, qf)
-    assert qf.get("secondary_selected") == "48", (rid, qf)
+    primary_selected = int(qf.get("primary_selected", "0"))
+    secondary_selected = int(qf.get("secondary_selected", "0"))
+    assert int(gf.get("count", "0")) >= primary_selected, (rid, gf, qf)
+    assert int(mf.get("count", "0")) >= secondary_selected, (rid, mf, qf)
+    assert qf.get("primary_minimum") == "1", (rid, qf)
+    assert 1 <= primary_selected <= 2, (rid, qf)
+    assert secondary_selected == 50 - primary_selected, (rid, qf)
     assert qf.get("final_count") == "50", (rid, qf)
     assert qf.get("degraded") == "false", (rid, qf)
+    assert int(row["generative_count"]) == primary_selected, (rid, row, qf)
+    assert int(row["milvus_count"]) == secondary_selected, (rid, row, qf)
+    composition = f"{primary_selected}+{secondary_selected}"
+    compositions[composition] = compositions.get(composition, 0) + 1
     generative_ms.append(float(gf["cost"]))
     milvus_ms.append(float(mf["service_ms"]))
     merge_ms.append(float(qf["cost"]))
@@ -307,6 +348,8 @@ for row in rows:
     assert not any(marker in line for marker in bad for line in matching), (rid, matching)
 
 latencies = [float(row["e2e_ms"]) for row in rows]
+generative_counts = [int(row["generative_count"]) for row in rows]
+milvus_counts = [int(row["milvus_count"]) for row in rows]
 def percentile(values, p):
     values = sorted(values)
     if len(values) == 1:
@@ -332,8 +375,17 @@ summary = {
     "generative_recall": metric(generative_ms),
     "milvus_recall": metric(milvus_ms),
     "multi_recall": metric(merge_ms),
-    "generative_per_request": 2,
-    "milvus_per_request": 48,
+    "composition_counts": compositions,
+    "generative_count": {
+        "min": min(generative_counts),
+        "max": max(generative_counts),
+        "avg": statistics.fmean(generative_counts),
+    },
+    "milvus_count": {
+        "min": min(milvus_counts),
+        "max": max(milvus_counts),
+        "avg": statistics.fmean(milvus_counts),
+    },
 }
 pathlib.Path(sys.argv[3]).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 print("metric samples avg_ms p50_ms p95_ms p99_ms max_ms")
@@ -341,6 +393,7 @@ for name in ("e2e", "generative_recall", "milvus_recall", "multi_recall"):
     item = summary[name]
     print(f"{name} {len(rows)} {item['avg_ms']:.3f} {item['p50_ms']:.3f} "
           f"{item['p95_ms']:.3f} {item['p99_ms']:.3f} {item['max_ms']:.3f}")
+print("composition " + " ".join(f"{name}={count}" for name, count in sorted(compositions.items())))
 PY
   echo "PAIREC_MULTI_RECALL_PHASE_OK phase=${phase} samples=${requests}"
 }
@@ -352,7 +405,7 @@ fi
 
 echo
 echo "== Summary =="
-echo "classification=PAIREC_MULTI_RECALL_2_48_OK"
+echo "classification=PAIREC_MULTI_RECALL_GENERATIVE_MINIMUM_OK"
 echo "status=PASS"
 echo "deployment=${DEPLOYMENT}"
 echo "endpoint=${PAIREC_URL}"

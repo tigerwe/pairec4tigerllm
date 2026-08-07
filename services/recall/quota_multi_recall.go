@@ -17,6 +17,7 @@ import (
 type quotaMultiRecallConfigJSON struct {
 	PrimaryRecallName   string `json:"primary_recall_name"`
 	SecondaryRecallName string `json:"secondary_recall_name"`
+	PrimaryMinimum      int    `json:"primary_minimum"`
 	PrimaryQuota        int    `json:"primary_quota"`
 	TotalLimit          int    `json:"total_limit"`
 }
@@ -28,14 +29,16 @@ type QuotaMultiRecall struct {
 	modelName           string
 	primaryRecallName   string
 	secondaryRecallName string
+	primaryMinimum      int
 	primaryQuota        int
 	totalLimit          int
 }
 
 func NewQuotaMultiRecall(conf recconf.RecallConfig) *QuotaMultiRecall {
 	algoConf := quotaMultiRecallConfigJSON{
-		PrimaryQuota: 2,
-		TotalLimit:   conf.RecallCount,
+		PrimaryMinimum: 1,
+		PrimaryQuota:   2,
+		TotalLimit:     conf.RecallCount,
 	}
 	if algoConf.TotalLimit <= 0 {
 		algoConf.TotalLimit = 50
@@ -49,9 +52,10 @@ func NewQuotaMultiRecall(conf recconf.RecallConfig) *QuotaMultiRecall {
 	if algoConf.PrimaryRecallName == conf.Name || algoConf.SecondaryRecallName == conf.Name {
 		panic(fmt.Sprintf("QuotaMultiRecall %s cannot reference itself", conf.Name))
 	}
-	if algoConf.PrimaryQuota < 0 || algoConf.TotalLimit <= 0 || algoConf.PrimaryQuota > algoConf.TotalLimit {
-		panic(fmt.Sprintf("QuotaMultiRecall %s has invalid quota=%d limit=%d",
-			conf.Name, algoConf.PrimaryQuota, algoConf.TotalLimit))
+	if algoConf.PrimaryMinimum < 0 || algoConf.PrimaryQuota < algoConf.PrimaryMinimum ||
+		algoConf.TotalLimit <= 0 || algoConf.PrimaryQuota > algoConf.TotalLimit {
+		panic(fmt.Sprintf("QuotaMultiRecall %s has invalid minimum=%d quota=%d limit=%d",
+			conf.Name, algoConf.PrimaryMinimum, algoConf.PrimaryQuota, algoConf.TotalLimit))
 	}
 
 	r := &QuotaMultiRecall{
@@ -59,11 +63,12 @@ func NewQuotaMultiRecall(conf recconf.RecallConfig) *QuotaMultiRecall {
 		modelName:           conf.Name,
 		primaryRecallName:   algoConf.PrimaryRecallName,
 		secondaryRecallName: algoConf.SecondaryRecallName,
+		primaryMinimum:      algoConf.PrimaryMinimum,
 		primaryQuota:        algoConf.PrimaryQuota,
 		totalLimit:          algoConf.TotalLimit,
 	}
-	fmt.Printf("[QuotaMultiRecall] init name=%s primary=%s quota=%d secondary=%s limit=%d\n",
-		r.modelName, r.primaryRecallName, r.primaryQuota, r.secondaryRecallName, r.totalLimit)
+	fmt.Printf("[QuotaMultiRecall] init name=%s primary=%s minimum=%d quota=%d secondary=%s limit=%d\n",
+		r.modelName, r.primaryRecallName, r.primaryMinimum, r.primaryQuota, r.secondaryRecallName, r.totalLimit)
 	return r
 }
 
@@ -96,20 +101,21 @@ func (r *QuotaMultiRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 	wg.Wait()
 
 	items, stats := mergeQuotaRecallItems(primaryItems, secondaryItems, r.primaryQuota, r.totalLimit)
-	degraded := len(primaryItems) == 0 || len(secondaryItems) == 0 || len(items) < r.totalLimit
+	degraded := stats.primarySelected < r.primaryMinimum || stats.primarySelected > r.primaryQuota ||
+		stats.secondarySelected == 0 || len(items) < r.totalLimit
 	log.Info(fmt.Sprintf(
 		"requestId=%s\tmodule=QuotaMultiRecall\tname=%s\tprimary=%s\tsecondary=%s"+
-			"\tprimary_input=%d\tsecondary_input=%d\tprimary_selected=%d\tsecondary_selected=%d"+
+			"\tprimary_minimum=%d\tprimary_input=%d\tsecondary_input=%d\tprimary_selected=%d\tsecondary_selected=%d"+
 			"\tduplicate_count=%d\tfinal_count=%d\tdegraded=%t\tcost=%d",
 		ctx.RecommendId, r.modelName, r.primaryRecallName, r.secondaryRecallName,
-		len(primaryItems), len(secondaryItems), stats.primarySelected, stats.secondarySelected,
+		r.primaryMinimum, len(primaryItems), len(secondaryItems), stats.primarySelected, stats.secondarySelected,
 		stats.duplicateCount, len(items), degraded, utils.CostTime(start)))
 	writeTraceStdout(
 		"requestId=%s request_id=%s module=QuotaMultiRecall name=%s primary=%s secondary=%s"+
-			" primary_input=%d secondary_input=%d primary_selected=%d secondary_selected=%d"+
+			" primary_minimum=%d primary_input=%d secondary_input=%d primary_selected=%d secondary_selected=%d"+
 			" duplicate_count=%d final_count=%d degraded=%t cost=%d",
 		ctx.RecommendId, ctx.RecommendId, r.modelName, r.primaryRecallName, r.secondaryRecallName,
-		len(primaryItems), len(secondaryItems), stats.primarySelected, stats.secondarySelected,
+		r.primaryMinimum, len(primaryItems), len(secondaryItems), stats.primarySelected, stats.secondarySelected,
 		stats.duplicateCount, len(items), degraded, utils.CostTime(start),
 	)
 	return items

@@ -36,6 +36,25 @@ func TestMergeQuotaRecallItemsUsesTwoPrimaryAndFillsFromSecondary(t *testing.T) 
 	}
 }
 
+func TestMergeQuotaRecallItemsAcceptsOnePrimaryAndFillsFromSecondary(t *testing.T) {
+	primary := recallItems("generative_recall", 1)
+	secondary := recallItems("milvus_recall", 2, 3, 4, 5)
+
+	got, stats := mergeQuotaRecallItems(primary, secondary, 2, 5)
+	if len(got) != 5 {
+		t.Fatalf("len=%d, want 5", len(got))
+	}
+	want := []string{"1", "2", "3", "4", "5"}
+	for i, item := range got {
+		if string(item.Id) != want[i] {
+			t.Fatalf("item[%d]=%s, want %s", i, item.Id, want[i])
+		}
+	}
+	if stats.primarySelected != 1 || stats.secondarySelected != 4 || stats.duplicateCount != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
 func TestMergeQuotaRecallItemsBackfillsFromPrimary(t *testing.T) {
 	primary := recallItems("generative_recall", 1, 2, 3, 4, 5)
 	secondary := recallItems("milvus_recall", 6)
