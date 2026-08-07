@@ -13,6 +13,12 @@ from training.dssm.model import DSSM
 
 
 class DSSMAuditHelpersTest(unittest.TestCase):
+    def test_worker_wrapper_overrides_image_workdir(self):
+        wrapper = Path("scripts/audit_dssm_training_and_artifacts.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--workdir /workspace", wrapper)
+
     def test_ratio(self):
         self.assertEqual(ratio(1, 4), 0.25)
         self.assertIsNone(ratio(1, 0))

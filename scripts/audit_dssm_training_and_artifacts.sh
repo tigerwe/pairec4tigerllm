@@ -65,6 +65,7 @@ docker image inspect "$IMAGE" >/dev/null
 docker run --rm -i \
   -v "$REPO_DIR:/workspace:ro" \
   -v "$OUTPUT_DIR:/audit-output" \
+  --workdir /workspace \
   --entrypoint env \
   "$IMAGE" \
   -u LD_PRELOAD \
