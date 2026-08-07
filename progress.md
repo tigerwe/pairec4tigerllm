@@ -612,3 +612,7 @@ seed；批量化需要先验证候选多样性，不能直接替换串行循环�
 5. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
 6. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
 7. 后续独立优化 fallback JSON 启动预加载
+> 2026-08-07 DSSM 既有训练审计工具已完成，待 worker1 实测：代码核对确认旧流水线固定只扫描/训练/导出前 `1,000,000` 行，batch=4096 时每 epoch 仅 244 个完整 batch，解释了 DSSM 相比本次 1.203 亿样本/epoch 的 DeepFM 明显更快；现有 DSSM checkpoint 仅记录 train avg loss，没有验证集 AUC/Recall@K，因此 `avg_loss=6.5701` 不能单独证明召回质量。新增 `scripts/audit_dssm_training_and_artifacts.sh` 一键复用 worker1 的 `zcx-pairec-image:v1.1`，检查 checkpoint/词表/向量维度与有限值、L2 归一化、导出 ID 一致性、向量塌缩、DeepFM 全量商品集合覆盖率，并默认抽查 CSV 前 500 万行的 user/item/history/category OOV；结构损坏返回 FAIL，产物完整但训练范围/质量证据不足返回 WARN。合成产物端到端 unittest 3/3、py_compile、Shell 语法通过。下一步在 worker1 运行审计，以报告决定是否必须用全量词表重训 DSSM；由于 DeepFM 复用了 DSSM vocab，若 OOV/覆盖率异常，DeepFM 也需随新词表重训。
+>
+> 2026-08-07 F17 DeepFM 远端全量训练完成，待服务部署验收：worker1 使用完整数据完成 10 epochs，末轮 train logloss=`0.514731`、validation AUC=`0.715087`、validation logloss=`0.535314`，每 epoch 为 `108,308,074` train + `12,034,232` validation 样本；最佳 checkpoint 为 epoch 10，六类产物均已写入 `deepfm_out`。在启动 Rank Service 前先审计其复用的 DSSM vocab 对完整数据的覆盖，随后执行独立 Rank 100 次协议验证、PaiRec 3+3+100 稳定性与故障注入验收。
+>

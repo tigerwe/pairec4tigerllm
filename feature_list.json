@@ -202,8 +202,8 @@
         "docs/F17_DEEPFM_RANKING.md"
       ],
       "validation_method": "全量训练 DeepFM 并验证六类产物；Rank Service 连续100次严格返回同一50候选集合与模型版本；PaiRec size=50/10各3次smoke及size=10的100次稳定性全部code=200、分数降序、至少一次重排，记录召回/精排/E2E p50/p95/p99；停止Rank后实验Pod必须NotReady，直连Pod必须HTTP 200且业务code=500、空items，恢复后重新Ready。",
-      "validation_evidence": "本地工程验证完成：500行Tenrec格式数据完成1 epoch真实训练并导出deepfm_best.pt、feature_vocab.json、model_config.json、training_summary.json、item_categories.json、user_profiles.json；Rank Service对50候选成功打分，短数组和重复ID返回code=400；Python unittest 3/3、py_compile、Shell/JSON/YAML、Go race（sort/recall/config/web）及完整Go build通过。远端全量训练、独立Rank容器和PaiRec 3+3+100验收尚未执行，因此状态仍为pending。",
-      "next_step": "在远程GPU以现有DSSM vocab和完整ctr_data_1M.csv执行scripts/run_deepfm_train.sh；将deepfm_out同步到master后运行scripts/run_deepfm_rank_container.sh，再执行scripts/deploy_and_validate_pairec_deepfm_rank.sh采集正式稳定性与故障注入证据。",
+      "validation_evidence": "本地工程验证完成：500行Tenrec格式数据完成1 epoch真实训练并导出deepfm_best.pt、feature_vocab.json、model_config.json、training_summary.json、item_categories.json、user_profiles.json；Rank Service对50候选成功打分，短数组和重复ID返回code=400；Python unittest 3/3、py_compile、Shell/JSON/YAML、Go race（sort/recall/config/web）及完整Go build通过。远端worker1已完成全量10 epochs训练：每轮108308074 train + 12034232 validation样本，epoch10 train logloss=0.514731、val AUC=0.715087、val logloss=0.535314，best epoch=10，六类产物完整。独立Rank容器和PaiRec 3+3+100验收尚未执行，因此状态仍为pending。",
+      "next_step": "先在worker1执行scripts/audit_dssm_training_and_artifacts.sh，确认DeepFM复用的DSSM vocab在完整数据上的OOV与商品覆盖；通过后将deepfm_out同步到master，运行scripts/run_deepfm_rank_container.sh，再执行scripts/deploy_and_validate_pairec_deepfm_rank.sh采集正式稳定性与故障注入证据。",
       "branch": "pairec-multi-recall-ranking"
     }
   ]
