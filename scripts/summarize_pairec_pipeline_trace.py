@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import math
+import re
 from pathlib import Path
 
 
@@ -62,6 +63,28 @@ def extract_traces(path):
     return traces
 
 
+def extract_quota_stats(path):
+    fields = (
+        "primary_minimum", "primary_input", "secondary_input", "primary_selected",
+        "secondary_selected", "duplicate_count", "final_count",
+    )
+    pattern = re.compile(
+        r"request_id=(?P<request_id>[^ ]+).*module=QuotaMultiRecall.*" +
+        ".*".join(rf"{field}=(?P<{field}>[0-9]+)" for field in fields) +
+        r".*degraded=(?P<degraded>true|false)")
+    result = {}
+    for line in Path(path).read_text(errors="replace").splitlines():
+        if "module=QuotaMultiRecall" not in line:
+            continue
+        match = pattern.search(line)
+        if not match:
+            continue
+        values = {field: int(match.group(field)) for field in fields}
+        values["degraded"] = match.group("degraded") == "true"
+        result[match.group("request_id")] = values
+    return result
+
+
 def read_requests(path):
     if not path:
         return {}
@@ -104,6 +127,18 @@ def validate(trace, require_datasystem):
     datasystem = trace.get("datasystem") or {}
     if require_datasystem and not datasystem.get("attribution_complete"):
         reasons.append("datasystem_attribution_incomplete")
+    quota = trace.get("_quota")
+    if not quota:
+        reasons.append("missing_quota_multi_recall")
+    else:
+        if quota["primary_minimum"] < 1:
+            reasons.append("invalid_primary_minimum")
+        if quota["primary_selected"] < quota["primary_minimum"]:
+            reasons.append("generative_recall_not_selected")
+        if quota["final_count"] != 50:
+            reasons.append("recall_final_count")
+        if quota["degraded"]:
+            reasons.append("quota_multi_recall_degraded")
     return sorted(set(reasons))
 
 
@@ -117,12 +152,14 @@ def main():
     args = parser.parse_args()
 
     traces = extract_traces(args.log)
+    quota_stats = extract_quota_stats(args.log)
     requests = read_requests(args.requests_tsv)
     expected_ids = set(requests) if requests else set(traces)
     missing = sorted(expected_ids - set(traces))
     invalid = {}
     valid = []
     for request_id in sorted(expected_ids & set(traces)):
+        traces[request_id]["_quota"] = quota_stats.get(request_id)
         reasons = validate(traces[request_id], args.require_datasystem_attribution)
         if reasons:
             invalid[request_id] = reasons
@@ -164,6 +201,7 @@ def main():
                                 for trace in valid
                                 if trace.get("datasystem", {}).get("attribution_complete")]),
         },
+        "quota_multi_recall_count": sum(bool(trace.get("_quota")) for trace in valid),
     }
     if args.expected and len(expected_ids) != args.expected:
         summary["classification"] = "PAIREC_BRPC_PIPELINE_TRACE_FAILED"

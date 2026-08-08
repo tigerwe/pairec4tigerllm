@@ -225,7 +225,8 @@ size = int(sys.argv[2])
 assert data.get("code") == 200, data
 items = data.get("items", [])
 assert len(items) == size and len({item["item_id"] for item in items}) == size, data
-assert any(item.get("retrieve_id") == "generative_recall" for item in items), data
+assert all(item.get("retrieve_id") in {"generative_recall", "milvus_recall"}
+           for item in items), data
 print(data["request_id"], len(items))
 PY
 )

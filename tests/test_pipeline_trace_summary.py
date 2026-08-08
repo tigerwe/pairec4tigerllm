@@ -39,12 +39,37 @@ class PipelineTraceSummaryTest(unittest.TestCase):
             directory = Path(directory)
             log = directory / "trace.log"
             out = directory / "summary.json"
-            log.write_text(json.dumps(trace) + "\n")
+            quota = ("[PAIREC_TRACE] requestId=r1 request_id=r1 module=QuotaMultiRecall "
+                     "name=multi_recall_2_48 primary=generative_recall "
+                     "secondary=milvus_recall primary_minimum=1 primary_input=8 "
+                     "secondary_input=50 primary_selected=2 secondary_selected=48 "
+                     "duplicate_count=0 final_count=50 degraded=false cost=100")
+            log.write_text(quota + "\n" + json.dumps(trace) + "\n")
             subprocess.run([
                 "python3", "scripts/summarize_pairec_pipeline_trace.py",
                 "--log", str(log), "--expected", "1", "--output", str(out),
             ], check=True, capture_output=True, text=True)
             self.assertEqual(json.loads(out.read_text())["valid_count"], 1)
+
+    def test_missing_quota_selection_is_rejected(self):
+        module = __import__(
+            "scripts.summarize_pairec_pipeline_trace", fromlist=["validate"])
+        reasons = module.validate({"valid": True, "_quota": None}, False)
+        self.assertIn("missing_quota_multi_recall", reasons)
+
+    def test_quota_parser_records_generative_selection(self):
+        module = __import__(
+            "scripts.summarize_pairec_pipeline_trace", fromlist=["extract_quota_stats"])
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "quota.log"
+            log.write_text(
+                "[PAIREC_TRACE] requestId=r1 request_id=r1 module=QuotaMultiRecall "
+                "primary_minimum=1 primary_input=8 secondary_input=50 "
+                "primary_selected=2 secondary_selected=48 duplicate_count=0 "
+                "final_count=50 degraded=false cost=100\n")
+            stats = module.extract_quota_stats(log)["r1"]
+            self.assertEqual(stats["primary_selected"], 2)
+            self.assertFalse(stats["degraded"])
 
     def test_trace_marked_invalid_is_rejected(self):
         self.assertIn("trace_marked_invalid", __import__(
