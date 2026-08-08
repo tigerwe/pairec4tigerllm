@@ -189,7 +189,7 @@
     {
       "id": "F17",
       "name": "PaiRec 多路召回后精排",
-      "status": "pending",
+      "status": "done",
       "description": "在生成式召回与 Milvus 向量召回合并得到的 50 个候选之后接入独立精排阶段，保持召回来源可观测并输出最终排序结果。",
       "files": [
         "training/deepfm/",
@@ -205,10 +205,11 @@
         "scripts/deploy_and_validate_pairec_deepfm_rank.sh",
         "docs/F17_DEEPFM_RANKING.md"
       ],
-      "validation_method": "全量训练 DeepFM 并验证六类产物；Rank Service 启动必须核对 checkpoint 与词表身份，使用模型内真实用户和50个真实商品连续100次严格返回同一候选集合、模型版本/角色、零特征OOV及非退化分数；PaiRec size=50/10各3次smoke及size=10的100次稳定性全部code=200、分数降序、至少一次重排，记录召回/精排/E2E p50/p95/p99与真实候选OOV；停止Rank后实验Pod必须NotReady，直连Pod必须HTTP 200且业务code=500、空items，恢复后重新Ready。",
-      "validation_evidence": "本地工程验证完成：500行Tenrec格式数据完成1 epoch真实训练并导出deepfm_best.pt、feature_vocab.json、model_config.json、training_summary.json、item_categories.json、user_profiles.json；Rank Service对50候选成功打分，短数组和重复ID返回code=400。远端worker1已完成旧部分DSSM词表下的全量10 epochs训练：每轮108308074 train + 12034232 validation样本，epoch10 train logloss=0.514731、val AUC=0.715087、val logloss=0.535314，best epoch=10，六类产物完整；该模型因旧词表OOV问题仅标记engineering。2026-08-08补充模型角色、checkpoint/词表一致性、逐请求OOV和分数分布契约；协议测试改用模型内真实用户和50个真实商品，production_candidate默认启用E2E零OOV门禁。Python unittest 6/6、py_compile、Shell/JSON/YAML/diff check、Go race（sort/recall/web）和完整services build全部通过。master 已以 engineering 角色启动独立 `deepfm-rank` 容器，`127.0.0.1:18210/health` 返回 code=200，模型版本=c9d7ff83f6cc6893、checkpoint epoch=10、validation AUC=0.715087、validation logloss=0.535314，模型、词表、7455份用户画像和2157486条商品类目均加载成功。真实特征Rank协议100次和PaiRec 3+3+100验收尚未执行，因此状态仍为pending。",
-      "next_step": "在master对已启动的engineering Rank Service执行真实特征协议100次，然后部署独立pairec-multi-recall-rank完成size=50/10各3次、size=10连续100次及Rank停止/恢复故障注入。并行在worker1使用dssm_all_candidates_out/vocab.json隔离重训deepfm_full_vocab_out；新DeepFM同步到master后以production_candidate角色和零OOV门禁做最终验收。",
-      "branch": "pairec-multi-recall-ranking"
+      "validation_method": "训练 DeepFM 并验证六类产物；Rank Service 启动必须核对 checkpoint 与词表身份，使用模型内真实用户和50个真实商品连续100次严格返回同一候选集合、模型版本/角色、零特征OOV及非退化分数；PaiRec size=50/10各3次smoke及size=10的100次稳定性全部code=200、分数降序、至少一次重排，记录召回/精排/E2E p50/p95/p99与真实候选OOV。engineering角色允许观测到OOV但不得破坏业务闭环，production_candidate角色要求零OOV；停止Rank后实验Pod必须NotReady，直连Pod必须HTTP 200且业务code=500、空items，恢复后重新Ready。",
+      "validation_evidence": "本地工程验证完成：500行Tenrec格式数据完成1 epoch真实训练并导出deepfm_best.pt、feature_vocab.json、model_config.json、training_summary.json、item_categories.json、user_profiles.json；Rank Service对50候选成功打分，短数组和重复ID返回code=400。远端worker1完成旧部分DSSM词表下的全量10 epochs训练：每轮108308074 train + 12034232 validation样本，epoch10 train logloss=0.514731、val AUC=0.715087、val logloss=0.535314，best epoch=10，六类产物完整；该模型因旧词表OOV问题标记为engineering。master 独立Rank容器健康检查返回code=200，模型版本=c9d7ff83f6cc6893、角色=engineering、checkpoint epoch=10。独立pairec-multi-recall-rank完成size=50/10各3次smoke及size=10连续100次稳定性，全部code=200、50候选完成DeepFM打分并按分数降序返回；100次稳定性E2E avg/p99=107.720/121.109ms，多路召回avg/p99=98.310/110.010ms，Rank client avg/p99=7.559/9.094ms，Rank service avg/p99=5.358/5.730ms。旧词表在5000候选中观测到item OOV=76、category OOV=503，engineering模式按设计仅观测；user/profile/gender/age/history均无OOV。故障注入确认Rank停止后PaiRec NotReady，直连返回code=500、msg=deepfm rank failed、空items；Rank恢复后重新Ready，Pod restart count=0，最终PAIREC_DEEPFM_RANK_VALIDATION_OK。DeepFM unittest 7/7及关联静态、Go race/build检查通过。",
+      "next_step": "F17工程链路已完成。生产化提升作为后续独立事项：在worker1使用dssm_all_candidates_out/vocab.json重训deepfm_full_vocab_out，同步到master后以production_candidate角色启用零OOV门禁，并替换Flask开发服务器为生产WSGI运行方式。",
+      "branch": "pairec-multi-recall-ranking",
+      "done_date": "2026-08-08"
     }
   ]
 }
