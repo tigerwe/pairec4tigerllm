@@ -229,7 +229,8 @@ curl --noproxy '*' -fsS --connect-timeout 2 --max-time 3 \
   "http://${SERVICE_IP}:18080/ping" | grep -q success || die "PaiRec service is not reachable"
 
 run_phase() {
-  local phase="$1" requests="$2" size="$3" phase_dir="$OUTPUT_DIR/$phase"
+  local phase="$1" requests="$2" size="$3"
+  local phase_dir="$OUTPUT_DIR/$phase"
   mkdir -p "$phase_dir"
   local since
   since="$(date --iso-8601=seconds)"

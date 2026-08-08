@@ -1,3 +1,5 @@
+> 2026-08-08 F17 PaiRec Rank 验收脚本 `set -u` 修复：独立 `pairec-multi-recall-rank` Deployment/Service 已成功创建并 rollout，但进入首个测试 phase 前，`run_phase` 在同一条 `local` 声明中用刚声明的 `phase` 计算 `phase_dir`，Bash 不保证该赋值在展开时可见，因而报 `phase: 未绑定的变量`。现将函数参数与派生路径拆成两条声明，并新增回归断言；`bash -n` 与 DeepFM unittest 7/7 通过。下一步 master 拉取后幂等重跑完整验收脚本。
+>
 > 2026-08-08 F17 engineering Rank Service 已在 master 启动并通过健康检查：`deepfm-rank` 监听 `127.0.0.1:18210`，返回 `code=200/status=healthy/backend=deepfm_rank`，模型版本=`c9d7ff83f6cc6893`、角色=`engineering`、checkpoint epoch=`10`、validation AUC=`0.715087`、validation logloss=`0.535314`；模型/词表规模与画像、类目产物均加载成功。下一步先执行真实特征 `/rank` 协议 100 次，再部署独立 `pairec-multi-recall-rank` 完成 3+3+100 E2E 与 fail-closed 故障注入。
 >
 > 2026-08-08 F17 Rank 容器 Python 模块路径修复：workdir 修正后容器进入 Python，但以 `/workspace/inference/deepfm_rank_server.py` 文件路径启动时 `sys.path` 不包含仓库根目录，导致 `ModuleNotFoundError: training` 并在 restart policy 下反复退出。入口现从 `/workspace` 使用 `python -m inference.deepfm_rank_server`，同时将 `/workspace` 前置到既有 `PYTHONPATH`；新增回归断言。下一步 master 拉取后重新运行启动脚本。

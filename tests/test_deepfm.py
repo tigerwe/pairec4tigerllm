@@ -150,6 +150,14 @@ class DeepFMRankRuntimeTest(unittest.TestCase):
         self.assertIn('PYTHONPATH="/workspace${PYTHONPATH:+:$PYTHONPATH}"', wrapper)
         self.assertIn("python -m inference.deepfm_rank_server", wrapper)
 
+    def test_rank_deployment_derives_phase_dir_after_local_assignment(self):
+        wrapper = Path(
+            "scripts/deploy_and_validate_pairec_deepfm_rank.sh").read_text(
+                encoding="utf-8")
+        self.assertIn('local phase="$1" requests="$2" size="$3"\n'
+                      '  local phase_dir="$OUTPUT_DIR/$phase"', wrapper)
+        self.assertNotIn('size="$3" phase_dir="$OUTPUT_DIR/$phase"', wrapper)
+
 
 if __name__ == "__main__":
     unittest.main()
