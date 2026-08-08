@@ -181,8 +181,8 @@
         "k8s/configmap-brpc.yaml"
       ],
       "validation_method": "PaiRec /api/recommend 返回 code=200，召回结果中同时包含 generative_recall 与 milvus_recall 来源的 item；Milvus 不可用时自动 fallback 到 generative 单路",
-      "validation_evidence": "本机：DSSM 训练/导出/召回服务 smoke 通过，Milvus 灌库脚本与 manifest 静态校验通过，PaiRec 侧 Go race 测试及完整构建通过。远端：188 ARM 4090D 使用前100万行训练DSSM 10 epochs，avg_loss=6.5701，导出275413 item向量与7455用户画像；该产物工程结构完整，但后续审计确认训练行覆盖0.831%、全量目标商品覆盖12.360%，500万行抽样user/target/history OOV分别为80.000%/12.398%/8.809%，且无held-out质量指标，因此不能视为全量质量模型。Milvus standalone Pod 1/1 Running/restarts=0、healthz=OK，DSSM /recall返回source=milvus。独立pairec-multi-recall完成3次smoke与100次稳定性，全部code=200、结果数50、两路trace完整；E2E avg/p99/max=101.671/110.601/114.258ms，最终classification=PAIREC_MULTI_RECALL_GENERATIVE_MINIMUM_OK。worker1 后续完成3 epochs全量重训，导出2354248商品向量、2157486商品类别和999447用户画像，held-out目标缺失0；positive-only的10,000-query全库Recall@10/50/100=0.14%/0.70%/1.14%，MRR@100=0.000924。all-rows候选三轮确认每epoch包含82317282个click=0候选，10,000-query指标名义提升到0.20%/0.79%/1.40%与MRR=0.001154，但绝对质量仍低。训练resume、last checkpoint和optimizer状态持久化已通过专项及关联13/13测试。",
-      "next_step": "在worker1对dssm_all_candidates_out执行LOAD_CHECKPOINT=dssm_model.pt、ALLOW_EXISTING_OUTPUT=1、EPOCHS=6、PATIENCE=3、EVAL_QUERY_LIMIT=10000的权重续训；确认从epoch4开始且optimizer_state=reset，比较epoch6同口径全库指标。若无持续改善，停止增加epoch并实现同类目/热门hard negatives；质量门槛通过前不替换Milvus，也不使用新vocab重训DeepFM。",
+      "validation_evidence": "本机：DSSM 训练/导出/召回服务 smoke 通过，Milvus 灌库脚本与 manifest 静态校验通过，PaiRec 侧 Go race 测试及完整构建通过。远端：188 ARM 4090D 使用前100万行训练DSSM 10 epochs，avg_loss=6.5701，导出275413 item向量与7455用户画像；该产物工程结构完整，但后续审计确认训练行覆盖0.831%、全量目标商品覆盖12.360%，500万行抽样user/target/history OOV分别为80.000%/12.398%/8.809%，且无held-out质量指标，因此不能视为全量质量模型。Milvus standalone Pod 1/1 Running/restarts=0、healthz=OK，DSSM /recall返回source=milvus。独立pairec-multi-recall完成3次smoke与100次稳定性，全部code=200、结果数50、两路trace完整；E2E avg/p99/max=101.671/110.601/114.258ms，最终classification=PAIREC_MULTI_RECALL_GENERATIVE_MINIMUM_OK。worker1 后续完成3 epochs全量重训，导出2354248商品向量、2157486商品类别和999447用户画像，held-out目标缺失0；positive-only的10,000-query全库Recall@10/50/100=0.14%/0.70%/1.14%，MRR@100=0.000924。all-rows候选epoch3为0.20%/0.79%/1.40%、MRR=0.001154；续训到epoch6后最佳checkpoint为epoch5，in-batch指标继续改善，但10,000-query全库仅为0.27%/0.78%/1.38%、MRR=0.001204，Recall@50/100反而各少1/2个命中，确认继续堆epoch不能解决全库质量问题。训练resume、last checkpoint和optimizer状态持久化已通过专项及关联13/13测试。",
+      "next_step": "停止延长现有all-rows训练，保留epoch5产物作A/B且不替换Milvus；下一轮实现同类目和热门商品hard negatives，并保持10,000-query全库评估口径。全量vocab/画像覆盖已确认，可独立供DeepFM重训使用，不需要等待DSSM召回质量达标。",
       "branch": "pairec-multi-recall-ranking",
       "done_date": "2026-08-07"
     },
@@ -200,13 +200,14 @@
         "configs/pairec_config.multi_recall_rank_ip.json",
         "k8s/deployment-pairec-multi-recall-rank.yaml",
         "scripts/run_deepfm_train.sh",
+        "scripts/run_deepfm_full_vocab_worker1.sh",
         "scripts/run_deepfm_rank_container.sh",
         "scripts/deploy_and_validate_pairec_deepfm_rank.sh",
         "docs/F17_DEEPFM_RANKING.md"
       ],
       "validation_method": "全量训练 DeepFM 并验证六类产物；Rank Service 启动必须核对 checkpoint 与词表身份，使用模型内真实用户和50个真实商品连续100次严格返回同一候选集合、模型版本/角色、零特征OOV及非退化分数；PaiRec size=50/10各3次smoke及size=10的100次稳定性全部code=200、分数降序、至少一次重排，记录召回/精排/E2E p50/p95/p99与真实候选OOV；停止Rank后实验Pod必须NotReady，直连Pod必须HTTP 200且业务code=500、空items，恢复后重新Ready。",
       "validation_evidence": "本地工程验证完成：500行Tenrec格式数据完成1 epoch真实训练并导出deepfm_best.pt、feature_vocab.json、model_config.json、training_summary.json、item_categories.json、user_profiles.json；Rank Service对50候选成功打分，短数组和重复ID返回code=400。远端worker1已完成旧部分DSSM词表下的全量10 epochs训练：每轮108308074 train + 12034232 validation样本，epoch10 train logloss=0.514731、val AUC=0.715087、val logloss=0.535314，best epoch=10，六类产物完整；该模型因旧词表OOV问题仅标记engineering。2026-08-08补充模型角色、checkpoint/词表一致性、逐请求OOV和分数分布契约；协议测试改用模型内真实用户和50个真实商品，production_candidate默认启用E2E零OOV门禁。Python unittest 5/5、py_compile、Shell/JSON/YAML/diff check、Go race（sort/recall/web）和完整services build全部通过。独立Rank容器和PaiRec 3+3+100验收尚未执行，因此状态仍为pending。",
-      "next_step": "DSSM epoch4-6续训可与F17并行：先将本次工程代码同步到master，以MODEL_ROLE=engineering启动旧deepfm_out，执行真实特征Rank协议100次及PaiRec 3+3+100/故障注入，验证接口、时延、OOV观测和严格失败语义；同时在master/worker1执行Go race/build。DSSM词表与方案冻结后，再用最终全量词表重训deepfm_full_vocab_out，以production_candidate角色和零OOV门禁做最终验收。",
+      "next_step": "在worker1使用dssm_all_candidates_out/vocab.json隔离重训deepfm_full_vocab_out；该训练只复用全量词表，不复用低质量DSSM向量。同时可在master以MODEL_ROLE=engineering启动旧deepfm_out，先执行真实特征Rank协议100次及PaiRec 3+3+100/故障注入。新DeepFM完成后同步到master，以production_candidate角色和零OOV门禁做最终验收。",
       "branch": "pairec-multi-recall-ranking"
     }
   ]

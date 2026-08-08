@@ -44,23 +44,23 @@ quality gate. The training summary must report non-zero
 `train_unclicked_candidate_rows`; otherwise click=0 exposures were not
 used.
 
-The first all-candidate remote run completed three epochs and improved every
-full-corpus metric, but not enough to replace the deployed vectors:
+The all-candidate run was evaluated at epoch 3 and then continued to six total
+epochs. The best validation-loss checkpoint moved to epoch 5, but the target
+full-corpus metrics did not continue improving:
 
-| metric | positive-only baseline | all-candidate epoch 3 |
-| --- | ---: | ---: |
-| Recall@10 | 0.14% | 0.20% |
-| Recall@50 | 0.70% | 0.79% |
-| Recall@100 | 1.14% | 1.40% |
-| MRR@100 | 0.000924 | 0.001154 |
+| metric | positive-only | all-row epoch 3 | all-row best epoch 5 |
+| --- | ---: | ---: | ---: |
+| Recall@10 | 0.14% | 0.20% | 0.27% |
+| Recall@50 | 0.70% | 0.79% | 0.78% |
+| Recall@100 | 1.14% | 1.40% | 1.38% |
+| MRR@100 | 0.000924 | 0.001154 | 0.001204 |
 
-Epoch 3 was still the best validation-loss checkpoint. Before adding another
-negative-sampling strategy, continue it to six total epochs. The epoch-3
-checkpoint predates optimizer-state persistence, so this first continuation is
-explicitly a weights-only continuation with AdamW state reset. New runs save
-the lightweight best model in `dssm_model.pt` and the complete latest model +
-optimizer state in `dssm_last.pt`; resume from `dssm_last.pt` after the first
-continued epoch when exact optimizer restoration is required.
+The epoch-6 in-batch Recall@10/50/100 improved to
+`5.367%/15.539%/23.575%`, while full-corpus Recall@50/100 slightly regressed.
+This rules out insufficient epochs as the primary problem and shows that the
+batch objective is misaligned with the 2.35M-item retrieval target. Do not
+continue this run beyond epoch 6. Preserve epoch 5 for A/B and move the next
+experiment to same-category and popular-item hard negatives.
 
 ```bash
 cd /home/zcx/workspace/pairec4tigerllm
@@ -111,15 +111,18 @@ starts model optimization from scratch; it is not an optimizer-state resume.
 
 ## DeepFM dependency
 
-The existing DeepFM checkpoint uses the old DSSM vocabulary. After the full
-DSSM run passes, retrain DeepFM into another isolated directory:
+The existing DeepFM checkpoint uses the old partial DSSM vocabulary. DeepFM
+only reuses the vocabulary and profiles, not the DSSM weights, so the poor DSSM
+retrieval quality does not block a full-vocabulary DeepFM retrain. Keep the new
+ranker in another isolated directory:
 
 ```bash
-CSV_PATH=/workspace/data/ctr_data_1M.csv \
-DSSM_VOCAB_PATH=dssm_all_candidates_out/vocab.json \
-OUTPUT_DIR=deepfm_full_vocab_out \
-  bash scripts/run_deepfm_train.sh
+REPO_DIR=/home/zcx/workspace/pairec4tigerllm \
+OUTPUT_DIR=/home/zcx/workspace/pairec4tigerllm/deepfm_full_vocab_out \
+  bash scripts/run_deepfm_full_vocab_worker1.sh \
+  | tee /tmp/deepfm-full-vocab.log
 ```
 
-Do not replace Milvus or the ranking service until both new model families have
-completed their validation steps.
+Do not replace Milvus with the epoch-5 DSSM vectors. The DeepFM output remains
+isolated until its Rank protocol, OOV, PaiRec E2E and fail-closed validation
+steps pass.

@@ -68,6 +68,15 @@ OUTPUT_DIR=/path/to/deepfm_out \
   bash scripts/run_deepfm_train.sh
 ```
 
+worker1 使用全量词表的推荐入口：
+
+```bash
+REPO_DIR=/home/zcx/workspace/pairec4tigerllm \
+OUTPUT_DIR=/home/zcx/workspace/pairec4tigerllm/deepfm_full_vocab_out \
+  bash scripts/run_deepfm_full_vocab_worker1.sh \
+  | tee /tmp/deepfm-full-vocab.log
+```
+
 在 master 启动独立 CPU Rank Service：
 
 ```bash
