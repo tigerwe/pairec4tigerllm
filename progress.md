@@ -1,3 +1,5 @@
+> 2026-08-08 F18 PaiRec observed Service warmup 竞态修复：数字 ClusterIP 改造后 `pairec-brpc-observed` 已成功 rollout，证明 Pod Readiness 与纯 BRPC 依赖链路恢复；脚本随后立即通过 ClusterIP warmup 时遇到 `curl (7)`，说明 kube-proxy/IPVS 的 Service 数据面尚未同步。部署器现沿用已验证的多路召回门禁，同时等待 ready Endpoints 与 `/ping` 可访问（默认 60 秒），超时打印 Service/Endpoints/Pod 证据，避免把控制面 rollout 成功误当成 Service 已可用。下一步拉取后继续以 BUILD_IMAGES=0/IMPORT_IMAGES=0 重跑。
+>
 > 2026-08-08 F18 PaiRec observed Ready 去 CoreDNS 依赖：pause sandbox 与 pymilvus 注入修复后，vector/deepfm adapter 均达到 2/2 Running，但 `pairec-brpc-observed` 运行 6 分钟仍 0/1，当前模板的 Ready 和业务配置仍引用 adapter Service DNS 名称，而该集群 CoreDNS 长期不可用。部署器现于 adapter rollout 后读取两个 ClusterIP，与生成式 inference 一样把纯数字 endpoint 写入配置和 Readiness；渲染阶段断言 endpoint 精确匹配且无占位符残留。下一步拉取后以 BUILD_IMAGES=0/IMPORT_IMAGES=0 幂等重跑，预计只触发 PaiRec 配置 rollout。
 >
 > 2026-08-08 F18 pymilvus 运行时导出路径收口：首次真实导出确认健康 `dssm-recall` 容器内版本为 pymilvus 2.4.10/grpcio 1.67.1，但 `milvus-lite` distribution 元数据包含站点目录外的 `../../../bin/milvus-lite`，GNU tar 因路径穿越保护拒绝解包。导出器现对 root/source 执行真实路径解析，只允许 site-packages 根目录内文件进入归档并明确记录被跳过的外部 CLI；远程 Milvus 客户端不依赖该本地 CLI。下一步清空本次生成的临时目标目录后重跑导出，再继续 vector rollout。

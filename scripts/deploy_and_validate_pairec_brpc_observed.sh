@@ -8,6 +8,7 @@ MILVUS_SERVICE="${MILVUS_SERVICE:-milvus-standalone}"
 DEEPFM_MODEL_ROLE="${DEEPFM_MODEL_ROLE:-engineering}"
 REQUESTS="${REQUESTS:-1000}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
+SERVICE_READY_TIMEOUT_SECONDS="${SERVICE_READY_TIMEOUT_SECONDS:-60}"
 USER_ID="${USER_ID:-1}"
 SCENE_ID="${SCENE_ID:-home_feed}"
 SIZE="${SIZE:-10}"
@@ -31,6 +32,8 @@ for value in "$REQUESTS" "$HTTP_BASELINE_REQUESTS"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "request counts must be positive integers"
 done
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
+[[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+  || die "SERVICE_READY_TIMEOUT_SECONDS must be a positive integer"
 for value in "$BUILD_IMAGES" "$IMPORT_IMAGES" "$RUN_HTTP_AB" "$REQUIRE_DATASYSTEM_ATTRIBUTION"; do
   [[ "$value" = 0 || "$value" = 1 ]] || die "boolean flags must be 0 or 1"
 done
@@ -141,7 +144,35 @@ kubectl -n "$NAMESPACE" rollout status deployment/pairec-brpc-observed --timeout
 
 PAIREC_POD="$(kubectl -n "$NAMESPACE" get pod -l app=pairec-brpc-observed -o jsonpath='{.items[0].metadata.name}')"
 PAIREC_IP="$(kubectl -n "$NAMESPACE" get service pairec-brpc-observed -o jsonpath='{.spec.clusterIP}')"
+[[ -n "$PAIREC_IP" && "$PAIREC_IP" != "None" ]] \
+  || die "service/pairec-brpc-observed has no ClusterIP"
 PAIREC_URL="http://${PAIREC_IP}:18080/api/recommend"
+
+echo "== Wait for PaiRec Service endpoint =="
+service_deadline="$((SECONDS + SERVICE_READY_TIMEOUT_SECONDS))"
+service_ready=0
+ready_addresses=""
+while (( SECONDS < service_deadline )); do
+  ready_addresses="$(kubectl -n "$NAMESPACE" get endpoints pairec-brpc-observed \
+    -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}' 2>/dev/null || true)"
+  if [[ -n "$ready_addresses" ]]; then
+    if ping_response="$(curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 \
+        "http://${PAIREC_IP}:18080/ping" 2>/dev/null)" \
+      && grep -q success <<<"$ping_response"; then
+      service_ready=1
+      break
+    fi
+  fi
+  sleep 1
+done
+if [[ "$service_ready" != "1" ]]; then
+  kubectl -n "$NAMESPACE" get service pairec-brpc-observed -o wide || true
+  kubectl -n "$NAMESPACE" get endpoints pairec-brpc-observed -o yaml || true
+  kubectl -n "$NAMESPACE" get pod -l app=pairec-brpc-observed -o wide || true
+  die "service/pairec-brpc-observed did not become reachable within ${SERVICE_READY_TIMEOUT_SECONDS}s"
+fi
+ready_addresses_csv="$(tr '\n' ',' <<<"$ready_addresses" | sed 's/,$//')"
+echo "PAIREC_BRPC_OBSERVED_SERVICE_READY endpoint=${PAIREC_IP}:18080 addresses=${ready_addresses_csv}"
 
 collect_cpu_stat() {
   local deployment="$1" container="$2" output="$3"
