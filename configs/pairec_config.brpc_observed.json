@@ -32,7 +32,7 @@
       "RecallCount": 50,
       "CacheTime": 0,
       "ItemType": "video",
-      "RecallAlgo": "{\"protocol\":\"brpc\",\"brpc_endpoint\":\"vector-recall-brpc:18201\",\"brpc_service_name\":\"pairec.pipeline.VectorRecallService\",\"timeout_ms\":300,\"topk\":50}"
+      "RecallAlgo": "{\"protocol\":\"brpc\",\"brpc_endpoint\":\"__VECTOR_ENDPOINT__\",\"brpc_service_name\":\"pairec.pipeline.VectorRecallService\",\"timeout_ms\":300,\"topk\":50}"
     },
     {
       "Name": "multi_recall_2_48",
@@ -47,7 +47,7 @@
       {
         "name": "deepfm_rank_sort",
         "protocol": "brpc",
-        "brpc_endpoint": "deepfm-rank-brpc:18211",
+        "brpc_endpoint": "__RANK_ENDPOINT__",
         "brpc_service_name": "pairec.pipeline.DeepFMRankService",
         "timeout_ms": 100,
         "expected_candidates": 50,

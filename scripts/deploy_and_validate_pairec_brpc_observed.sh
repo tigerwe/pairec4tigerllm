@@ -80,6 +80,9 @@ kubectl apply -f "$OUTPUT_DIR/adapters.yaml"
 for deployment in vector-recall-brpc deepfm-rank-brpc; do
   kubectl -n "$NAMESPACE" rollout status "deployment/$deployment" --timeout=10m
 done
+VECTOR_IP="$(kubectl -n "$NAMESPACE" get service vector-recall-brpc -o jsonpath='{.spec.clusterIP}')"
+RANK_IP="$(kubectl -n "$NAMESPACE" get service deepfm-rank-brpc -o jsonpath='{.spec.clusterIP}')"
+[[ -n "$VECTOR_IP" && -n "$RANK_IP" ]] || die "adapter ClusterIP is empty"
 
 echo "== Verify adapter contracts =="
 for specification in "vector-recall-brpc:vector:18201" "deepfm-rank-brpc:rank:18211"; do
@@ -92,12 +95,15 @@ done
 
 echo "== Render and deploy isolated PaiRec =="
 python3 - "$CONFIG_TEMPLATE" "$OUTPUT_DIR/pairec_config.json" \
-  "$INFERENCE_ENDPOINT" "$DEEPFM_MODEL_ROLE" <<'PY'
+  "$INFERENCE_ENDPOINT" "$DEEPFM_MODEL_ROLE" \
+  "${VECTOR_IP}:18201" "${RANK_IP}:18211" <<'PY'
 import json, pathlib, sys
-source, target, inference, role = sys.argv[1:]
+source, target, inference, role, vector_endpoint, rank_endpoint = sys.argv[1:]
 text = pathlib.Path(source).read_text()
 text = text.replace("__INFERENCE_ENDPOINT__", inference)
 text = text.replace("__DEEPFM_MODEL_ROLE__", role)
+text = text.replace("__VECTOR_ENDPOINT__", vector_endpoint)
+text = text.replace("__RANK_ENDPOINT__", rank_endpoint)
 assert "__" not in text
 config = json.loads(text)
 recalls = {entry["Name"]: json.loads(entry["RecallAlgo"])
@@ -106,19 +112,23 @@ assert recalls["generative_recall"]["protocol"] == "brpc"
 assert recalls["generative_recall"]["brpc_fallback_to_http"] is False
 assert recalls["generative_recall"]["max_retries"] == 0
 assert recalls["milvus_recall"]["protocol"] == "brpc"
+assert recalls["milvus_recall"]["brpc_endpoint"] == vector_endpoint
 rank = config["UserDefineConfs"]["DeepFMRankSorts"][0]
 assert rank["protocol"] == "brpc" and "server_url" not in rank
+assert rank["brpc_endpoint"] == rank_endpoint
 pathlib.Path(target).write_text(json.dumps(config, indent=2) + "\n")
 print("PAIREC_PURE_BRPC_CONFIG_OK")
 PY
 kubectl -n "$NAMESPACE" create configmap pairec-config-brpc-observed \
   --from-file="pairec_config.json=$OUTPUT_DIR/pairec_config.json" \
   --dry-run=client -o yaml | kubectl apply -f -
-python3 - "$PAIREC_MANIFEST" "$OUTPUT_DIR/pairec.yaml" "$INFERENCE_IP" "$INFERENCE_PORT" <<'PY'
+python3 - "$PAIREC_MANIFEST" "$OUTPUT_DIR/pairec.yaml" \
+  "$INFERENCE_IP" "$INFERENCE_PORT" "$VECTOR_IP" "$RANK_IP" <<'PY'
 import pathlib, sys
-source, target, host, port = sys.argv[1:]
+source, target, host, port, vector_host, rank_host = sys.argv[1:]
 text = pathlib.Path(source).read_text()
 text = text.replace("__INFERENCE_HOST__", host).replace("__INFERENCE_PORT__", port)
+text = text.replace("__VECTOR_HOST__", vector_host).replace("__RANK_HOST__", rank_host)
 assert "__" not in text
 pathlib.Path(target).write_text(text)
 PY

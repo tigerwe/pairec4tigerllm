@@ -46,8 +46,8 @@ spec:
                 - |
                   wget -q -T 2 -O - http://127.0.0.1:18080/ping | grep -q success
                   nc -z -w 2 __INFERENCE_HOST__ __INFERENCE_PORT__
-                  nc -z -w 2 vector-recall-brpc 18201
-                  nc -z -w 2 deepfm-rank-brpc 18211
+                  nc -z -w 2 __VECTOR_HOST__ 18201
+                  nc -z -w 2 __RANK_HOST__ 18211
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 5

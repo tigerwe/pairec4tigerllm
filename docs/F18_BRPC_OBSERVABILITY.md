@@ -14,6 +14,8 @@ client -> PaiRec observed
 The vector and rank adapters are separate services and separate executables. Their Python
 backends are reachable only through localhost inside the same Pod. PaiRec has no HTTP fallback
 and each BRPC call has one total attempt (zero retries).
+The deployment renderer resolves all three BRPC Services to numeric ClusterIPs before creating
+the observed PaiRec Pod, so request traffic and readiness do not depend on CoreDNS.
 
 ## Trace contract
 
