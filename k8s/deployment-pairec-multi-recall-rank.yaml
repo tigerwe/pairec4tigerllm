@@ -47,6 +47,8 @@ spec:
               value: http://127.0.0.1:1/health
             - name: DEEPFM_HEALTH_URL
               value: http://127.0.0.1:1/health
+            - name: DEEPFM_EXPECTED_MODEL_ROLE
+              value: engineering
             - name: NO_PROXY
               value: 127.0.0.1,localhost
             - name: no_proxy
@@ -85,7 +87,10 @@ spec:
                   inference_port="${INFERENCE_ENDPOINT##*:}"
                   nc -z -w 2 "${inference_host}" "${inference_port}"
                   wget -q -T 2 -O - "${DSSM_HEALTH_URL}" | grep -q '"milvus":true'
-                  wget -q -T 2 -O - "${DEEPFM_HEALTH_URL}" | grep -q '"status":"healthy"'
+                  deepfm_health="$(wget -q -T 2 -O - "${DEEPFM_HEALTH_URL}")"
+                  printf '%s' "${deepfm_health}" | grep -q '"status":"healthy"'
+                  printf '%s' "${deepfm_health}" | grep -q \
+                    "\"model_role\"[[:space:]]*:[[:space:]]*\"${DEEPFM_EXPECTED_MODEL_ROLE}\""
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 5

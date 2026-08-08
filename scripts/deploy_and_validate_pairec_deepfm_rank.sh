@@ -11,6 +11,16 @@ DSSM_PORT="${DSSM_PORT:-18200}"
 DEEPFM_HOST="${DEEPFM_HOST:-141.61.91.189}"
 DEEPFM_PORT="${DEEPFM_PORT:-18210}"
 DEEPFM_CONTAINER="${DEEPFM_CONTAINER:-deepfm-rank}"
+DEEPFM_MODEL_DIR="${DEEPFM_MODEL_DIR:-/home/zcx/workspace/pairec4tigerllm/deepfm_out}"
+DEEPFM_MODEL_ROLE="${DEEPFM_MODEL_ROLE:-engineering}"
+CONTRACT_USER_ID="${CONTRACT_USER_ID:-}"
+if [[ -z "${REQUIRE_ZERO_RANK_OOV+x}" ]]; then
+  if [[ "$DEEPFM_MODEL_ROLE" = production_candidate ]]; then
+    REQUIRE_ZERO_RANK_OOV=1
+  else
+    REQUIRE_ZERO_RANK_OOV=0
+  fi
+fi
 USER_ID="${USER_ID:-1}"
 SCENE_ID="${SCENE_ID:-home_feed}"
 SMOKE_REQUESTS="${SMOKE_REQUESTS:-3}"
@@ -32,9 +42,14 @@ for value in "$SMOKE_REQUESTS" "$STABILITY_REQUESTS"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "request counts must be positive integers"
 done
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
-for value in "$RUN_STABILITY" "$RUN_FAILURE_INJECTION" "$BUILD_IMAGE" "$IMPORT_IMAGE"; do
+for value in "$RUN_STABILITY" "$RUN_FAILURE_INJECTION" "$BUILD_IMAGE" "$IMPORT_IMAGE" \
+  "$REQUIRE_ZERO_RANK_OOV"; do
   [[ "$value" = 0 || "$value" = 1 ]] || die "boolean flags must be 0 or 1"
 done
+case "$DEEPFM_MODEL_ROLE" in
+  engineering|production_candidate) ;;
+  *) die "DEEPFM_MODEL_ROLE must be engineering or production_candidate" ;;
+esac
 for command in kubectl curl python3; do
   command -v "$command" >/dev/null || die "missing command: $command"
 done
@@ -46,6 +61,9 @@ if [[ "$IMPORT_IMAGE" = 1 ]]; then
 fi
 test -f "$CONFIG_TEMPLATE" || die "missing config template: $CONFIG_TEMPLATE"
 test -f "$MANIFEST" || die "missing manifest: $MANIFEST"
+for path in feature_vocab.json user_profiles.json item_categories.json; do
+  test -f "$DEEPFM_MODEL_DIR/$path" || die "missing DeepFM model artifact: $DEEPFM_MODEL_DIR/$path"
+done
 mkdir -p "$OUTPUT_DIR"
 
 INFERENCE_IP="$(kubectl -n "$NAMESPACE" get service "$INFERENCE_SERVICE" -o jsonpath='{.spec.clusterIP}')"
@@ -58,35 +76,77 @@ curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 "$DSSM_URL/health" \
   -o "$OUTPUT_DIR/dssm-health.json"
 curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 "$DEEPFM_URL/health" \
   -o "$OUTPUT_DIR/deepfm-health.json"
-python3 - "$OUTPUT_DIR/dssm-health.json" "$OUTPUT_DIR/deepfm-health.json" <<'PY'
+python3 - "$OUTPUT_DIR/dssm-health.json" "$OUTPUT_DIR/deepfm-health.json" \
+  "$DEEPFM_MODEL_ROLE" <<'PY'
 import json, sys
-dssm, rank = (json.load(open(path)) for path in sys.argv[1:])
+dssm, rank = (json.load(open(path)) for path in sys.argv[1:3])
 assert dssm.get("code") == 200 and dssm.get("milvus") is True, dssm
 assert rank.get("code") == 200 and rank.get("status") == "healthy", rank
 assert rank.get("expected_candidates") == 50, rank
-print("DEEPFM_DEPENDENCY_PREFLIGHT_OK model_version=" + rank["model_version"])
+assert rank.get("model_role") == sys.argv[3], rank
+assert rank.get("checkpoint_epoch", 0) > 0, rank
+print("DEEPFM_DEPENDENCY_PREFLIGHT_OK model_version={} model_role={} checkpoint_epoch={}".format(
+    rank["model_version"], rank["model_role"], rank["checkpoint_epoch"]))
 PY
 
 echo "== Validate strict Rank Service protocol =="
-python3 - "$DEEPFM_URL" "$USER_ID" "$OUTPUT_DIR" <<'PY'
-import json, pathlib, sys, urllib.request
-base, user_id, out_dir = sys.argv[1:]
+python3 - "$DEEPFM_URL" "$USER_ID" "$CONTRACT_USER_ID" "$OUTPUT_DIR" \
+  "$DEEPFM_MODEL_DIR" "$DEEPFM_MODEL_ROLE" <<'PY'
+import json, math, pathlib, sys, urllib.request
+base, requested_user, contract_user, out_dir, model_dir, expected_role = sys.argv[1:]
+model_dir = pathlib.Path(model_dir)
+vocab = json.loads((model_dir / "feature_vocab.json").read_text())
+profiles = json.loads((model_dir / "user_profiles.json").read_text())
+categories = json.loads((model_dir / "item_categories.json").read_text())
+item_vocab = vocab["item2idx"]
+cat_vocab = vocab["cat2idx"]
+
+def valid_user(user_id):
+    profile = profiles.get(user_id)
+    if not profile or user_id not in vocab["user2idx"]:
+        return False
+    if str(profile.get("gender")) not in vocab["gender2idx"]:
+        return False
+    if str(profile.get("age")) not in vocab["age2idx"]:
+        return False
+    history = [str(value) for value in profile.get("hist", []) if int(value) >= 0]
+    return bool(history) and all(value in item_vocab for value in history)
+
+user_candidates = [value for value in (contract_user, requested_user) if value]
+user_candidates.extend(profiles)
+user_id = next((value for value in user_candidates if valid_user(value)), None)
+assert user_id is not None, "no fully mapped contract user"
+item_ids = [item_id for item_id in item_vocab
+            if item_id in categories and str(categories[item_id]) in cat_vocab][:50]
+assert len(item_ids) == 50, "fewer than 50 fully mapped contract items"
 
 def post(payload):
     request = urllib.request.Request(base + "/rank", json.dumps(payload).encode(),
                                      {"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=2) as response:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=2) as response:
         return json.load(response)
 
 valid = {"request_id": "rank-contract-valid", "user_id": user_id,
-         "items": [{"item_id": str(i)} for i in range(1, 51)]}
+         "items": [{"item_id": item_id} for item_id in item_ids]}
 results = []
 for index in range(100):
     request_payload = {**valid, "request_id": f"rank-contract-{index}"}
     result = post(request_payload)
     assert result.get("code") == 200 and len(result.get("items", [])) == 50, result
-    assert {x["item_id"] for x in result["items"]} == {str(i) for i in range(1, 51)}
+    assert {x["item_id"] for x in result["items"]} == set(item_ids)
     assert result.get("model_version")
+    assert result.get("model_role") == expected_role, result
+    trace = result.get("trace", {})
+    assert trace.get("profile_missing") is False and trace.get("user_oov") is False, trace
+    assert trace.get("item_oov_count") == 0, trace
+    assert trace.get("category_oov_count") == 0, trace
+    assert trace.get("gender_oov") is False and trace.get("age_oov") is False, trace
+    assert trace.get("history_valid_count", 0) > 0, trace
+    assert trace.get("history_oov_count") == 0, trace
+    assert trace.get("score_unique_count", 0) > 1, trace
+    assert math.isfinite(trace["score_min"]) and math.isfinite(trace["score_max"]), trace
+    assert trace["score_max"] > trace["score_min"], trace
     results.append(result)
 assert len({result["model_version"] for result in results}) == 1
 for name, payload in {
@@ -96,8 +156,12 @@ for name, payload in {
 }.items():
     invalid = post(payload)
     assert invalid.get("code") == 400 and invalid.get("items") == [], (name, invalid)
-pathlib.Path(out_dir, "rank-contract.json").write_text(json.dumps(results[-1], indent=2))
-print("DEEPFM_RANK_PROTOCOL_OK calls=100 model_version=" + results[-1]["model_version"])
+contract = {"user_id": user_id, "item_ids": item_ids, "last_response": results[-1]}
+pathlib.Path(out_dir, "rank-contract.json").write_text(json.dumps(contract, indent=2))
+print("DEEPFM_RANK_PROTOCOL_OK calls=100 model_version={} model_role={} user_id={} "
+      "item_oov=0 category_oov=0 score_unique={}".format(
+          results[-1]["model_version"], expected_role, user_id,
+          results[-1]["trace"]["score_unique_count"]))
 PY
 
 if [[ "$BUILD_IMAGE" = 1 ]]; then
@@ -112,14 +176,16 @@ fi
 
 echo "== Render rank configuration =="
 RENDERED_CONFIG="$OUTPUT_DIR/pairec_config.json"
-python3 - "$CONFIG_TEMPLATE" "$RENDERED_CONFIG" "$INFERENCE_ENDPOINT" "$DSSM_URL" "$DEEPFM_URL" <<'PY'
+python3 - "$CONFIG_TEMPLATE" "$RENDERED_CONFIG" "$INFERENCE_ENDPOINT" "$DSSM_URL" \
+  "$DEEPFM_URL" "$DEEPFM_MODEL_ROLE" <<'PY'
 import json, pathlib, sys
-source, target, inference, dssm, rank = sys.argv[1:]
+source, target, inference, dssm, rank, model_role = sys.argv[1:]
 text = pathlib.Path(source).read_text()
 for key, value in {
     "__INFERENCE_ENDPOINT__": inference,
     "__DSSM_RECALL_URL__": dssm,
     "__DEEPFM_RANK_URL__": rank,
+    "__DEEPFM_MODEL_ROLE__": model_role,
 }.items():
     text = text.replace(key, value)
 assert "__" not in text
@@ -127,7 +193,8 @@ config = json.loads(text)
 assert config["SortNames"]["home_feed"] == ["deepfm_rank_sort"]
 ranker = config["UserDefineConfs"]["DeepFMRankSorts"]
 assert ranker == [{"name": "deepfm_rank_sort", "server_url": rank,
-                   "timeout_ms": 100, "expected_candidates": 50}], ranker
+                   "timeout_ms": 100, "expected_candidates": 50,
+                   "required_model_role": model_role}], ranker
 pathlib.Path(target).write_text(json.dumps(config, indent=2) + "\n")
 print("DEEPFM_RANK_CONFIG_OK")
 PY
@@ -142,6 +209,7 @@ kubectl -n "$NAMESPACE" set env "deployment/$DEPLOYMENT" \
   "INFERENCE_ENDPOINT=$INFERENCE_ENDPOINT" \
   "DSSM_HEALTH_URL=$DSSM_URL/health" \
   "DEEPFM_HEALTH_URL=$DEEPFM_URL/health" \
+  "DEEPFM_EXPECTED_MODEL_ROLE=$DEEPFM_MODEL_ROLE" \
   "NO_PROXY=127.0.0.1,localhost,$INFERENCE_IP,$DSSM_HOST,$DEEPFM_HOST" \
   "no_proxy=127.0.0.1,localhost,$INFERENCE_IP,$DSSM_HOST,$DEEPFM_HOST"
 kubectl -n "$NAMESPACE" rollout restart "deployment/$DEPLOYMENT"
@@ -190,7 +258,8 @@ PY
     printf '%s\t%s\t%s\n' "$index" "$e2e_ms" "$request_id" >>"$phase_dir/requests.tsv"
   done
   kubectl -n "$NAMESPACE" logs "$POD" --since-time="$since" >"$phase_dir/pairec.log"
-  python3 - "$phase_dir/requests.tsv" "$phase_dir/pairec.log" "$phase_dir/summary.json" <<'PY'
+  python3 - "$phase_dir/requests.tsv" "$phase_dir/pairec.log" \
+    "$phase_dir/summary.json" "$DEEPFM_MODEL_ROLE" "$REQUIRE_ZERO_RANK_OOV" <<'PY'
 import csv, json, pathlib, re, statistics, sys
 rows = list(csv.DictReader(open(sys.argv[1]), delimiter="\t"))
 request_ids = {row["request_id"] for row in rows}
@@ -210,8 +279,27 @@ assert len(events) == len(rows), (len(events), len(rows))
 assert all(event["candidate_count"] == 50 for event in events), events
 versions = {event["model_version"] for event in events}
 assert len(versions) == 1, versions
+roles = {event["model_role"] for event in events}
+assert roles == {sys.argv[4]}, roles
 assert any(event["reordered"] for event in events), "DeepFM never changed recall order"
 assert '"event":"deepfm_rank_error"' not in log_text
+
+coverage = {
+    "profile_missing_requests": sum(bool(event["profile_missing"]) for event in events),
+    "user_oov_requests": sum(bool(event["user_oov"]) for event in events),
+    "item_oov_candidates": sum(int(event["item_oov_count"]) for event in events),
+    "category_oov_candidates": sum(int(event["category_oov_count"]) for event in events),
+    "gender_oov_requests": sum(bool(event["gender_oov"]) for event in events),
+    "age_oov_requests": sum(bool(event["age_oov"]) for event in events),
+    "history_valid_values": sum(int(event["history_valid_count"]) for event in events),
+    "history_oov_values": sum(int(event["history_oov_count"]) for event in events),
+    "candidate_values": len(events) * 50,
+}
+if sys.argv[5] == "1":
+    required_zero = [key for key in coverage if key not in {
+        "history_valid_values", "candidate_values"
+    }]
+    assert all(coverage[key] == 0 for key in required_zero), coverage
 
 def fields(line):
     return dict(re.findall(r"([A-Za-z_]+)=([^\s]+)", line))
@@ -238,7 +326,9 @@ def metrics(name, values):
             f"{name}_p95_ms": percentile(.95),
             f"{name}_p99_ms": percentile(.99)}
 
-summary = {"samples": len(rows), "model_version": next(iter(versions))}
+summary = {"samples": len(rows), "model_version": next(iter(versions)),
+           "model_role": next(iter(roles)), "feature_coverage": coverage,
+           "zero_oov_gate_enabled": sys.argv[5] == "1"}
 summary.update(metrics("e2e", [float(row["e2e_ms"]) for row in rows]))
 summary.update(metrics("multi_recall", multi_recall_ms))
 summary.update(metrics("rank_client", [float(event["client_total_ms"]) for event in events]))

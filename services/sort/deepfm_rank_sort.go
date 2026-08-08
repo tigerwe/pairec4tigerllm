@@ -28,6 +28,7 @@ type Config struct {
 	ServerURL          string `json:"server_url"`
 	TimeoutMS          int    `json:"timeout_ms"`
 	ExpectedCandidates int    `json:"expected_candidates"`
+	RequiredModelRole  string `json:"required_model_role"`
 }
 
 type userDefineConfig struct {
@@ -50,9 +51,20 @@ type responseItem struct {
 }
 
 type responseTrace struct {
-	FeatureMS float64 `json:"feature_ms"`
-	ForwardMS float64 `json:"forward_ms"`
-	TotalMS   float64 `json:"total_ms"`
+	FeatureMS         float64 `json:"feature_ms"`
+	ForwardMS         float64 `json:"forward_ms"`
+	TotalMS           float64 `json:"total_ms"`
+	ProfileMissing    bool    `json:"profile_missing"`
+	UserOOV           bool    `json:"user_oov"`
+	ItemOOVCount      int     `json:"item_oov_count"`
+	CategoryOOVCount  int     `json:"category_oov_count"`
+	GenderOOV         bool    `json:"gender_oov"`
+	AgeOOV            bool    `json:"age_oov"`
+	HistoryValidCount int     `json:"history_valid_count"`
+	HistoryOOVCount   int     `json:"history_oov_count"`
+	ScoreUniqueCount  int     `json:"score_unique_count"`
+	ScoreMin          float64 `json:"score_min"`
+	ScoreMax          float64 `json:"score_max"`
 }
 
 type rankResponse struct {
@@ -60,6 +72,7 @@ type rankResponse struct {
 	Message      string         `json:"msg"`
 	RequestID    string         `json:"request_id"`
 	ModelVersion string         `json:"model_version"`
+	ModelRole    string         `json:"model_role"`
 	Items        []responseItem `json:"items"`
 	Trace        responseTrace  `json:"trace"`
 }
@@ -81,6 +94,9 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 	}
 	if config.ExpectedCandidates <= 0 {
 		return nil, errors.New("DeepFM expected_candidates must be positive")
+	}
+	if config.RequiredModelRole == "" {
+		return nil, errors.New("DeepFM required_model_role is required")
 	}
 	transport := &http.Transport{
 		Proxy: nil,
@@ -111,8 +127,9 @@ func RegisterFromConfig() error {
 			return err
 		}
 		pairecsort.RegisterSort(config.Name, instance)
-		fmt.Printf("Registering DeepFMRankSort: %s endpoint=%s timeout_ms=%d candidates=%d\n",
-			config.Name, config.ServerURL, config.TimeoutMS, config.ExpectedCandidates)
+		fmt.Printf("Registering DeepFMRankSort: %s endpoint=%s timeout_ms=%d candidates=%d model_role=%s\n",
+			config.Name, config.ServerURL, config.TimeoutMS, config.ExpectedCandidates,
+			config.RequiredModelRole)
 	}
 	return nil
 }
@@ -177,7 +194,7 @@ func (s *DeepFMRankSort) Sort(sortData *pairecsort.SortData) error {
 	if err := json.Unmarshal(responseBody, &ranked); err != nil {
 		return s.fail(sortData, fmt.Errorf("decode rank response: %w", err))
 	}
-	if err := validateResponse(ranked, payload, inputSet); err != nil {
+	if err := validateResponse(ranked, payload, inputSet, s.config.RequiredModelRole); err != nil {
 		return s.fail(sortData, err)
 	}
 
@@ -203,26 +220,50 @@ func (s *DeepFMRankSort) Sort(sortData *pairecsort.SortData) error {
 	sortData.Data = items
 	clientTotalMS := float64(time.Since(started).Microseconds()) / 1000
 	trace := map[string]interface{}{
-		"model_version":      ranked.ModelVersion,
-		"candidate_count":    len(items),
-		"service_feature_ms": ranked.Trace.FeatureMS,
-		"service_forward_ms": ranked.Trace.ForwardMS,
-		"service_total_ms":   ranked.Trace.TotalMS,
-		"client_total_ms":    clientTotalMS,
-		"reordered":          reordered,
+		"model_version":       ranked.ModelVersion,
+		"model_role":          ranked.ModelRole,
+		"candidate_count":     len(items),
+		"service_feature_ms":  ranked.Trace.FeatureMS,
+		"service_forward_ms":  ranked.Trace.ForwardMS,
+		"service_total_ms":    ranked.Trace.TotalMS,
+		"client_total_ms":     clientTotalMS,
+		"reordered":           reordered,
+		"profile_missing":     ranked.Trace.ProfileMissing,
+		"user_oov":            ranked.Trace.UserOOV,
+		"item_oov_count":      ranked.Trace.ItemOOVCount,
+		"category_oov_count":  ranked.Trace.CategoryOOVCount,
+		"gender_oov":          ranked.Trace.GenderOOV,
+		"age_oov":             ranked.Trace.AgeOOV,
+		"history_valid_count": ranked.Trace.HistoryValidCount,
+		"history_oov_count":   ranked.Trace.HistoryOOVCount,
+		"score_unique_count":  ranked.Trace.ScoreUniqueCount,
+		"score_min":           ranked.Trace.ScoreMin,
+		"score_max":           ranked.Trace.ScoreMax,
 	}
 	sortData.Context.AddContextParam(RankTraceContextKey, trace)
 	if os.Getenv("PAIREC_TRACE_STDOUT") == "1" {
 		encoded, _ := json.Marshal(map[string]interface{}{
-			"event":              "deepfm_rank_complete",
-			"request_id":         payload.RequestID,
-			"model_version":      ranked.ModelVersion,
-			"candidate_count":    len(items),
-			"service_feature_ms": ranked.Trace.FeatureMS,
-			"service_forward_ms": ranked.Trace.ForwardMS,
-			"service_total_ms":   ranked.Trace.TotalMS,
-			"client_total_ms":    clientTotalMS,
-			"reordered":          reordered,
+			"event":               "deepfm_rank_complete",
+			"request_id":          payload.RequestID,
+			"model_version":       ranked.ModelVersion,
+			"model_role":          ranked.ModelRole,
+			"candidate_count":     len(items),
+			"service_feature_ms":  ranked.Trace.FeatureMS,
+			"service_forward_ms":  ranked.Trace.ForwardMS,
+			"service_total_ms":    ranked.Trace.TotalMS,
+			"client_total_ms":     clientTotalMS,
+			"reordered":           reordered,
+			"profile_missing":     ranked.Trace.ProfileMissing,
+			"user_oov":            ranked.Trace.UserOOV,
+			"item_oov_count":      ranked.Trace.ItemOOVCount,
+			"category_oov_count":  ranked.Trace.CategoryOOVCount,
+			"gender_oov":          ranked.Trace.GenderOOV,
+			"age_oov":             ranked.Trace.AgeOOV,
+			"history_valid_count": ranked.Trace.HistoryValidCount,
+			"history_oov_count":   ranked.Trace.HistoryOOVCount,
+			"score_unique_count":  ranked.Trace.ScoreUniqueCount,
+			"score_min":           ranked.Trace.ScoreMin,
+			"score_max":           ranked.Trace.ScoreMax,
 		})
 		fmt.Println(string(encoded))
 	}
@@ -230,7 +271,7 @@ func (s *DeepFMRankSort) Sort(sortData *pairecsort.SortData) error {
 }
 
 func validateResponse(response rankResponse, request rankRequest,
-	inputSet map[string]struct{}) error {
+	inputSet map[string]struct{}, requiredModelRole string) error {
 	if response.Code != http.StatusOK {
 		return fmt.Errorf("rank service code=%d msg=%s", response.Code, response.Message)
 	}
@@ -239,6 +280,13 @@ func validateResponse(response rankResponse, request rankRequest,
 	}
 	if response.ModelVersion == "" {
 		return errors.New("rank model_version is empty")
+	}
+	if response.ModelRole != requiredModelRole {
+		return fmt.Errorf("rank model_role mismatch: got %q want %q",
+			response.ModelRole, requiredModelRole)
+	}
+	if response.Trace.ScoreUniqueCount <= 0 {
+		return errors.New("rank score_unique_count must be positive")
 	}
 	if len(response.Items) != len(request.Items) {
 		return fmt.Errorf("rank item count mismatch: got %d want %d",

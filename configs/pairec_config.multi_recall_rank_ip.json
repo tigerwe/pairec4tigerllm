@@ -44,7 +44,8 @@
         "name": "deepfm_rank_sort",
         "server_url": "__DEEPFM_RANK_URL__",
         "timeout_ms": 100,
-        "expected_candidates": 50
+        "expected_candidates": 50,
+        "required_model_role": "__DEEPFM_MODEL_ROLE__"
       }
     ]
   }
