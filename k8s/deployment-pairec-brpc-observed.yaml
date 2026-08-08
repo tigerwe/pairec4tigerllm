@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pairec-brpc-observed
+  namespace: pairec
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: pairec-brpc-observed}
+  template:
+    metadata:
+      labels: {app: pairec-brpc-observed}
+    spec:
+      nodeName: master
+      tolerations:
+        - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+        - {key: node-role.kubernetes.io/master, operator: Exists, effect: NoSchedule}
+      containers:
+        - name: pairec
+          image: docker.io/library/pairec-server:k8s-arm64-brpc-v1
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command: [/app/pairec-server]
+          ports:
+            - {name: http, containerPort: 18080}
+          env:
+            - {name: CONFIG_PATH, value: /app/configs/pairec_config.json}
+            - {name: PAIREC_TRACE_STDOUT, value: "1"}
+            - {name: PAIREC_PIPELINE_TRACE_SAMPLE_RATE, value: "1"}
+            - {name: PAIREC_ALLOW_PARTIAL_RESULTS, value: "0"}
+            - {name: PAIREC_DATASYSTEM_EXPECTED, value: "1"}
+            - {name: PAIREC_REQUIRE_DATASYSTEM_ATTRIBUTION, value: "0"}
+          resources:
+            requests: {cpu: "2", memory: "2Gi"}
+            limits: {cpu: "8", memory: "8Gi"}
+          volumeMounts:
+            - {name: config, mountPath: /app/configs, readOnly: true}
+            - {name: data, mountPath: /data, readOnly: true}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  wget -q -T 2 -O - http://127.0.0.1:18080/ping | grep -q success
+                  nc -z -w 2 __INFERENCE_HOST__ __INFERENCE_PORT__
+                  nc -z -w 2 vector-recall-brpc 18201
+                  nc -z -w 2 deepfm-rank-brpc 18211
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 2
+      volumes:
+        - name: config
+          configMap: {name: pairec-config-brpc-observed}
+        - name: data
+          hostPath: {path: /home/zcx/workspace/pairec4tigerllm/data, type: Directory}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pairec-brpc-observed
+  namespace: pairec
+spec:
+  selector: {app: pairec-brpc-observed}
+  ports:
+    - {name: http, port: 18080, targetPort: 18080}

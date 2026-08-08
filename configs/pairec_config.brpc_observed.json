@@ -1,0 +1,58 @@
+{
+  "RunMode": "daily",
+  "ListenConf": {
+    "HttpAddr": "0.0.0.0",
+    "HttpPort": 18080
+  },
+  "PrometheusConfig": {
+    "Enable": true,
+    "Subsystem": "pairec_brpc_observed"
+  },
+  "SceneConfs": {
+    "home_feed": {
+      "default": {
+        "RecallNames": ["multi_recall_2_48"]
+      }
+    }
+  },
+  "SortNames": {
+    "home_feed": ["deepfm_rank_sort"]
+  },
+  "RecallConfs": [
+    {
+      "Name": "generative_recall",
+      "RecallType": "GenerativeRecall",
+      "RecallCount": 50,
+      "CacheTime": 0,
+      "RecallAlgo": "{\"protocol\":\"brpc\",\"brpc_endpoint\":\"__INFERENCE_ENDPOINT__\",\"brpc_service_name\":\"pairec.inference.RecommendService\",\"brpc_fallback_to_http\":false,\"timeout_ms\":5000,\"max_retries\":0,\"topk\":50,\"temperature\":1.0,\"beam_width\":1,\"history_from\":\"user_feature\",\"history_feature_name\":\"click_history\",\"history_delimiter\":\",\",\"history_max_length\":20,\"feature_source\":\"file\"}"
+    },
+    {
+      "Name": "milvus_recall",
+      "RecallType": "MilvusRecall",
+      "RecallCount": 50,
+      "CacheTime": 0,
+      "ItemType": "video",
+      "RecallAlgo": "{\"protocol\":\"brpc\",\"brpc_endpoint\":\"vector-recall-brpc:18201\",\"brpc_service_name\":\"pairec.pipeline.VectorRecallService\",\"timeout_ms\":300,\"topk\":50}"
+    },
+    {
+      "Name": "multi_recall_2_48",
+      "RecallType": "QuotaMultiRecall",
+      "RecallCount": 50,
+      "CacheTime": 0,
+      "RecallAlgo": "{\"primary_recall_name\":\"generative_recall\",\"secondary_recall_name\":\"milvus_recall\",\"primary_minimum\":1,\"primary_quota\":2,\"total_limit\":50}"
+    }
+  ],
+  "UserDefineConfs": {
+    "DeepFMRankSorts": [
+      {
+        "name": "deepfm_rank_sort",
+        "protocol": "brpc",
+        "brpc_endpoint": "deepfm-rank-brpc:18211",
+        "brpc_service_name": "pairec.pipeline.DeepFMRankService",
+        "timeout_ms": 100,
+        "expected_candidates": 50,
+        "required_model_role": "__DEEPFM_MODEL_ROLE__"
+      }
+    ]
+  }
+}

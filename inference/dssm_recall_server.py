@@ -133,29 +133,59 @@ def health():
 
 @app.route("/recall", methods=["POST"])
 def recall():
-    t0 = time.time()
+    t0_ns = time.perf_counter_ns()
     payload = request.get_json(force=True, silent=True) or {}
     user_id = payload.get("user_id")
     topk = int(payload.get("topk", 20))
+    trace_context = payload.get("context") or {}
+    request_id = str(trace_context.get("request_id") or payload.get("request_id") or "")
     if user_id is None:
         return jsonify({"code": 400, "msg": "user_id required", "items": []})
 
+    feature_started_ns = time.perf_counter_ns()
     vec, err = build_user_vector(user_id)
+    feature_us = (time.perf_counter_ns() - feature_started_ns) // 1000
     if err:
         return jsonify({"code": 404, "msg": err, "items": []})
 
+    search_started_ns = time.perf_counter_ns()
     if milvus_collection is not None:
         items = search_milvus(vec, topk)
         source = "milvus"
     else:
         items = search_local(vec, topk)
         source = "local"
+    search_us = (time.perf_counter_ns() - search_started_ns) // 1000
+    total_us = (time.perf_counter_ns() - t0_ns) // 1000
+    response_context = {
+        "request_id": request_id,
+        "span_id": str(trace_context.get("span_id") or "vector-backend"),
+        "parent_span_id": str(trace_context.get("parent_span_id") or ""),
+        "sampled": bool(trace_context.get("sampled", True)),
+        "contract_version": str(
+            trace_context.get("contract_version") or "pairec.pipeline_trace.v1"),
+    }
     return jsonify({
         "code": 200,
         "msg": "success",
+        "message": "success",
+        "request_id": request_id,
         "items": items,
         "source": source,
-        "latency_ms": round((time.time() - t0) * 1000, 3),
+        "latency_ms": round(total_us / 1000, 3),
+        "trace": {
+            "context": response_context,
+            "component": "dssm_recall_backend",
+            "protocol": "http_localhost",
+            "status": "ok",
+            "backend": source,
+            "feature_us": feature_us,
+            "compute_us": search_us,
+            "backend_total_us": total_us,
+            "total_us": total_us,
+            "attribution_complete": True,
+            "asynchronous": False,
+        },
     })
 
 

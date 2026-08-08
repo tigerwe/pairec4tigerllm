@@ -89,6 +89,16 @@ type traceInfoPB struct {
 	WrapperMaxActiveHealth   *int64   `protobuf:"varint,27,opt,name=wrapper_max_active_health,json=wrapperMaxActiveHealth" json:"wrapper_max_active_health,omitempty"`
 	WrapperMaxActiveTotal    *int64   `protobuf:"varint,28,opt,name=wrapper_max_active_total,json=wrapperMaxActiveTotal" json:"wrapper_max_active_total,omitempty"`
 	WrapperBackendBRPCMs     *float64 `protobuf:"fixed64,29,opt,name=wrapper_backend_brpc_ms,json=wrapperBackendBrpcMs" json:"wrapper_backend_brpc_ms,omitempty"`
+	RequestID                *string  `protobuf:"bytes,30,opt,name=request_id,json=requestId" json:"request_id,omitempty"`
+	DataSystemExpected       *bool    `protobuf:"varint,31,opt,name=datasystem_expected,json=datasystemExpected" json:"datasystem_expected,omitempty"`
+	DataSystemComplete       *bool    `protobuf:"varint,32,opt,name=datasystem_attribution_complete,json=datasystemAttributionComplete" json:"datasystem_attribution_complete,omitempty"`
+	DataSystemSyncGetCount   *int32   `protobuf:"varint,33,opt,name=datasystem_sync_get_count,json=datasystemSyncGetCount" json:"datasystem_sync_get_count,omitempty"`
+	DataSystemSyncSetCount   *int32   `protobuf:"varint,34,opt,name=datasystem_sync_set_count,json=datasystemSyncSetCount" json:"datasystem_sync_set_count,omitempty"`
+	DataSystemSyncGetUS      *int64   `protobuf:"varint,35,opt,name=datasystem_sync_get_us,json=datasystemSyncGetUs" json:"datasystem_sync_get_us,omitempty"`
+	DataSystemSyncSetUS      *int64   `protobuf:"varint,36,opt,name=datasystem_sync_set_us,json=datasystemSyncSetUs" json:"datasystem_sync_set_us,omitempty"`
+	DataSystemAsyncCount     *int32   `protobuf:"varint,37,opt,name=datasystem_async_count,json=datasystemAsyncCount" json:"datasystem_async_count,omitempty"`
+	DataSystemAsyncUS        *int64   `protobuf:"varint,38,opt,name=datasystem_async_us,json=datasystemAsyncUs" json:"datasystem_async_us,omitempty"`
+	DataSystemReason         *string  `protobuf:"bytes,39,opt,name=datasystem_attribution_reason,json=datasystemAttributionReason" json:"datasystem_attribution_reason,omitempty"`
 }
 
 func (m *traceInfoPB) Reset()         { *m = traceInfoPB{} }
@@ -230,6 +240,16 @@ func traceInfoFromProto(pb *traceInfoPB) *TraceInfo {
 		WrapperMaxActiveHealth:   int64Value(pb.WrapperMaxActiveHealth),
 		WrapperMaxActiveTotal:    int64Value(pb.WrapperMaxActiveTotal),
 		WrapperBackendBRPCMs:     float64Value(pb.WrapperBackendBRPCMs),
+		RequestID:                stringValue(pb.RequestID),
+		DataSystemExpected:       boolValue(pb.DataSystemExpected),
+		DataSystemComplete:       boolValue(pb.DataSystemComplete),
+		DataSystemSyncGetCount:   int(int32Value(pb.DataSystemSyncGetCount)),
+		DataSystemSyncSetCount:   int(int32Value(pb.DataSystemSyncSetCount)),
+		DataSystemSyncGetUS:      int64Value(pb.DataSystemSyncGetUS),
+		DataSystemSyncSetUS:      int64Value(pb.DataSystemSyncSetUS),
+		DataSystemAsyncCount:     int(int32Value(pb.DataSystemAsyncCount)),
+		DataSystemAsyncUS:        int64Value(pb.DataSystemAsyncUS),
+		DataSystemReason:         stringValue(pb.DataSystemReason),
 	}
 }
 
@@ -267,4 +287,8 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func boolValue(value *bool) bool {
+	return value != nil && *value
 }

@@ -1,0 +1,113 @@
+syntax = "proto2";
+
+package pairec.pipeline;
+
+option cc_generic_services = true;
+
+message TraceContext {
+  optional string request_id = 1;
+  optional string span_id = 2;
+  optional string parent_span_id = 3;
+  optional bool sampled = 4 [default = true];
+  optional string contract_version = 5 [default = "pairec.pipeline_trace.v1"];
+  optional int64 timeout_budget_us = 6;
+}
+
+message ServiceTrace {
+  optional TraceContext context = 1;
+  optional string component = 2;
+  optional string protocol = 3;
+  optional string status = 4;
+  optional string backend = 5;
+  optional string model_version = 6;
+  optional int64 queue_us = 10;
+  optional int64 decode_us = 11;
+  optional int64 feature_us = 12;
+  optional int64 compute_us = 13;
+  optional int64 backend_rpc_us = 14;
+  optional int64 encode_us = 15;
+  optional int64 backend_total_us = 16;
+  optional int64 total_us = 17;
+  optional bool attribution_complete = 20 [default = true];
+  optional bool asynchronous = 21 [default = false];
+  optional string attribution_reason = 22;
+}
+
+message HealthRequest {
+  optional TraceContext context = 1;
+}
+
+message HealthResponse {
+  optional int32 code = 1;
+  optional string status = 2;
+  optional string backend = 3;
+  optional ServiceTrace trace = 4;
+}
+
+message VectorRecallRequest {
+  optional TraceContext context = 1;
+  optional string user_id = 2;
+  optional int32 topk = 3 [default = 20];
+}
+
+message VectorRecallItem {
+  optional string item_id = 1;
+  optional double score = 2;
+}
+
+message VectorRecallResponse {
+  optional int32 code = 1;
+  optional string message = 2;
+  repeated VectorRecallItem items = 3;
+  optional string source = 4;
+  optional ServiceTrace trace = 5;
+}
+
+message RankCandidate {
+  optional string item_id = 1;
+}
+
+message RankRequest {
+  optional TraceContext context = 1;
+  optional string user_id = 2;
+  repeated RankCandidate items = 3;
+}
+
+message RankedItem {
+  optional string item_id = 1;
+  optional double score = 2;
+}
+
+message FeatureCoverage {
+  optional bool profile_missing = 1;
+  optional bool user_oov = 2;
+  optional int32 item_oov_count = 3;
+  optional int32 category_oov_count = 4;
+  optional bool gender_oov = 5;
+  optional bool age_oov = 6;
+  optional int32 history_valid_count = 7;
+  optional int32 history_oov_count = 8;
+  optional int32 score_unique_count = 9;
+  optional double score_min = 10;
+  optional double score_max = 11;
+}
+
+message RankResponse {
+  optional int32 code = 1;
+  optional string message = 2;
+  repeated RankedItem items = 3;
+  optional string model_version = 4;
+  optional string model_role = 5;
+  optional FeatureCoverage coverage = 6;
+  optional ServiceTrace trace = 7;
+}
+
+service VectorRecallService {
+  rpc Recall(VectorRecallRequest) returns (VectorRecallResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+service DeepFMRankService {
+  rpc Rank(RankRequest) returns (RankResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}

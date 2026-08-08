@@ -137,11 +137,14 @@ def create_app(runtime):
 
     @app.post("/rank")
     def rank():
-        started = time.perf_counter()
+        started_ns = time.perf_counter_ns()
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             return jsonify({"code": 400, "msg": "invalid JSON object", "items": []})
         request_id = payload.get("request_id", "")
+        trace_context = payload.get("context") or {}
+        if not request_id:
+            request_id = trace_context.get("request_id", "")
         raw_items = payload.get("items")
         if not isinstance(request_id, str) or not request_id:
             return jsonify({"code": 400, "msg": "request_id is required", "items": []})
@@ -162,18 +165,42 @@ def create_app(runtime):
             app.logger.exception("DeepFM scoring failed request_id=%s", request_id)
             return jsonify({"code": 500, "request_id": request_id,
                             "msg": "deepfm scoring failed", "items": []})
-        total_ms = (time.perf_counter() - started) * 1000
+        total_us = (time.perf_counter_ns() - started_ns) // 1000
+        feature_us = round(feature_ms * 1000)
+        forward_us = round(forward_ms * 1000)
+        response_context = {
+            "request_id": request_id,
+            "span_id": str(trace_context.get("span_id") or "rank-backend"),
+            "parent_span_id": str(trace_context.get("parent_span_id") or ""),
+            "sampled": bool(trace_context.get("sampled", True)),
+            "contract_version": str(
+                trace_context.get("contract_version") or "pairec.pipeline_trace.v1"),
+        }
         return jsonify({
             "code": 200,
+            "message": "success",
             "request_id": request_id,
             "model_version": runtime.model_version,
             "model_role": runtime.model_role,
             "items": [{"item_id": item_id, "score": score}
                       for item_id, score in zip(item_ids, scores)],
+            "coverage": coverage,
             "trace": {
                 "feature_ms": round(feature_ms, 3),
                 "forward_ms": round(forward_ms, 3),
-                "total_ms": round(total_ms, 3),
+                "total_ms": round(total_us / 1000, 3),
+                "context": response_context,
+                "component": "deepfm_rank_backend",
+                "protocol": "http_localhost",
+                "status": "ok",
+                "backend": "deepfm",
+                "model_version": runtime.model_version,
+                "feature_us": feature_us,
+                "compute_us": forward_us,
+                "backend_total_us": total_us,
+                "total_us": total_us,
+                "attribution_complete": True,
+                "asynchronous": False,
                 **coverage,
             },
         })

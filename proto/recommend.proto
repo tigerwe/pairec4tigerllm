@@ -48,6 +48,16 @@ message TraceInfo {
   optional int64 wrapper_max_active_health = 27;
   optional int64 wrapper_max_active_total = 28;
   optional double wrapper_backend_brpc_ms = 29;
+  optional string request_id = 30;
+  optional bool datasystem_expected = 31 [default = false];
+  optional bool datasystem_attribution_complete = 32 [default = false];
+  optional int32 datasystem_sync_get_count = 33;
+  optional int32 datasystem_sync_set_count = 34;
+  optional int64 datasystem_sync_get_us = 35;
+  optional int64 datasystem_sync_set_us = 36;
+  optional int32 datasystem_async_count = 37;
+  optional int64 datasystem_async_us = 38;
+  optional string datasystem_attribution_reason = 39;
 }
 
 message Recommendation {

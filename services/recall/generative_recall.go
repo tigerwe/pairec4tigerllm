@@ -24,6 +24,7 @@ import (
 
 	"pairec4tigerllm/services/config"
 	"pairec4tigerllm/services/feature"
+	"pairec4tigerllm/services/observability"
 )
 
 // 调试日志函数
@@ -328,6 +329,8 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 			"requestId=%s request_id=%s module=GenerativeRecall from=error stage=history name=%s user=%s cost=%d cache_ms=%d history_ms=%d err=get_user_history",
 			ctx.RecommendId, traceID, r.modelName, user.Id, utils.CostTime(stageStart), stageCache.Milliseconds(), stageHistory.Milliseconds(),
 		)
+		observability.RecordDuration(ctx, "generative_recall", "generative_inference", r.client.config.Protocol,
+			"recall", false, stageStart, "error", map[string]interface{}{"error": err.Error()})
 		return nil
 	}
 
@@ -395,6 +398,8 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 			stageCache.Milliseconds(), stageHistory.Milliseconds(), stageConvert.Milliseconds(),
 			stageHTTP.Milliseconds(), stageHTTP.Milliseconds(), brpcStageMs(r.client.config.Protocol, stageHTTP),
 		)
+		observability.RecordDuration(ctx, "generative_recall", "generative_inference", r.client.config.Protocol,
+			"recall", false, stageStart, "error", map[string]interface{}{"error": err.Error()})
 		return nil
 	}
 
@@ -411,6 +416,34 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 	}
 
 	totalCost := utils.CostTime(stageStart)
+	if recorder := observability.FromContext(ctx); recorder != nil {
+		attributes := map[string]interface{}{
+			"item_count": len(items), "rpc_us": stageHTTP.Microseconds(),
+			"history_us": stageHistory.Microseconds(), "convert_us": stageConvert.Microseconds(),
+		}
+		if response.Trace != nil {
+			attributes["inference_total_us"] = int64(response.Trace.TotalMs * 1000)
+			attributes["runner_generate_us"] = int64(response.Trace.RunnerGenerateMs * 1000)
+			if strings.EqualFold(r.client.config.Protocol, "brpc") && response.Trace.RequestID != traceID {
+				recorder.Invalidate("generative_trace_request_id_mismatch")
+			}
+			expected := response.Trace.DataSystemExpected || os.Getenv("PAIREC_DATASYSTEM_EXPECTED") == "1"
+			recorder.SetDataSystemAttribution(observability.DataSystemAttribution{
+				Expected: expected, Complete: response.Trace.DataSystemComplete,
+				SynchronousGetCount: response.Trace.DataSystemSyncGetCount,
+				SynchronousSetCount: response.Trace.DataSystemSyncSetCount,
+				SynchronousGetUS:    response.Trace.DataSystemSyncGetUS,
+				SynchronousSetUS:    response.Trace.DataSystemSyncSetUS,
+				AsynchronousCount:   response.Trace.DataSystemAsyncCount,
+				AsynchronousUS:      response.Trace.DataSystemAsyncUS,
+				Reason:              response.Trace.DataSystemReason,
+			})
+		} else if strings.EqualFold(r.client.config.Protocol, "brpc") {
+			recorder.Invalidate("generative_service_trace_missing")
+		}
+		observability.RecordDuration(ctx, "generative_recall", "generative_inference", r.client.config.Protocol,
+			"recall", false, stageStart, "ok", attributes)
+	}
 
 	// HTTP 额外开销包含 JSON 编解码、Flask 路由、网络和可能的排队时间。
 	var httpOverheadMs int64

@@ -294,6 +294,9 @@ endif()
 set(PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/../../proto/recommend.proto)
 protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILE})
 
+set(PIPELINE_PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/../../proto/pipeline_service.proto)
+protobuf_generate_cpp(PIPELINE_PROTO_SRCS PIPELINE_PROTO_HDRS ${PIPELINE_PROTO_FILE})
+
 add_library(pairec_recommend_proto ${PROTO_SRCS} ${PROTO_HDRS})
 target_include_directories(
   pairec_recommend_proto
@@ -302,6 +305,15 @@ target_include_directories(
     ${Protobuf_INCLUDE_DIRS}
 )
 target_link_libraries(pairec_recommend_proto PUBLIC protobuf::libprotobuf)
+
+add_library(pairec_pipeline_proto ${PIPELINE_PROTO_SRCS} ${PIPELINE_PROTO_HDRS})
+target_include_directories(
+  pairec_pipeline_proto
+  PUBLIC
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${Protobuf_INCLUDE_DIRS}
+)
+target_link_libraries(pairec_pipeline_proto PUBLIC protobuf::libprotobuf)
 
 set(
   BRPC_EXTRA_LIBS
@@ -358,6 +370,44 @@ target_link_libraries(
     Threads::Threads
 )
 
+add_executable(brpc_vector_recall_adapter pipeline_service_adapter.cpp)
+target_compile_definitions(brpc_vector_recall_adapter PRIVATE PAIREC_VECTOR_ADAPTER=1)
+target_include_directories(brpc_vector_recall_adapter PRIVATE ${BRPC_INCLUDE_DIR})
+target_link_libraries(
+  brpc_vector_recall_adapter
+  PRIVATE
+    pairec_pipeline_proto
+    ${BRPC_LIBRARY}
+    ${ABSL_EXTRA_LIBS}
+    ${BRPC_EXTRA_LIBS}
+    Threads::Threads
+)
+
+add_executable(brpc_deepfm_rank_adapter pipeline_service_adapter.cpp)
+target_compile_definitions(brpc_deepfm_rank_adapter PRIVATE PAIREC_RANK_ADAPTER=1)
+target_include_directories(brpc_deepfm_rank_adapter PRIVATE ${BRPC_INCLUDE_DIR})
+target_link_libraries(
+  brpc_deepfm_rank_adapter
+  PRIVATE
+    pairec_pipeline_proto
+    ${BRPC_LIBRARY}
+    ${ABSL_EXTRA_LIBS}
+    ${BRPC_EXTRA_LIBS}
+    Threads::Threads
+)
+
+add_executable(brpc_pipeline_client pipeline_service_client.cpp)
+target_include_directories(brpc_pipeline_client PRIVATE ${BRPC_INCLUDE_DIR})
+target_link_libraries(
+  brpc_pipeline_client
+  PRIVATE
+    pairec_pipeline_proto
+    ${BRPC_LIBRARY}
+    ${ABSL_EXTRA_LIBS}
+    ${BRPC_EXTRA_LIBS}
+    Threads::Threads
+)
+
 if(PAIREC_ENABLE_TRTLLM_CPP)
   get_filename_component(PAIREC_TRTLLM_LIBRARY_DIR "${PAIREC_TRTLLM_LIBRARY}" DIRECTORY)
   get_filename_component(PAIREC_TRTLLM_PLUGIN_LIBRARY_DIR "${PAIREC_TRTLLM_PLUGIN_LIBRARY}" DIRECTORY)
@@ -404,5 +454,8 @@ install(
     brpc_burst_wrapper
     brpc_recommend_client
     brpc_inference_server
+    brpc_vector_recall_adapter
+    brpc_deepfm_rank_adapter
+    brpc_pipeline_client
   RUNTIME DESTINATION bin
 )

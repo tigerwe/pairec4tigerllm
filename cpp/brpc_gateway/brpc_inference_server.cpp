@@ -1576,6 +1576,23 @@ class NativeInferenceServiceImpl final : public pairec::inference::RecommendServ
     trace->set_total_ms(timer.m_elapsed());
     trace->set_infer_ms(timer.m_elapsed());
     trace->set_backend(backend_->Name());
+    trace->set_request_id(request->request_id());
+    const bool exact_datasystem_probe =
+        trace->kv_source() == "datasystem_mset_mget_probe" ||
+        trace->kv_source() == "trtllm_cpp_datasystem_mset_mget";
+    trace->set_datasystem_expected(exact_datasystem_probe || std::getenv("DATASYSTEM_HOST") != nullptr);
+    trace->set_datasystem_attribution_complete(exact_datasystem_probe);
+    if (exact_datasystem_probe) {
+      trace->set_datasystem_sync_get_count(1);
+      trace->set_datasystem_sync_set_count(1);
+      trace->set_datasystem_sync_get_us(static_cast<int64_t>(trace->kv_lookup_ms() * 1000.0));
+      trace->set_datasystem_sync_set_us(static_cast<int64_t>(trace->kv_write_ms() * 1000.0));
+      trace->set_datasystem_attribution_reason("request_correlated_explicit_probe");
+    } else if (trace->datasystem_expected()) {
+      trace->set_datasystem_attribution_reason("native_trt_kvc_request_identity_not_propagated");
+    } else {
+      trace->set_datasystem_attribution_reason("datasystem_not_expected");
+    }
 
     if (response->recommendations_size() == 0) {
       response->set_code(299);

@@ -1,0 +1,176 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vector-recall-brpc
+  namespace: pairec
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vector-recall-brpc
+  template:
+    metadata:
+      labels:
+        app: vector-recall-brpc
+    spec:
+      nodeName: master
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: adapter
+          image: docker.io/library/pairec-brpc-inference:k8s-arm64-v1
+          imagePullPolicy: IfNotPresent
+          command: [/opt/pairec-brpc/bin/brpc_vector_recall_adapter]
+          args: [--listen_port=18201, --backend=127.0.0.1:18200, --backend_timeout_ms=250]
+          ports:
+            - name: brpc
+              containerPort: 18201
+          resources:
+            requests: {cpu: "500m", memory: "256Mi"}
+            limits: {cpu: "2", memory: "1Gi"}
+          readinessProbe:
+            exec:
+              command: [/opt/pairec-brpc/bin/brpc_pipeline_client, --server=127.0.0.1:18201, --service=vector, --timeout_ms=1000]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            tcpSocket: {port: 18201}
+            initialDelaySeconds: 15
+            periodSeconds: 15
+        - name: backend
+          image: docker.io/library/zcx-pairec-image:v1.1
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command: [/bin/bash, --noprofile, --norc, -lc]
+          args:
+            - unset LD_PRELOAD HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; export PYTHONPATH=/workspace; exec python -m inference.dssm_recall_server
+          env:
+            - {name: DSSM_CHECKPOINT, value: /workspace/dssm_out/dssm_model.pt}
+            - {name: DSSM_VOCAB, value: /workspace/dssm_out/vocab.json}
+            - {name: DSSM_EXPORT_DIR, value: /workspace/dssm_out/export}
+            - {name: DSSM_RECALL_PORT, value: "18200"}
+            - {name: MILVUS_HOST, value: __MILVUS_IP__}
+            - {name: MILVUS_PORT, value: "19530"}
+          resources:
+            requests: {cpu: "2", memory: "4Gi"}
+            limits: {cpu: "8", memory: "12Gi"}
+          readinessProbe:
+            httpGet: {path: /health, port: 18200}
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - {name: workspace, mountPath: /workspace, readOnly: true}
+      volumes:
+        - name: workspace
+          hostPath: {path: /home/zcx/workspace/pairec4tigerllm, type: Directory}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vector-recall-brpc
+  namespace: pairec
+spec:
+  selector: {app: vector-recall-brpc}
+  ports:
+    - {name: brpc, port: 18201, targetPort: 18201}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepfm-rank-brpc
+  namespace: pairec
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: deepfm-rank-brpc
+  template:
+    metadata:
+      labels:
+        app: deepfm-rank-brpc
+    spec:
+      nodeName: master
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: adapter
+          image: docker.io/library/pairec-brpc-inference:k8s-arm64-v1
+          imagePullPolicy: IfNotPresent
+          command: [/opt/pairec-brpc/bin/brpc_deepfm_rank_adapter]
+          args: [--listen_port=18211, --backend=127.0.0.1:18210, --backend_timeout_ms=80]
+          ports:
+            - name: brpc
+              containerPort: 18211
+          resources:
+            requests: {cpu: "500m", memory: "256Mi"}
+            limits: {cpu: "2", memory: "1Gi"}
+          readinessProbe:
+            exec:
+              command: [/opt/pairec-brpc/bin/brpc_pipeline_client, --server=127.0.0.1:18211, --service=rank, --timeout_ms=1000]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            tcpSocket: {port: 18211}
+            initialDelaySeconds: 15
+            periodSeconds: 15
+        - name: backend
+          image: docker.io/library/zcx-pairec-image:v1.1
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command: [/bin/bash, --noprofile, --norc, -lc]
+          args:
+            - unset LD_PRELOAD HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; export PYTHONPATH=/workspace; exec python -m inference.deepfm_rank_server
+          env:
+            - {name: DEEPFM_MODEL_PATH, value: /models/deepfm/deepfm_best.pt}
+            - {name: DEEPFM_VOCAB_PATH, value: /models/deepfm/feature_vocab.json}
+            - {name: DEEPFM_PROFILES_PATH, value: /models/deepfm/user_profiles.json}
+            - {name: DEEPFM_CATEGORIES_PATH, value: /models/deepfm/item_categories.json}
+            - {name: DEEPFM_EXPECTED_CANDIDATES, value: "50"}
+            - {name: DEEPFM_MODEL_ROLE, value: engineering}
+            - {name: DEEPFM_RANK_PORT, value: "18210"}
+            - {name: DEEPFM_DEVICE, value: cpu}
+          resources:
+            requests: {cpu: "2", memory: "4Gi"}
+            limits: {cpu: "8", memory: "12Gi"}
+          readinessProbe:
+            httpGet: {path: /health, port: 18210}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - {name: workspace, mountPath: /workspace, readOnly: true}
+            - {name: model, mountPath: /models/deepfm, readOnly: true}
+      volumes:
+        - name: workspace
+          hostPath: {path: /home/zcx/workspace/pairec4tigerllm, type: Directory}
+        - name: model
+          hostPath: {path: /home/zcx/workspace/pairec4tigerllm/deepfm_out, type: Directory}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepfm-rank-brpc
+  namespace: pairec
+spec:
+  selector: {app: deepfm-rank-brpc}
+  ports:
+    - {name: brpc, port: 18211, targetPort: 18211}

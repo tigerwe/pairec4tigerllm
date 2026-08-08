@@ -16,6 +16,7 @@ import (
 	"github.com/alibaba/pairec/v2/service"
 	"github.com/alibaba/pairec/v2/utils"
 	"github.com/aliyun/aliyun-pairec-config-go-sdk/v2/model"
+	"pairec4tigerllm/services/observability"
 )
 
 const (
@@ -115,8 +116,28 @@ func (r *RecommendController) CheckParameter() error {
 }
 func (c *RecommendController) doProcess(w http.ResponseWriter, r *http.Request) {
 	c.makeRecommendContext()
+	recorder := observability.NewRecorder(c.RequestId)
+	observability.Attach(c.context, recorder)
+	traceStatus := "ok"
+	defer func() {
+		if c.context.GetContextParam("deepfm_rank_error") != nil {
+			traceStatus = "error"
+		}
+		observability.FinalizeContext(c.context, traceStatus)
+	}()
 	userRecommendService := service.NewUserRecommendService()
+	recommendStarted := time.Now()
 	items := userRecommendService.Recommend(c.context)
+	observability.RecordDuration(c.context, "recommend_service", "pairec", "in_process", "", true,
+		recommendStarted, "ok", map[string]interface{}{"item_count": len(items)})
+	if c.context.GetContextParam("deepfm_rank_error") != nil {
+		traceStatus = "error"
+	}
+	responseStarted := time.Now()
+	defer func() {
+		observability.RecordDuration(c.context, "response_build", "pairec", "http", "", true,
+			responseStarted, traceStatus, nil)
+	}()
 	if response := c.deepFMRankFailureResponse(); response != nil {
 		io.WriteString(w, response.ToString())
 		return

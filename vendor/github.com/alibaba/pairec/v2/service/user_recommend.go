@@ -18,6 +18,7 @@ import (
 	"github.com/alibaba/pairec/v2/service/pipeline"
 	"github.com/alibaba/pairec/v2/service/rank"
 	"github.com/alibaba/pairec/v2/utils"
+	"pairec4tigerllm/services/observability"
 )
 
 type UserRecommendService struct {
@@ -60,6 +61,8 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	userFeatureStart := time.Now()
 	r.userFeatureService.LoadUserFeatures(user, context)
 	userFeatureDuration := time.Since(userFeatureStart)
+	observability.RecordDuration(context, "user_feature", "pairec", "in_process", "recommend_service", false,
+		userFeatureStart, "ok", nil)
 
 	debugService := debug.NewDebugService(user, context)
 
@@ -76,6 +79,8 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 
 	items := r.recallService.GetItems(user, context)
 	recallDuration := time.Since(recallStart)
+	observability.RecordDuration(context, "recall", "pairec", "in_process", "recommend_service", false,
+		recallStart, "ok", map[string]interface{}{"item_count": len(items)})
 
 	if metrics.Enabled() {
 		metrics.RecallDurSecs.WithLabelValues(scene, expId).Observe(recallDuration.Seconds())
@@ -99,6 +104,8 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	// filter
 	items = r.Filter(user, items, context)
 	filterDuration := time.Since(filterStart)
+	observability.RecordDuration(context, "filter", "pairec", "in_process", "recommend_service", false,
+		filterStart, "ok", map[string]interface{}{"item_count": len(items)})
 
 	if metrics.Enabled() {
 		metrics.FilterDurSecs.WithLabelValues(scene, expId).Observe(filterDuration.Seconds())
@@ -111,6 +118,8 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	// general rank
 	items = r.generalRankService.Rank(user, items, context)
 	generalRankDuration := time.Since(generalRankStart)
+	observability.RecordDuration(context, "general_rank", "pairec", "in_process", "recommend_service", false,
+		generalRankStart, "ok", map[string]interface{}{"item_count": len(items)})
 
 	if metrics.Enabled() {
 		metrics.GeneralRankDurSecs.WithLabelValues(scene, expId).Observe(generalRankDuration.Seconds())
@@ -124,11 +133,15 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	featureStart := time.Now()
 	items = r.featureService.LoadFeatures(user, items, context)
 	featureDuration := time.Since(featureStart)
+	observability.RecordDuration(context, "feature_load", "pairec", "in_process", "recommend_service", false,
+		featureStart, "ok", map[string]interface{}{"item_count": len(items)})
 
 	rankStart := time.Now()
 
 	r.rankService.Rank(user, items, context)
 	rankDuration := time.Since(rankStart)
+	observability.RecordDuration(context, "framework_rank", "pairec", "in_process", "recommend_service", false,
+		rankStart, "ok", map[string]interface{}{"item_count": len(items)})
 
 	if metrics.Enabled() {
 		metrics.RankDurSecs.WithLabelValues(scene, expId).Observe(rankDuration.Seconds())
@@ -137,9 +150,13 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	pipelineWaitStart := time.Now()
 	wg.Wait()
 	pipelineWaitDuration := time.Since(pipelineWaitStart)
+	observability.RecordDuration(context, "pipeline_wait", "pairec", "in_process", "recommend_service", false,
+		pipelineWaitStart, "ok", nil)
 	mergeStart := time.Now()
 	items = r.mergePipelineItems(items, pipelineItems)
 	mergeDuration := time.Since(mergeStart)
+	observability.RecordDuration(context, "pipeline_merge", "pairec", "in_process", "recommend_service", false,
+		mergeStart, "ok", map[string]interface{}{"item_count": len(items)})
 
 	debugService.WriteRankLog(user, items, context)
 
@@ -148,6 +165,8 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	// sort items
 	items = r.Sort(user, items, context)
 	sortDuration := time.Since(sortStart)
+	observability.RecordDuration(context, "sort", "pairec", "in_process", "recommend_service", false,
+		sortStart, "ok", map[string]interface{}{"item_count": len(items)})
 
 	if metrics.Enabled() {
 		metrics.SortDurSecs.WithLabelValues(scene, expId).Observe(sortDuration.Seconds())
@@ -165,6 +184,9 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	}
 
 	items = items[:size]
+	if recorder := observability.FromContext(context); recorder != nil {
+		recorder.RecordDisabled("rerank", "pairec", "recommend_service")
+	}
 	go feature_log.FeatureLog(user, items, context)
 	go r.featureConsistencyJobService.LogSampleResult(user, items, context)
 	debugService.WriteRecommendLog(user, items, context)

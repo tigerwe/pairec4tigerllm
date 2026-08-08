@@ -210,6 +210,32 @@
       "next_step": "F17工程链路已完成。生产化提升作为后续独立事项：在worker1使用dssm_all_candidates_out/vocab.json重训deepfm_full_vocab_out，同步到master后以production_candidate角色启用零OOV门禁，并替换Flask开发服务器为生产WSGI运行方式。",
       "branch": "pairec-multi-recall-ranking",
       "done_date": "2026-08-08"
+    },
+    {
+      "id": "F18",
+      "name": "推荐全链路 BRPC 化与请求级可观测",
+      "status": "in_progress",
+      "description": "为 PaiRec 多路召回、生成式推理、向量召回、DeepFM 精排和 DataSystem 建立统一请求级 Trace；将向量召回与精排迁移到独立 BRPC 适配服务，并保留隔离 HTTP 基线用于 A/B。",
+      "branch": "pairec-brpc-observability",
+      "files": [
+        "proto/pipeline_service.proto",
+        "services/observability/",
+        "services/brpcwire/",
+        "services/pipelinepb/",
+        "services/recall/milvus_recall.go",
+        "services/sort/deepfm_rank_sort.go",
+        "inference/dssm_recall_server.py",
+        "inference/deepfm_rank_server.py",
+        "cpp/brpc_gateway/",
+        "k8s/deployment-pairec-brpc-observed.yaml",
+        "scripts/deploy_and_validate_pairec_brpc_observed.sh",
+        "scripts/summarize_pairec_pipeline_trace.py",
+        "docs/F18_BRPC_OBSERVABILITY.md",
+        "tests/test_pipeline_trace_summary.py"
+      ],
+      "validation_method": "隔离实验链路中向量召回和 DeepFM 精排只允许 BRPC、禁止 HTTP fallback/retry；1000 请求业务输出与 HTTP 基线一致，完整请求级 Trace 有效率至少 99.9%，PaiRec 阶段闭合误差不超过 max(3000us, 5%)，并输出低基数 Prometheus 指标、资源门禁和 HTTP/BRPC p99 A/B。",
+      "validation_evidence": "2026-08-08: 完成架构盘点与验收口径确认；确定采用 Controller 单一 TraceRecorder、整数微秒、进程内单调时钟、并行 span 不参与串行相加、DataSystem 未精确归因时显式标记 attribution_complete=false。工程实现已完成：统一 pipeline_service.proto、Go baidu_std BRPC wire/client、两个独立 C++ adapter、Python service trace、PaiRec Controller/全阶段 Recorder、生成式 request-id/DataSystem 字段、低基数 Prometheus、隔离双容器 K8s 和一键 1000 请求+A/B+资源门禁。向量/精排外内超时分别为 300/250ms 与 100/80ms，全部零重试且禁止 HTTP fallback；vector Ready 强制 milvus=true。静态证据：JSON/YAML/Shell/protoc/Python compile和git diff check通过；Python/汇总 unittest 9/9；Go race覆盖 observability/brpcwire/pipelinepb/pipelineclient/recall/sort/web 全部通过；go build -mod=vendor ./services/...通过。本机无 ARM64 brpc/TRT-LLM 构建运行环境，尚未生成远端 C++ 和 1000 请求证据。",
+      "next_step": "在 worker1 使用本分支重建包含 recommend.proto 30-39 trace 字段的 TRT-LLM inference 镜像并原地导入，避免传输100+GiB tar；确认 inference Ready 后，在 master 执行 REQUESTS=1000 REQUIRE_DATASYSTEM_ATTRIBUTION=0 bash scripts/deploy_and_validate_pairec_brpc_observed.sh。通过后补录trace有效率、各阶段p99、A/B和资源证据；native KVC request identity hook完成前不得打开DataSystem严格归因门禁，也不得将F18标done。"
     }
   ]
 }

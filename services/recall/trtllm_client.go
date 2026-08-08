@@ -55,6 +55,16 @@ type TraceInfo struct {
 	WrapperMaxActiveHealth   int64   `json:"wrapper_max_active_health"`      // 业务路执行期间Health峰值
 	WrapperMaxActiveTotal    int64   `json:"wrapper_max_active_total"`       // 业务路加Health的峰值
 	WrapperBackendBRPCMs     float64 `json:"wrapper_backend_brpc_ms"`        // 后端RPC墙钟减后端推理耗时
+	RequestID                string  `json:"request_id"`
+	DataSystemExpected       bool    `json:"datasystem_expected"`
+	DataSystemComplete       bool    `json:"datasystem_attribution_complete"`
+	DataSystemSyncGetCount   int     `json:"datasystem_sync_get_count"`
+	DataSystemSyncSetCount   int     `json:"datasystem_sync_set_count"`
+	DataSystemSyncGetUS      int64   `json:"datasystem_sync_get_us"`
+	DataSystemSyncSetUS      int64   `json:"datasystem_sync_set_us"`
+	DataSystemAsyncCount     int     `json:"datasystem_async_count"`
+	DataSystemAsyncUS        int64   `json:"datasystem_async_us"`
+	DataSystemReason         string  `json:"datasystem_attribution_reason"`
 }
 
 // Recommendation 推荐结果.
