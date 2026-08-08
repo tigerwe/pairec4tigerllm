@@ -49,7 +49,7 @@ docker run -d \
   --entrypoint /bin/bash \
   "$IMAGE" \
   --noprofile --norc -lc \
-  'unset LD_PRELOAD HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; exec python /workspace/inference/deepfm_rank_server.py'
+  'unset LD_PRELOAD HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; export PYTHONPATH="/workspace${PYTHONPATH:+:$PYTHONPATH}"; exec python -m inference.deepfm_rank_server'
 
 deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
 while (( SECONDS < deadline )); do

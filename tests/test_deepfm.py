@@ -147,6 +147,8 @@ class DeepFMRankRuntimeTest(unittest.TestCase):
             encoding="utf-8")
         self.assertIn('-v "$REPO_DIR:/workspace:ro"', wrapper)
         self.assertIn("--workdir /workspace", wrapper)
+        self.assertIn('PYTHONPATH="/workspace${PYTHONPATH:+:$PYTHONPATH}"', wrapper)
+        self.assertIn("python -m inference.deepfm_rank_server", wrapper)
 
 
 if __name__ == "__main__":
