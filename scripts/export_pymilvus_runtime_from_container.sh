@@ -28,13 +28,17 @@ added = set()
 with tarfile.open(archive, "w:gz") as output:
     for name in names:
         distribution = importlib.metadata.distribution(name)
-        root = pathlib.Path(distribution.locate_file(""))
+        root = pathlib.Path(distribution.locate_file("")).resolve()
         print(f"distribution={name} version={distribution.version} root={root}")
         for entry in distribution.files or []:
-            source = pathlib.Path(distribution.locate_file(entry))
+            source = pathlib.Path(distribution.locate_file(entry)).resolve()
             if not source.exists() or source.is_dir():
                 continue
-            relative = source.relative_to(root)
+            try:
+                relative = source.relative_to(root)
+            except ValueError:
+                print(f"skip_outside_site_packages={source}")
+                continue
             key = str(relative)
             if key in added:
                 continue
