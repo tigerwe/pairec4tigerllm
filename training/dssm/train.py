@@ -47,6 +47,30 @@ def to_tensors(batch, device):
     return {key: torch.from_numpy(value).to(device) for key, value in batch.items()}
 
 
+def load_training_state(path, device):
+    try:
+        return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
+def load_resume_history(summary_path, resume_epoch, candidate_mode):
+    if not os.path.isfile(summary_path):
+        return []
+    with open(summary_path, encoding="utf-8") as handle:
+        summary = json.load(handle)
+    prior_mode = summary.get("candidate_mode", "positive_rows")
+    if prior_mode != candidate_mode:
+        raise ValueError(
+            f"summary candidate_mode={prior_mode} does not match "
+            f"requested {candidate_mode}"
+        )
+    return [
+        metrics for metrics in summary.get("history", [])
+        if int(metrics["epoch"]) <= resume_epoch
+    ]
+
+
 @torch.no_grad()
 def evaluate(model, args, vocab):
     model.eval()
@@ -119,18 +143,66 @@ def main():
     sizes = vocab_sizes(vocab)
     print(f"[DSSM] vocab sizes: {sizes}")
     model = DSSM(sizes, embed_dim=args.embed_dim, out_dim=args.out_dim).to(args.device)
-    if args.load_checkpoint:
-        state = torch.load(args.load_checkpoint, map_location=args.device)
-        model.load_state_dict(state["model"])
-        print(f"[DSSM] loaded checkpoint {args.load_checkpoint}")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
 
+    summary_path = os.path.join(args.checkpoint_dir, "training_summary.json")
     history = []
     best_loss = math.inf
     best_epoch = 0
     stale_epochs = 0
+    start_epoch = 1
+    resume_epoch = 0
+    optimizer_state_resumed = False
+    if args.load_checkpoint:
+        state = load_training_state(args.load_checkpoint, args.device)
+        config = state.get("config", {})
+        checkpoint_mode = config.get("candidate_mode", "positive_rows")
+        if checkpoint_mode != args.candidate_mode:
+            raise ValueError(
+                f"checkpoint candidate_mode={checkpoint_mode} does not match "
+                f"requested {args.candidate_mode}"
+            )
+        if config.get("vocab_sizes", sizes) != sizes:
+            raise ValueError("checkpoint vocabulary sizes do not match current vocab")
+        model.load_state_dict(state["model"])
+        if "optimizer" in state:
+            optimizer.load_state_dict(state["optimizer"])
+            optimizer_state_resumed = True
+        resume_epoch = int(state.get("epoch", 0))
+        if resume_epoch < 1:
+            raise ValueError("resume checkpoint does not contain a valid epoch")
+        if args.epochs <= resume_epoch:
+            raise ValueError(
+                f"target epochs ({args.epochs}) must exceed checkpoint epoch "
+                f"({resume_epoch})"
+            )
+        start_epoch = resume_epoch + 1
+        history = state.get("history") or load_resume_history(
+            summary_path, resume_epoch, args.candidate_mode
+        )
+        history = [
+            metrics for metrics in history
+            if int(metrics["epoch"]) <= resume_epoch
+        ]
+        if history:
+            best_metrics = min(history, key=lambda item: item["val_loss"])
+            best_loss = float(best_metrics["val_loss"])
+            best_epoch = int(best_metrics["epoch"])
+        else:
+            best_loss = float(state.get("best_val_loss", state.get("val_loss", math.inf)))
+            best_epoch = int(state.get("best_epoch", resume_epoch))
+        if optimizer_state_resumed:
+            stale_epochs = int(state.get("stale_epochs", 0))
+        print(
+            f"[DSSM] resume checkpoint={args.load_checkpoint} "
+            f"checkpoint_epoch={resume_epoch} start_epoch={start_epoch} "
+            f"target_epochs={args.epochs} "
+            f"optimizer_state={'restored' if optimizer_state_resumed else 'reset'}"
+        )
+
     checkpoint_path = os.path.join(args.checkpoint_dir, "dssm_model.pt")
-    for epoch in range(1, args.epochs + 1):
+    last_checkpoint_path = os.path.join(args.checkpoint_dir, "dssm_last.pt")
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         started = time.time()
         loss_sum = 0.0
@@ -189,30 +261,46 @@ def main():
         history.append(metrics)
         print("[DSSM] " + json.dumps(metrics, sort_keys=True))
 
-        if metrics["val_loss"] < best_loss:
+        improved = metrics["val_loss"] < best_loss
+        if improved:
             best_loss = metrics["val_loss"]
             best_epoch = epoch
             stale_epochs = 0
-            torch.save({
-                "model": model.state_dict(),
-                "epoch": epoch,
-                "config": {
-                    "embed_dim": args.embed_dim,
-                    "out_dim": args.out_dim,
-                    "temperature": args.temperature,
-                    "candidate_mode": args.candidate_mode,
-                    "vocab_path": args.vocab_path,
-                    "vocab_sizes": sizes,
-                    "val_fraction": args.val_fraction,
-                    "seed": args.seed,
-                },
-                "avg_loss": metrics["train_loss"],
-                "val_loss": metrics["val_loss"],
-                "val_in_batch_recall_at_50": metrics["val_in_batch_recall_at_50"],
-            }, checkpoint_path)
-            print(f"[DSSM] saved best checkpoint: {checkpoint_path}")
         else:
             stale_epochs += 1
+
+        checkpoint = {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "epoch": epoch,
+            "best_epoch": best_epoch,
+            "best_val_loss": best_loss,
+            "stale_epochs": stale_epochs,
+            "history": history,
+            "config": {
+                "embed_dim": args.embed_dim,
+                "out_dim": args.out_dim,
+                "temperature": args.temperature,
+                "candidate_mode": args.candidate_mode,
+                "vocab_path": args.vocab_path,
+                "vocab_sizes": sizes,
+                "val_fraction": args.val_fraction,
+                "seed": args.seed,
+            },
+            "avg_loss": metrics["train_loss"],
+            "val_loss": metrics["val_loss"],
+            "val_in_batch_recall_at_50": metrics["val_in_batch_recall_at_50"],
+        }
+        torch.save(checkpoint, last_checkpoint_path)
+        print(f"[DSSM] saved last checkpoint: {last_checkpoint_path}")
+        if improved:
+            best_checkpoint = {
+                key: value for key, value in checkpoint.items()
+                if key not in {"optimizer", "history", "stale_epochs"}
+            }
+            torch.save(best_checkpoint, checkpoint_path)
+            print(f"[DSSM] saved best checkpoint: {checkpoint_path}")
+        else:
             if stale_epochs >= args.patience:
                 print(f"[DSSM] early_stop epoch={epoch} best_epoch={best_epoch}")
                 break
@@ -227,9 +315,12 @@ def main():
         "train_rows": args.train_rows,
         "vocab_rows": args.vocab_rows,
         "candidate_mode": args.candidate_mode,
+        "target_epochs": args.epochs,
+        "resumed_from": os.path.abspath(args.load_checkpoint) if args.load_checkpoint else "",
+        "resume_epoch": resume_epoch,
+        "optimizer_state_resumed": optimizer_state_resumed,
         "quality_gate": False,
     }
-    summary_path = os.path.join(args.checkpoint_dir, "training_summary.json")
     with open(summary_path, "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
     print(f"DSSM_TRAINING_OK checkpoint={checkpoint_path} best_epoch={best_epoch}")

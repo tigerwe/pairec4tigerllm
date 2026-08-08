@@ -18,6 +18,7 @@ MIN_RECALL_AT_50="${MIN_RECALL_AT_50:-0}"
 ALLOW_EXISTING_OUTPUT="${ALLOW_EXISTING_OUTPUT:-0}"
 START_STAGE="${START_STAGE:-train}"
 CANDIDATE_MODE="${CANDIDATE_MODE:-all_rows}"
+LOAD_CHECKPOINT="${LOAD_CHECKPOINT:-}"
 
 test -s "$CSV_PATH" || { echo "ERROR: missing CSV: $CSV_PATH" >&2; exit 1; }
 case "$START_STAGE" in
@@ -35,6 +36,16 @@ if [[ "$START_STAGE" == "train" && -d "$OUTPUT_DIR" &&
   echo "Set ALLOW_EXISTING_OUTPUT=1 only when intentionally resuming." >&2
   exit 1
 fi
+if [[ -n "$LOAD_CHECKPOINT" ]]; then
+  test "$START_STAGE" = "train" || {
+    echo "ERROR: LOAD_CHECKPOINT requires START_STAGE=train" >&2
+    exit 1
+  }
+  test -s "$LOAD_CHECKPOINT" || {
+    echo "ERROR: missing resume checkpoint: $LOAD_CHECKPOINT" >&2
+    exit 1
+  }
+fi
 mkdir -p "$OUTPUT_DIR/export"
 
 echo "== DSSM full retraining configuration =="
@@ -46,8 +57,13 @@ echo "batch_size=$BATCH_SIZE epochs=$EPOCHS patience=$PATIENCE"
 echo "val_fraction=$VAL_FRACTION seed=$SEED"
 echo "start_stage=$START_STAGE"
 echo "candidate_mode=$CANDIDATE_MODE"
+echo "load_checkpoint=${LOAD_CHECKPOINT:-none}"
 
 if [[ "$START_STAGE" == "train" ]]; then
+  load_args=()
+  if [[ -n "$LOAD_CHECKPOINT" ]]; then
+    load_args=(--load_checkpoint "$LOAD_CHECKPOINT")
+  fi
   python -m training.dssm.train \
     --csv_path "$CSV_PATH" \
     --vocab_path "$OUTPUT_DIR/vocab.json" \
@@ -65,7 +81,8 @@ if [[ "$START_STAGE" == "train" ]]; then
     --temperature 0.05 \
     --candidate_mode "$CANDIDATE_MODE" \
     --device "$DEVICE" \
-    --log_every 100
+    --log_every 100 \
+    "${load_args[@]}"
 fi
 
 if [[ "$START_STAGE" != "evaluate" ]]; then

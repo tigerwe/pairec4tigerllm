@@ -7,6 +7,7 @@ IMAGE="${IMAGE:-docker.io/library/zcx-pairec-image:v1.1}"
 GPU_DEVICE="${GPU_DEVICE:-all}"
 CSV_PATH="${CSV_PATH:-$REPO_DIR/data/ctr_data_1M.csv}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_DIR/dssm_all_candidates_out}"
+LOAD_CHECKPOINT="${LOAD_CHECKPOINT:-}"
 
 case "$CSV_PATH" in
   "$REPO_DIR"/*) CONTAINER_CSV="/workspace/${CSV_PATH#"$REPO_DIR"/}" ;;
@@ -16,6 +17,15 @@ case "$OUTPUT_DIR" in
   "$REPO_DIR"/*) CONTAINER_OUTPUT="/workspace/${OUTPUT_DIR#"$REPO_DIR"/}" ;;
   *) echo "ERROR: OUTPUT_DIR must be under REPO_DIR" >&2; exit 1 ;;
 esac
+if [[ -n "$LOAD_CHECKPOINT" ]]; then
+  case "$LOAD_CHECKPOINT" in
+    "$REPO_DIR"/*) CONTAINER_LOAD_CHECKPOINT="/workspace/${LOAD_CHECKPOINT#"$REPO_DIR"/}" ;;
+    /workspace/*) CONTAINER_LOAD_CHECKPOINT="$LOAD_CHECKPOINT" ;;
+    *) echo "ERROR: LOAD_CHECKPOINT must be under REPO_DIR" >&2; exit 1 ;;
+  esac
+else
+  CONTAINER_LOAD_CHECKPOINT=""
+fi
 
 gpu_args=(--gpus all)
 if [[ "$GPU_DEVICE" != "all" ]]; then
@@ -51,6 +61,7 @@ docker run --rm -i \
   -e ALLOW_EXISTING_OUTPUT="${ALLOW_EXISTING_OUTPUT:-0}" \
   -e START_STAGE="${START_STAGE:-train}" \
   -e CANDIDATE_MODE="${CANDIDATE_MODE:-all_rows}" \
+  -e LOAD_CHECKPOINT="$CONTAINER_LOAD_CHECKPOINT" \
   -v "$REPO_DIR:/workspace" \
   --workdir /workspace \
   --entrypoint bash \

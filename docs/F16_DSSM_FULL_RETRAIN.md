@@ -44,6 +44,48 @@ quality gate. The training summary must report non-zero
 `train_unclicked_candidate_rows`; otherwise click=0 exposures were not
 used.
 
+The first all-candidate remote run completed three epochs and improved every
+full-corpus metric, but not enough to replace the deployed vectors:
+
+| metric | positive-only baseline | all-candidate epoch 3 |
+| --- | ---: | ---: |
+| Recall@10 | 0.14% | 0.20% |
+| Recall@50 | 0.70% | 0.79% |
+| Recall@100 | 1.14% | 1.40% |
+| MRR@100 | 0.000924 | 0.001154 |
+
+Epoch 3 was still the best validation-loss checkpoint. Before adding another
+negative-sampling strategy, continue it to six total epochs. The epoch-3
+checkpoint predates optimizer-state persistence, so this first continuation is
+explicitly a weights-only continuation with AdamW state reset. New runs save
+the lightweight best model in `dssm_model.pt` and the complete latest model +
+optimizer state in `dssm_last.pt`; resume from `dssm_last.pt` after the first
+continued epoch when exact optimizer restoration is required.
+
+```bash
+cd /home/zcx/workspace/pairec4tigerllm
+cp dssm_all_candidates_out/retrieval_evaluation.json \
+  dssm_all_candidates_out/retrieval_evaluation.epoch3.json
+cp dssm_all_candidates_out/training_summary.json \
+  dssm_all_candidates_out/training_summary.epoch3.json
+cp --reflink=auto dssm_all_candidates_out/dssm_model.pt \
+  dssm_all_candidates_out/dssm_model.epoch3.pt
+
+REPO_DIR=/home/zcx/workspace/pairec4tigerllm \
+OUTPUT_DIR=/home/zcx/workspace/pairec4tigerllm/dssm_all_candidates_out \
+LOAD_CHECKPOINT=/home/zcx/workspace/pairec4tigerllm/dssm_all_candidates_out/dssm_model.pt \
+ALLOW_EXISTING_OUTPUT=1 \
+CANDIDATE_MODE=all_rows \
+EPOCHS=6 \
+PATIENCE=3 \
+EVAL_QUERY_LIMIT=10000 \
+  bash scripts/run_dssm_full_retrain_worker1.sh \
+  | tee /tmp/dssm-all-candidates-continue-e6.log
+```
+
+`EPOCHS=6` is the total target, so this command runs epochs 4-6 only. The log
+must say `checkpoint_epoch=3 start_epoch=4` and `optimizer_state=reset`.
+
 For a code-path A/B using the old positive-only objective, use a separate
 output directory:
 

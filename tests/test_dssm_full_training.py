@@ -158,12 +158,35 @@ class DSSMFullTrainingTest(unittest.TestCase):
             self.assertIsNone(evaluation["quality_gate_passed"])
             self.assertEqual(evaluation["evaluated_queries"], 10)
             self.assertIn("full_corpus_recall_at_50", evaluation["metrics"])
+            self.assertTrue((output / "dssm_last.pt").is_file())
 
-            env.update({"START_STAGE": "evaluate", "EVAL_QUERY_BATCH_SIZE": "2"})
+            env.update({
+                "START_STAGE": "train",
+                "ALLOW_EXISTING_OUTPUT": "1",
+                "LOAD_CHECKPOINT": str(output / "dssm_model.pt"),
+                "EPOCHS": "2",
+            })
             subprocess.run(
                 ["bash", "scripts/run_dssm_full_retrain.sh"], env=env,
                 check=True, capture_output=True, text=True,
             )
+            resumed = json.loads((output / "training_summary.json").read_text())
+            self.assertEqual([item["epoch"] for item in resumed["history"]], [1, 2])
+            self.assertEqual(resumed["resume_epoch"], 1)
+            self.assertFalse(resumed["optimizer_state_resumed"])
+
+            env.update({
+                "LOAD_CHECKPOINT": str(output / "dssm_last.pt"),
+                "EPOCHS": "3",
+            })
+            subprocess.run(
+                ["bash", "scripts/run_dssm_full_retrain.sh"], env=env,
+                check=True, capture_output=True, text=True,
+            )
+            exact = json.loads((output / "training_summary.json").read_text())
+            self.assertEqual([item["epoch"] for item in exact["history"]], [1, 2, 3])
+            self.assertEqual(exact["resume_epoch"], 2)
+            self.assertTrue(exact["optimizer_state_resumed"])
 
 
 if __name__ == "__main__":

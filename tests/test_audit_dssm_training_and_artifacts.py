@@ -18,6 +18,11 @@ class DSSMAuditHelpersTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("--workdir /workspace", wrapper)
+        retrain_wrapper = Path(
+            "scripts/run_dssm_full_retrain_worker1.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("CONTAINER_LOAD_CHECKPOINT=\"/workspace/", retrain_wrapper)
+        self.assertIn('-e LOAD_CHECKPOINT="$CONTAINER_LOAD_CHECKPOINT"', retrain_wrapper)
 
     def test_ratio(self):
         self.assertEqual(ratio(1, 4), 0.25)
