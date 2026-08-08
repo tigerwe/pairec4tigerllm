@@ -85,6 +85,19 @@ when the image can be built or imported on worker1.
 
 After the updated inference service is Ready:
 
+The existing `zcx-pairec-image:v1.1` does not contain the `pymilvus` packages that were
+installed interactively in the `dssm-recall` container. Export those small runtime packages once
+instead of rebuilding or transferring the 121 GiB image:
+
+```bash
+SOURCE_CONTAINER=dssm-recall \
+OUTPUT_DIR=/home/zcx/pairec-python-runtime \
+  bash scripts/export_pymilvus_runtime_from_container.sh
+```
+
+The vector backend mounts that directory read-only at `/opt/pairec-python-extra`; its adapter
+does not become Ready unless the backend explicitly reports `milvus=true`.
+
 ```bash
 REQUESTS=1000 \
 HTTP_BASELINE_REQUESTS=100 \

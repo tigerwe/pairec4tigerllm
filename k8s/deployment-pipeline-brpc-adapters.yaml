@@ -52,7 +52,7 @@ spec:
           workingDir: /workspace
           command: [/bin/bash, --noprofile, --norc, -lc]
           args:
-            - unset LD_PRELOAD HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; export PYTHONPATH=/workspace; exec python -m inference.dssm_recall_server
+            - unset LD_PRELOAD HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; export PYTHONPATH=/opt/pairec-python-extra:/workspace; exec python -m inference.dssm_recall_server
           env:
             - {name: DSSM_CHECKPOINT, value: /workspace/dssm_out/dssm_model.pt}
             - {name: DSSM_VOCAB, value: /workspace/dssm_out/vocab.json}
@@ -70,9 +70,12 @@ spec:
             timeoutSeconds: 3
           volumeMounts:
             - {name: workspace, mountPath: /workspace, readOnly: true}
+            - {name: python-runtime, mountPath: /opt/pairec-python-extra, readOnly: true}
       volumes:
         - name: workspace
           hostPath: {path: /home/zcx/workspace/pairec4tigerllm, type: Directory}
+        - name: python-runtime
+          hostPath: {path: __PYMILVUS_RUNTIME_DIR__, type: Directory}
 ---
 apiVersion: v1
 kind: Service

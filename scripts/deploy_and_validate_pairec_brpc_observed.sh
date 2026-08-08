@@ -24,6 +24,7 @@ CONFIG_TEMPLATE="${CONFIG_TEMPLATE:-configs/pairec_config.brpc_observed.json}"
 ADAPTER_MANIFEST="${ADAPTER_MANIFEST:-k8s/deployment-pipeline-brpc-adapters.yaml}"
 PAIREC_MANIFEST="${PAIREC_MANIFEST:-k8s/deployment-pairec-brpc-observed.yaml}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-brpc-observed/$(date +%Y%m%d-%H%M%S)}"
+PYMILVUS_RUNTIME_DIR="${PYMILVUS_RUNTIME_DIR:-/home/zcx/pairec-python-runtime}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 for value in "$REQUESTS" "$HTTP_BASELINE_REQUESTS"; do
@@ -39,6 +40,8 @@ done
 test -f "$CONFIG_TEMPLATE" || die "missing config template"
 test -f "$ADAPTER_MANIFEST" || die "missing adapter manifest"
 test -f "$PAIREC_MANIFEST" || die "missing PaiRec manifest"
+test -d "$PYMILVUS_RUNTIME_DIR/pymilvus" || \
+  die "missing injected pymilvus runtime: $PYMILVUS_RUNTIME_DIR (run scripts/export_pymilvus_runtime_from_container.sh)"
 mkdir -p "$OUTPUT_DIR"
 
 INFERENCE_IP="$(kubectl -n "$NAMESPACE" get service "$INFERENCE_SERVICE" -o jsonpath='{.spec.clusterIP}')"
@@ -61,11 +64,12 @@ fi
 
 echo "== Render and deploy BRPC adapters =="
 python3 - "$ADAPTER_MANIFEST" "$OUTPUT_DIR/adapters.yaml" "$MILVUS_IP" \
-  "$ADAPTER_IMAGE" "$DEEPFM_MODEL_ROLE" <<'PY'
+  "$ADAPTER_IMAGE" "$DEEPFM_MODEL_ROLE" "$PYMILVUS_RUNTIME_DIR" <<'PY'
 import pathlib, sys
-source, target, milvus_ip, adapter_image, model_role = sys.argv[1:]
+source, target, milvus_ip, adapter_image, model_role, pymilvus_runtime = sys.argv[1:]
 text = pathlib.Path(source).read_text()
 text = text.replace("__MILVUS_IP__", milvus_ip)
+text = text.replace("__PYMILVUS_RUNTIME_DIR__", pymilvus_runtime)
 text = text.replace("docker.io/library/pairec-brpc-inference:k8s-arm64-v1", adapter_image)
 text = text.replace("{name: DEEPFM_MODEL_ROLE, value: engineering}",
                     "{name: DEEPFM_MODEL_ROLE, value: " + model_role + "}")
