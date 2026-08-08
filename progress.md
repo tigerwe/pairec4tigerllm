@@ -1,3 +1,5 @@
+> 2026-08-08 F17 engineering Rank Service 已在 master 启动并通过健康检查：`deepfm-rank` 监听 `127.0.0.1:18210`，返回 `code=200/status=healthy/backend=deepfm_rank`，模型版本=`c9d7ff83f6cc6893`、角色=`engineering`、checkpoint epoch=`10`、validation AUC=`0.715087`、validation logloss=`0.535314`；模型/词表规模与画像、类目产物均加载成功。下一步先执行真实特征 `/rank` 协议 100 次，再部署独立 `pairec-multi-recall-rank` 完成 3+3+100 E2E 与 fail-closed 故障注入。
+>
 > 2026-08-08 F17 Rank 容器 Python 模块路径修复：workdir 修正后容器进入 Python，但以 `/workspace/inference/deepfm_rank_server.py` 文件路径启动时 `sys.path` 不包含仓库根目录，导致 `ModuleNotFoundError: training` 并在 restart policy 下反复退出。入口现从 `/workspace` 使用 `python -m inference.deepfm_rank_server`，同时将 `/workspace` 前置到既有 `PYTHONPATH`；新增回归断言。下一步 master 拉取后重新运行启动脚本。
 >
 > 2026-08-08 F17 Rank 容器只读挂载启动修复：master 首次启动 `deepfm-rank` 在 OCI init 阶段失败，原因为基础镜像默认工作目录 `/workspace/pairec4tigerllm`，而脚本将仓库只读挂载到 `/workspace`，runc 无法在只读根下创建默认目录。`run_deepfm_rank_container.sh` 现显式设置已存在的 `--workdir /workspace`，保持仓库和模型目录只读；新增静态回归测试。下一步 master 拉取后重新启动 engineering Rank Service。
