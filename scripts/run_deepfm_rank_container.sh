@@ -45,6 +45,7 @@ docker run -d \
   -e DEEPFM_DEVICE=cpu \
   -v "$REPO_DIR:/workspace:ro" \
   -v "$MODEL_DIR:/models/deepfm:ro" \
+  --workdir /workspace \
   --entrypoint /bin/bash \
   "$IMAGE" \
   --noprofile --norc -lc \

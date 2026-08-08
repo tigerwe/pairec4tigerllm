@@ -142,6 +142,12 @@ class DeepFMRankRuntimeTest(unittest.TestCase):
                     model_path, root / "vocab.json", root / "profiles.json",
                     root / "categories.json", expected_candidates=2)
 
+    def test_rank_container_overrides_read_only_mount_workdir(self):
+        wrapper = Path("scripts/run_deepfm_rank_container.sh").read_text(
+            encoding="utf-8")
+        self.assertIn('-v "$REPO_DIR:/workspace:ro"', wrapper)
+        self.assertIn("--workdir /workspace", wrapper)
+
 
 if __name__ == "__main__":
     unittest.main()
