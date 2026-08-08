@@ -2,6 +2,140 @@
 
 > 供 Agent 跨 session 恢复上下文。只记录关键决策和当前任务。
 
+## 最近一次交接 (2026-08-08)
+
+### Session 结论
+
+F18「推荐全链路 BRPC 化与请求级可观测」已经完成并在 ARM64/Kubernetes 正式验收。
+当前分支为 `pairec-brpc-observability`，功能完成记录提交为 `c2bfb05`，远端为
+`gitcode/pairec-brpc-observability`。`feature_list.json` 中 F18 已标记 `done`；native
+TRT KVC 请求级 DataSystem 归因已拆为 F19 `pending`。
+
+正式实验链路：
+
+```text
+client -> pairec-brpc-observed
+  -> BRPC -> inference-brpc-trtllm (生成式召回)
+  -> BRPC -> vector-recall-brpc adapter -> localhost DSSM/Milvus backend
+  -> QuotaMultiRecall: 生成式最多2个 + 向量补足到50个
+  -> BRPC -> deepfm-rank-brpc adapter -> localhost DeepFM backend
+  -> DeepFM Top10
+```
+
+精排后的 Top10 不强制保留生成式商品；严格门禁位于召回阶段：每请求必须
+`primary_selected>=primary_minimum>=1`、`final_count=50`、`degraded=false`。
+
+### 正式验收证据
+
+输出目录：
+
+```text
+/tmp/pairec-brpc-observed/20260808-183127
+```
+
+结果：
+
+```text
+classification=PAIREC_PURE_BRPC_OBSERVABILITY_OK
+requests=1000
+trace valid=1000/1000 missing=0 invalid=0
+HTTP fallback=0
+
+client E2E avg/p50/p95/p99/max:
+109.784/108.774/117.382/120.622/126.589 ms
+
+span p99:
+generative_recall=108.794 ms
+vector_recall=11.923 ms
+deepfm_rank=12.081 ms
+
+HTTP baseline p99=118.422 ms
+pure BRPC minus HTTP p99=2.200 ms
+
+CPU throttled-period ratio:
+PaiRec=0.068%; other four experiment containers=0%
+restarts/OOM/health failures=0
+```
+
+### 当前运行状态
+
+隔离实验 Deployment/Service 保持运行，未替换旧基线：
+
+```text
+pairec-brpc-observed       Service 10.110.217.33:18080
+vector-recall-brpc         adapter + Python backend
+deepfm-rank-brpc           adapter + Python backend
+inference-brpc-trtllm      原生 TRT-LLM 生成式服务
+```
+
+master 上执行脚本的代码工作树是：
+
+```text
+/home/zcx/workspace/pairec4tigerllm-f18-4aadffd
+```
+
+两个 Python backend 的代码 hostPath 必须指向该当前工作树；模型产物仍来自：
+
+```text
+DSSM_MODEL_DIR=/home/zcx/workspace/pairec4tigerllm/dssm_out
+DEEPFM_MODEL_DIR=/home/zcx/workspace/pairec4tigerllm/deepfm_out
+PYMILVUS_RUNTIME_DIR=/home/zcx/pairec-python-runtime
+```
+
+集群 CoreDNS 长期不可用，部署器会将 inference/vector/rank Service 渲染为数字
+ClusterIP；不要恢复为 Service DNS 名称。部署器也会等待 Endpoints 和 `/ping` 真正可达，
+避免 rollout 与 IPVS 同步竞态。
+
+### 单请求复现
+
+```bash
+PAIREC_IP=$(kubectl -n pairec get service pairec-brpc-observed \
+  -o jsonpath='{.spec.clusterIP}')
+
+curl --noproxy '*' -sS "http://${PAIREC_IP}:18080/api/recommend" \
+  -H 'Content-Type: application/json' \
+  -d '{"scene_id":"home_feed","uid":"1","size":10}' \
+  | python3 -m json.tool
+```
+
+用响应中的 request_id 查看完整请求级 trace：
+
+```bash
+REQUEST_ID='<response request_id>'
+POD=$(kubectl -n pairec get pod -l app=pairec-brpc-observed \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl -n pairec logs "$POD" --since=5m | grep -F "$REQUEST_ID"
+```
+
+最近一次人工单请求 `c1bb5ddb-bbfc-4d7b-82b9-94a618bfeebd` 完整成功：PaiRec
+total=`130.385ms`、生成式=`118.471ms`、向量=`14.528ms`、DeepFM=`11.301ms`；
+Quota 合并为生成式2个+向量48个，trace `valid=true`、闭合误差0。
+
+### 已知限制与下一步
+
+F18 中 DataSystem 字段的正确状态是：
+
+```text
+attribution_complete=false
+reason=native_trt_kvc_request_identity_not_propagated
+```
+
+这不代表 DataSystem 一定没有工作，而是当前不能把 native KVC Get/Set 精确归属到
+同一个 PaiRec request_id。禁止根据时间窗口或 worker 聚合日志伪造 `3 Set + 2 Get`。
+
+下一任务 F19：盘点 native TensorRT-LLM DataSystem patch 的请求入口和
+offload/onboard 回调边界，设计并实现低开销 request identity 传播；只有真实相关后才用：
+
+```text
+REQUIRE_DATASYSTEM_ATTRIBUTION=1
+```
+
+F19 未开工。若下一 session 不做 KVC 归因，不要修改当前已验收的 F18 实验实例。
+
+### 工作区注意
+
+本机存在用户未跟踪文件 `.agents/` 和 `skills-lock.json`，本 session 未修改、未提交。
+
 ## 最近一次交接 (2026-06-25)
 
 ### 当前任务
