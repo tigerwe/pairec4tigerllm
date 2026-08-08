@@ -89,12 +89,26 @@ class DeepFMRankServerTest(unittest.TestCase):
 
     def test_rejects_short_and_duplicate_candidates(self):
         short = {**self.payload, "items": self.payload["items"][:-1]}
-        self.assertEqual(self.client.post("/rank", json=short).get_json()["code"], 400)
+        rejected = self.client.post("/rank", json=short).get_json()
+        self.assertEqual(rejected["code"], 400)
+        self.assertEqual(rejected["message"], "wrong candidate count")
+        self.assertEqual(rejected["msg"], rejected["message"])
         duplicate = {
             **self.payload,
             "items": self.payload["items"][:-1] + [self.payload["items"][0]],
         }
         self.assertEqual(self.client.post("/rank", json=duplicate).get_json()["code"], 400)
+
+    def test_accepts_protobuf_json_request_identity(self):
+        payload = dict(self.payload)
+        payload.pop("request_id")
+        payload["context"] = {
+            "request_id": "brpc-request",
+            "contract_version": "pairec.pipeline_trace.v1",
+        }
+        response = self.client.post("/rank", json=payload).get_json()
+        self.assertEqual(response["code"], 200)
+        self.assertEqual(response["request_id"], "brpc-request")
 
 
 class DeepFMRankRuntimeTest(unittest.TestCase):

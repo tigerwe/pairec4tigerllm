@@ -118,6 +118,26 @@ class DeepFMRankRuntime:
 def create_app(runtime):
     app = Flask(__name__)
 
+    def reject(code, reason, request_id="", payload=None):
+        raw_items = payload.get("items") if isinstance(payload, dict) else None
+        event = {
+            "event": "deepfm_rank_rejected",
+            "request_id": request_id,
+            "code": code,
+            "reason": reason,
+            "candidate_count": len(raw_items) if isinstance(raw_items, list) else -1,
+            "user_id_type": type(payload.get("user_id")).__name__
+            if isinstance(payload, dict) else "missing",
+        }
+        print(json.dumps(event, sort_keys=True), flush=True)
+        return jsonify({
+            "code": code,
+            "message": reason,
+            "msg": reason,
+            "request_id": request_id,
+            "items": [],
+        })
+
     @app.get("/health")
     def health():
         return jsonify({
@@ -140,31 +160,28 @@ def create_app(runtime):
         started_ns = time.perf_counter_ns()
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
-            return jsonify({"code": 400, "msg": "invalid JSON object", "items": []})
+            return reject(400, "invalid JSON object")
         request_id = payload.get("request_id", "")
         trace_context = payload.get("context") or {}
         if not request_id:
             request_id = trace_context.get("request_id", "")
         raw_items = payload.get("items")
         if not isinstance(request_id, str) or not request_id:
-            return jsonify({"code": 400, "msg": "request_id is required", "items": []})
+            return reject(400, "request_id is required", payload=payload)
         if not isinstance(raw_items, list) or any(not isinstance(item, dict) for item in raw_items):
-            return jsonify({"code": 400, "request_id": request_id,
-                            "msg": "items must be an array of objects", "items": []})
+            return reject(400, "items must be an array of objects", request_id, payload)
         item_ids = [item.get("item_id") for item in raw_items]
         if any(not isinstance(item_id, str) or not item_id for item_id in item_ids):
-            return jsonify({"code": 400, "request_id": request_id,
-                            "msg": "every item_id must be a non-empty string", "items": []})
+            return reject(
+                400, "every item_id must be a non-empty string", request_id, payload)
         try:
             scores, feature_ms, forward_ms, coverage = runtime.score(
                 payload.get("user_id"), item_ids)
         except ValueError as exc:
-            return jsonify({"code": 400, "request_id": request_id,
-                            "msg": str(exc), "items": []})
+            return reject(400, str(exc), request_id, payload)
         except Exception as exc:
             app.logger.exception("DeepFM scoring failed request_id=%s", request_id)
-            return jsonify({"code": 500, "request_id": request_id,
-                            "msg": "deepfm scoring failed", "items": []})
+            return reject(500, "deepfm scoring failed", request_id, payload)
         total_us = (time.perf_counter_ns() - started_ns) // 1000
         feature_us = round(feature_ms * 1000)
         forward_us = round(forward_ms * 1000)
