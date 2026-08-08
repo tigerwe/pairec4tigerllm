@@ -117,3 +117,16 @@ CPU throttled periods (at most 5%) for all five experiment containers.
 Formal success is `PAIREC_PURE_BRPC_OBSERVABILITY_OK`. A business response can remain valid
 while an experimental trace is invalid; the validator rejects that sample without changing the
 recommendation response schema.
+
+## Formal result
+
+The 2026-08-08 ARM64/Kubernetes validation completed 1000/1000 valid pure-BRPC requests with
+no missing or invalid traces and no HTTP fallback. Client E2E p50/p95/p99 was
+108.774/117.382/120.622ms. The retained HTTP baseline p99 was 118.422ms, so the pure-BRPC
+pipeline added 2.200ms at p99. Generative, vector, and DeepFM span p99 values were
+108.794/11.923/12.081ms. All five experiment containers stayed healthy with zero restarts;
+CPU throttled-period ratios were 0% except PaiRec at 0.068%, below the 5% gate.
+
+DataSystem attribution remained explicitly incomplete for all samples because native TRT KVC
+does not yet propagate request identity. Exact native Get/Set attribution is tracked separately
+and was not inferred from aggregate worker logs.

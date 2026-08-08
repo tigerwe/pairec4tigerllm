@@ -214,7 +214,7 @@
     {
       "id": "F18",
       "name": "推荐全链路 BRPC 化与请求级可观测",
-      "status": "in_progress",
+      "status": "done",
       "description": "为 PaiRec 多路召回、生成式推理、向量召回、DeepFM 精排和 DataSystem 建立统一请求级 Trace；将向量召回与精排迁移到独立 BRPC 适配服务，并保留隔离 HTTP 基线用于 A/B。",
       "branch": "pairec-brpc-observability",
       "files": [
@@ -236,8 +236,25 @@
         "tests/test_pipeline_trace_summary.py"
       ],
       "validation_method": "隔离实验链路中向量召回和 DeepFM 精排只允许 BRPC、禁止 HTTP fallback/retry；1000 请求业务输出与 HTTP 基线一致，完整请求级 Trace 有效率至少 99.9%，PaiRec 阶段闭合误差不超过 max(3000us, 5%)，并输出低基数 Prometheus 指标、资源门禁和 HTTP/BRPC p99 A/B。",
-      "validation_evidence": "2026-08-08: 完成架构盘点与验收口径确认；确定采用 Controller 单一 TraceRecorder、整数微秒、进程内单调时钟、并行 span 不参与串行相加、DataSystem 未精确归因时显式标记 attribution_complete=false。工程实现已完成：统一 pipeline_service.proto、Go baidu_std BRPC wire/client、两个独立 C++ adapter、Python service trace、PaiRec Controller/全阶段 Recorder、生成式 request-id/DataSystem 字段、低基数 Prometheus、隔离双容器 K8s 和一键 1000 请求+A/B+资源门禁。向量/精排外内超时分别为 300/250ms 与 100/80ms，全部零重试且禁止 HTTP fallback；vector Ready 强制 milvus=true。静态证据：JSON/YAML/Shell/protoc/Python compile和git diff check通过；Python/汇总 unittest 12/12；Go race覆盖 observability/brpcwire/pipelinepb/pipelineclient/recall/sort/web 全部通过；go build -mod=vendor ./services/...通过。远端已完成纯 BRPC 三请求 smoke：vector/rank adapter contract、PaiRec rollout、Service 数据面、无 HTTP fallback、Prometheus 和五容器资源门禁全部通过；trace valid=3/3、missing=0、invalid=0、CPU throttled period 均为0。E2E avg/p99=110.843/112.792ms，PaiRec total avg/p99=109.350/111.758ms；生成式召回 avg/p99=98.720/102.374ms，向量召回=9.955/11.158ms，DeepFM精排=10.090/12.095ms。QuotaMultiRecall 每请求严格验证生成式候选在召回阶段被选中，精排后不强制保留。DataSystem attribution_complete=0/3，符合 native TRT KVC 尚未传播 request identity 的已知限制。",
-      "next_step": "保持 REQUIRE_DATASYSTEM_ATTRIBUTION=0，执行 REQUESTS=1000 的正式 trace、阶段 p99、HTTP/BRPC A/B 与资源门禁并记录结果；native KVC request identity hook 完成前不得打开 DataSystem 严格归因门禁。1000 请求正式验收通过后，再决定将 F18 标 done 或把 native KVC 归因拆为独立后续 feature。"
+      "validation_evidence": "2026-08-08: 工程与正式远端验收完成。统一 pipeline_service.proto、Go baidu_std BRPC wire/client、两个独立 C++ adapter、Python service trace、PaiRec Controller 单一 TraceRecorder、低基数 Prometheus、隔离双容器 K8s 和一键 A/B/资源门禁均已实现；向量与精排零重试且禁止 HTTP fallback，vector Ready 强制 milvus=true。静态验证包含 Python/汇总 unittest 12/12、相关 Go race 与完整 services build。ARM64/Kubernetes 正式工作负载 1000/1000 请求成功，trace valid=1000/1000、missing=0、invalid=0、无 fallback。E2E avg/p50/p95/p99/max=109.784/108.774/117.382/120.622/126.589ms；PaiRec total p99=119.627ms；生成式/向量/DeepFM span p99=108.794/11.923/12.081ms。HTTP 基线100请求p99=118.422ms，纯BRPC p99增量=2.200ms。五容器无重启/OOM/健康故障；PaiRec CPU throttled period=0.068%，其余为0%，全部通过<=5%门禁。QuotaMultiRecall 每请求确认生成式候选在召回阶段被选中。DataSystem attribution_complete=0/1000，按设计明确标记 native TRT KVC request identity 未传播，未从聚合日志伪造归因。最终 classification=PAIREC_PURE_BRPC_OBSERVABILITY_OK。",
+      "next_step": "F18 工程范围已完成。native TRT KVC 精确 request identity 与每请求 Get/Set 归因转入 F19；完成前继续保持 REQUIRE_DATASYSTEM_ATTRIBUTION=0。",
+      "done_date": "2026-08-08"
+    },
+    {
+      "id": "F19",
+      "name": "Native TRT KVC 请求级 DataSystem 归因",
+      "status": "pending",
+      "description": "在 native TensorRT-LLM KVC offload/onboard 路径传播 PaiRec request identity，并将同一请求的 DataSystem Get/Set 次数与整数微秒耗时准确回传到 pipeline trace。",
+      "branch": "pairec-brpc-observability",
+      "files": [
+        "cpp/brpc_gateway/",
+        "proto/recommend.proto",
+        "services/observability/",
+        "scripts/deploy_and_validate_pairec_brpc_observed.sh"
+      ],
+      "validation_method": "在真实 native TRT KVC 工作负载中打开 REQUIRE_DATASYSTEM_ATTRIBUTION=1；1000 请求均必须 attribution_complete=true，Get/Set 只能来自相同 request_id 的原生事件，不允许从时间窗口或聚合日志推断；业务、trace闭合、资源和无fallback门禁继续通过。",
+      "validation_evidence": "F18 正式1000请求中 attribution_complete=0/1000，reason=native_trt_kvc_request_identity_not_propagated；该结果证明缺口被准确暴露，没有错误归因。",
+      "next_step": "盘点 native TensorRT-LLM DataSystem patch 的请求上下文入口和 offload/onboard 回调边界，设计低开销 request identity 传播后再实现，不先打开严格门禁。"
     }
   ]
 }
