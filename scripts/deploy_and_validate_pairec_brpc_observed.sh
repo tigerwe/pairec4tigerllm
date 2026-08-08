@@ -26,6 +26,9 @@ ADAPTER_MANIFEST="${ADAPTER_MANIFEST:-k8s/deployment-pipeline-brpc-adapters.yaml
 PAIREC_MANIFEST="${PAIREC_MANIFEST:-k8s/deployment-pairec-brpc-observed.yaml}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-brpc-observed/$(date +%Y%m%d-%H%M%S)}"
 PYMILVUS_RUNTIME_DIR="${PYMILVUS_RUNTIME_DIR:-/home/zcx/pairec-python-runtime}"
+BACKEND_REPO_DIR="${BACKEND_REPO_DIR:-$(pwd -P)}"
+DSSM_MODEL_DIR="${DSSM_MODEL_DIR:-/home/zcx/workspace/pairec4tigerllm/dssm_out}"
+DEEPFM_MODEL_DIR="${DEEPFM_MODEL_DIR:-/home/zcx/workspace/pairec4tigerllm/deepfm_out}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 for value in "$REQUESTS" "$HTTP_BASELINE_REQUESTS"; do
@@ -45,6 +48,12 @@ test -f "$ADAPTER_MANIFEST" || die "missing adapter manifest"
 test -f "$PAIREC_MANIFEST" || die "missing PaiRec manifest"
 test -d "$PYMILVUS_RUNTIME_DIR/pymilvus" || \
   die "missing injected pymilvus runtime: $PYMILVUS_RUNTIME_DIR (run scripts/export_pymilvus_runtime_from_container.sh)"
+test -f "$BACKEND_REPO_DIR/inference/dssm_recall_server.py" \
+  || die "backend code is missing from BACKEND_REPO_DIR=$BACKEND_REPO_DIR"
+test -f "$BACKEND_REPO_DIR/inference/deepfm_rank_server.py" \
+  || die "backend code is missing from BACKEND_REPO_DIR=$BACKEND_REPO_DIR"
+test -f "$DSSM_MODEL_DIR/dssm_model.pt" || die "missing DSSM model: $DSSM_MODEL_DIR"
+test -f "$DEEPFM_MODEL_DIR/deepfm_best.pt" || die "missing DeepFM model: $DEEPFM_MODEL_DIR"
 mkdir -p "$OUTPUT_DIR"
 
 INFERENCE_IP="$(kubectl -n "$NAMESPACE" get service "$INFERENCE_SERVICE" -o jsonpath='{.spec.clusterIP}')"
@@ -67,12 +76,16 @@ fi
 
 echo "== Render and deploy BRPC adapters =="
 python3 - "$ADAPTER_MANIFEST" "$OUTPUT_DIR/adapters.yaml" "$MILVUS_IP" \
-  "$ADAPTER_IMAGE" "$DEEPFM_MODEL_ROLE" "$PYMILVUS_RUNTIME_DIR" <<'PY'
+  "$ADAPTER_IMAGE" "$DEEPFM_MODEL_ROLE" "$PYMILVUS_RUNTIME_DIR" \
+  "$BACKEND_REPO_DIR" "$DSSM_MODEL_DIR" "$DEEPFM_MODEL_DIR" <<'PY'
 import pathlib, sys
-source, target, milvus_ip, adapter_image, model_role, pymilvus_runtime = sys.argv[1:]
+source, target, milvus_ip, adapter_image, model_role, pymilvus_runtime, backend_repo, dssm_model, deepfm_model = sys.argv[1:]
 text = pathlib.Path(source).read_text()
 text = text.replace("__MILVUS_IP__", milvus_ip)
 text = text.replace("__PYMILVUS_RUNTIME_DIR__", pymilvus_runtime)
+text = text.replace("__BACKEND_REPO_DIR__", backend_repo)
+text = text.replace("__DSSM_MODEL_DIR__", dssm_model)
+text = text.replace("__DEEPFM_MODEL_DIR__", deepfm_model)
 text = text.replace("docker.io/library/pairec-brpc-inference:k8s-arm64-v1", adapter_image)
 text = text.replace("{name: DEEPFM_MODEL_ROLE, value: engineering}",
                     "{name: DEEPFM_MODEL_ROLE, value: " + model_role + "}")

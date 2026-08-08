@@ -54,9 +54,9 @@ spec:
           args:
             - unset LD_PRELOAD HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; export PYTHONPATH=/opt/pairec-python-extra:/workspace; exec python -m inference.dssm_recall_server
           env:
-            - {name: DSSM_CHECKPOINT, value: /workspace/dssm_out/dssm_model.pt}
-            - {name: DSSM_VOCAB, value: /workspace/dssm_out/vocab.json}
-            - {name: DSSM_EXPORT_DIR, value: /workspace/dssm_out/export}
+            - {name: DSSM_CHECKPOINT, value: /models/dssm/dssm_model.pt}
+            - {name: DSSM_VOCAB, value: /models/dssm/vocab.json}
+            - {name: DSSM_EXPORT_DIR, value: /models/dssm/export}
             - {name: DSSM_RECALL_PORT, value: "18200"}
             - {name: MILVUS_HOST, value: __MILVUS_IP__}
             - {name: MILVUS_PORT, value: "19530"}
@@ -70,10 +70,13 @@ spec:
             timeoutSeconds: 3
           volumeMounts:
             - {name: workspace, mountPath: /workspace, readOnly: true}
+            - {name: model, mountPath: /models/dssm, readOnly: true}
             - {name: python-runtime, mountPath: /opt/pairec-python-extra, readOnly: true}
       volumes:
         - name: workspace
-          hostPath: {path: /home/zcx/workspace/pairec4tigerllm, type: Directory}
+          hostPath: {path: __BACKEND_REPO_DIR__, type: Directory}
+        - name: model
+          hostPath: {path: __DSSM_MODEL_DIR__, type: Directory}
         - name: python-runtime
           hostPath: {path: __PYMILVUS_RUNTIME_DIR__, type: Directory}
 ---
@@ -164,9 +167,9 @@ spec:
             - {name: model, mountPath: /models/deepfm, readOnly: true}
       volumes:
         - name: workspace
-          hostPath: {path: /home/zcx/workspace/pairec4tigerllm, type: Directory}
+          hostPath: {path: __BACKEND_REPO_DIR__, type: Directory}
         - name: model
-          hostPath: {path: /home/zcx/workspace/pairec4tigerllm/deepfm_out, type: Directory}
+          hostPath: {path: __DEEPFM_MODEL_DIR__, type: Directory}
 ---
 apiVersion: v1
 kind: Service
