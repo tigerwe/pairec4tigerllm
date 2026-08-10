@@ -61,6 +61,21 @@ Import the rebuilt image into the Kubernetes node's `k8s.io` containerd namespac
 using the existing local image flow. Do not transfer the historical 122 GiB tar when
 the node can rebuild or receive the changed binary and native libraries directly.
 
+When worker1 already contains the rebuilt gateway and native library under
+`/home/zcx/pairec-f19-runtime`, deploy and validate both hostPath overlays from the
+master with one command:
+
+```bash
+bash scripts/deploy_f19_datasystem_attribution_overlay.sh apply
+```
+
+The script backs up the current Deployment, first rolls out with attribution
+disabled to verify the executable, hashes, dynamic libraries and Health endpoint,
+then enables strict attribution and runs one exact request-id smoke. It is
+idempotent. Use `verify` for a read-only recheck and `rollback` to undo one
+Deployment revision. Set `RUN_EXACT_SMOKE=0` only when deployment validation must
+be separated from the business request.
+
 ## Validation
 
 Three-request strict smoke:
