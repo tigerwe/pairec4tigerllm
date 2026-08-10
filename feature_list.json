@@ -273,8 +273,8 @@
         "docs/F20_SOURCE_QUOTA_RERANK.md"
       ],
       "validation_method": "隔离配置启用source_quota_tail；3次smoke和1000次稳定性全部code=200、输出唯一且数量等于size，生成式候选为1或2个并连续位于末尾；有2个生成式输入时必须保留2个；原DeepFM分数不变；rerank trace 100%有效、p99<=1ms，E2E p99相对F18历史120.622ms增量<=2ms。缺少生成式候选的故障注入必须返回code=500和空items。",
-      "validation_evidence": "2026-08-10: 本地工程实现完成。新增可配置SourceQuotaTail、严格来源/唯一性/数量校验、fail-closed Controller响应、真实rerank span、低基数Prometheus指标及隔离部署门禁。Go race覆盖rerank/observability/sort/web并通过；完整services build通过；Python trace summary unittest 6/6、Shell语法、JSON解析和diff check通过。尚未执行ARM64/Kubernetes远端3/1000请求与缺生成式候选故障注入，因此未标done。",
-      "next_step": "在master隔离工作树重建PaiRec镜像，先以REQUESTS=3 RUN_HTTP_AB=0执行smoke，再以REQUESTS=1000、RERANK_MAX_P99_MS=1.0、CLIENT_MAX_P99_MS=122.622执行正式验收；随后注入无生成式候选验证code=500/items=[]，证据通过后标记done。"
+      "validation_evidence": "2026-08-10: 本地Go race、services测试、Python trace summary unittest 6/6及静态检查通过。ARM64/Kubernetes正向正式验收1000/1000有效，missing=0、invalid=0；E2E p99=120.318ms（门禁122.622ms），rerank p99=0.030ms（门禁1ms）；HTTP基线p99=118.604ms，BRPC增量1.713ms；PaiRec CPU throttled period=0.067%，其余adapter/backend均0%，无fallback，分类PAIREC_PURE_BRPC_OBSERVABILITY_OK。尚缺远端无生成式候选失败关闭故障注入，因此未标done。",
+      "next_step": "仅在隔离pairec-brpc-observed实例注入无生成式候选，验证响应code=500、msg=rerank failed、items=[]且trace中rerank status=error；立即恢复正式ConfigMap并验证一次code=200，之后标记done。"
     }
   ]
 }
