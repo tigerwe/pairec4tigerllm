@@ -10,6 +10,7 @@ SCENE_ID="${SCENE_ID:-home_feed}"
 SIZE="${SIZE:-10}"
 FAULT_MINIMUM_GENERATIVE="${FAULT_MINIMUM_GENERATIVE:-3}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-5m}"
+SERVICE_READY_TIMEOUT_SECONDS="${SERVICE_READY_TIMEOUT_SECONDS:-60}"
 REQUEST_TIMEOUT_SECONDS="${REQUEST_TIMEOUT_SECONDS:-10}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-f20-rerank-fault/$(date +%Y%m%d-%H%M%S)}"
 
@@ -21,6 +22,8 @@ done
 [[ "$SIZE" =~ ^[1-9][0-9]*$ ]] || die "SIZE must be a positive integer"
 [[ "$FAULT_MINIMUM_GENERATIVE" =~ ^[1-9][0-9]*$ ]] \
   || die "FAULT_MINIMUM_GENERATIVE must be a positive integer"
+[[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+  || die "SERVICE_READY_TIMEOUT_SECONDS must be a positive integer"
 mkdir -p "$OUTPUT_DIR"
 
 ORIGINAL_CONFIG="$OUTPUT_DIR/pairec_config.original.json"
@@ -37,10 +40,29 @@ apply_config() {
     --dry-run=client -o yaml | kubectl apply -f -
 }
 
+wait_for_service() {
+  local deadline=$((SECONDS + SERVICE_READY_TIMEOUT_SECONDS))
+  local response=""
+  while (( SECONDS < deadline )); do
+    if response="$(curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 \
+        "http://${SERVICE_IP}:18080/ping" 2>/dev/null)" \
+      && grep -q success <<<"$response"; then
+      echo "PAIREC_F20_SERVICE_READY endpoint=${SERVICE_IP}:18080"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 restart_and_wait() {
   kubectl -n "$NAMESPACE" rollout restart "deployment/$DEPLOYMENT"
   kubectl -n "$NAMESPACE" rollout status "deployment/$DEPLOYMENT" \
     "--timeout=$ROLLOUT_TIMEOUT"
+  if ! wait_for_service; then
+    echo "ERROR: service did not become reachable after rollout" >&2
+    return 1
+  fi
 }
 
 restore_config() {
@@ -70,6 +92,11 @@ echo "== F20 fail-closed injection target =="
 echo "namespace=$NAMESPACE deployment=$DEPLOYMENT configmap=$CONFIGMAP service=$SERVICE"
 echo "user_id=$USER_ID scene_id=$SCENE_ID size=$SIZE fault_minimum_generative=$FAULT_MINIMUM_GENERATIVE"
 echo "output_dir=$OUTPUT_DIR"
+
+SERVICE_IP="$(kubectl -n "$NAMESPACE" get service "$SERVICE" \
+  -o jsonpath='{.spec.clusterIP}')"
+[[ -n "$SERVICE_IP" && "$SERVICE_IP" != "None" ]] || die "service has no ClusterIP"
+PAIREC_URL="http://${SERVICE_IP}:18080/api/recommend"
 
 kubectl -n "$NAMESPACE" get configmap "$CONFIGMAP" \
   -o jsonpath='{.data.pairec_config\.json}' >"$ORIGINAL_CONFIG"
@@ -105,11 +132,6 @@ echo "== Apply fault configuration =="
 restore_needed=1
 apply_config "$FAULT_CONFIG"
 restart_and_wait
-
-SERVICE_IP="$(kubectl -n "$NAMESPACE" get service "$SERVICE" \
-  -o jsonpath='{.spec.clusterIP}')"
-[[ -n "$SERVICE_IP" && "$SERVICE_IP" != "None" ]] || die "service has no ClusterIP"
-PAIREC_URL="http://${SERVICE_IP}:18080/api/recommend"
 
 echo "== Verify fail-closed response =="
 curl --noproxy '*' -sS --connect-timeout 2 --max-time "$REQUEST_TIMEOUT_SECONDS" \
