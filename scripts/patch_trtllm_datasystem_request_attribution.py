@@ -509,16 +509,27 @@ def patch_tree(root: Path) -> None:
         replace_once(transfer, "#include <algorithm>\n", "#include <algorithm>\n#include <chrono>\n")
 
     api_replacements = [
-        ("datasystem::Status setRet = kvClient->Set(buffer);", "setRet", "kSet", "setRet.IsError()",
+        (("datasystem::Status setRet = kvClient->Set(buffer);",), "setRet", "kSet", "setRet.IsError()",
          "attributionSet"),
-        ("datasystem::Status getRet = kvClient1->Get(std::to_string(BlockKeyHasher::hash(src->getBlockKey())), buffer, 0);",
+        (("datasystem::Status getRet = kvClient1->Get("
+          "std::to_string(BlockKeyHasher::hash(src->getBlockKey())), buffer, 0);",
+          "datasystem::Status getRet = kvClient1->Get(key, buffer, 0);"),
          "getRet", "kGet", "getRet.IsError()", "attributionGet"),
-        ("datasystem::Status setRet = kvClient->MSet(buffers);", "setRet", "kSet", "setRet.IsError()",
+        (("datasystem::Status setRet = kvClient->MSet(buffers);",), "setRet", "kSet", "setRet.IsError()",
          "attributionMSet"),
-        ("datasystem::Status getRet = kvClient->Get(keys, buffers, 0);", "getRet", "kGet", "getRet.IsError()",
+        (("datasystem::Status getRet = kvClient->Get(keys, buffers, 0);",), "getRet", "kGet", "getRet.IsError()",
          "attributionMGet"),
     ]
-    for call, status, operation, failed, prefix in api_replacements:
+    for calls, status, operation, failed, prefix in api_replacements:
+        text = transfer.read_text()
+        if f"auto const {prefix}Token =" in text:
+            continue
+        matching_calls = [call for call in calls if text.count(call) == 1]
+        if len(matching_calls) != 1:
+            raise RuntimeError(
+                f"expected one supported DataSystem API form in {transfer}, "
+                f"found {len(matching_calls)} for {prefix}: {calls!r}")
+        call = matching_calls[0]
         wrapped = (
             f"auto const {prefix}Token = beginDataSystemOperation(DataSystemOperation::{operation});\n"
             f"            auto const {prefix}Started = std::chrono::steady_clock::now();\n"
