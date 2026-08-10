@@ -94,6 +94,9 @@ REQUESTS=3 RUN_HTTP_AB=0 \
 REQUESTS=1000 RUN_HTTP_AB=1 \
 RERANK_MAX_P99_MS=1.0 CLIENT_MAX_P99_MS=122.622 \
   bash scripts/deploy_and_validate_pairec_brpc_observed.sh
+
+# 隔离实例失败关闭注入；脚本在成功或失败退出时都会恢复原 ConfigMap
+bash scripts/test_pairec_source_quota_rerank_fail_closed.sh
 ```
 
 正式门禁要求每个响应生成式数量为 1 或 2 且连续位于末尾；Trace 必须证明有两个生成式
