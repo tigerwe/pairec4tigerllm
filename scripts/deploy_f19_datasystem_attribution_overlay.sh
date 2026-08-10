@@ -8,6 +8,7 @@ CONTAINER="${CONTAINER:-brpc-inference}"
 APP_LABEL="${APP_LABEL:-app=inference-brpc-trtllm}"
 HOST_RUNTIME_DIR="${HOST_RUNTIME_DIR:-/home/zcx/pairec-f19-runtime}"
 POD_RUNTIME_DIR="${POD_RUNTIME_DIR:-/opt/pairec-f19}"
+TRTLLM_RUNTIME_PATH="${TRTLLM_RUNTIME_PATH:-/TensorRT-LLM/cpp/build/tensorrt_llm/libtensorrt_llm.so}"
 EXPECTED_GATEWAY_SHA256="${EXPECTED_GATEWAY_SHA256:-39d85875eae04648aed42cebdaaf105000b3eb3244eb6d5c07feface8c3bc751}"
 EXPECTED_TRTLLM_SHA256="${EXPECTED_TRTLLM_SHA256:-c6461918d88e742fea78b02d7dcaa3b9dcea30d5c6d0db3ff02cee20c438ccff}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-10m}"
@@ -78,7 +79,7 @@ health_check() {
 
 verify_runtime() {
   local require_attribution="$1"
-  local pod process_path hashes ldd_output gateway_hash trtllm_hash
+  local pod process_path hashes ldd_output gateway_hash trtllm_hash loaded_trtllm_hash
 
   pod="$(current_pod)"
   [[ -n "$pod" ]] || die "no Pod found for label $APP_LABEL"
@@ -93,21 +94,25 @@ verify_runtime() {
   hashes="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$CONTAINER" -- \
     sha256sum \
       "$POD_RUNTIME_DIR/bin/brpc_inference_server" \
-      "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so")"
+      "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
+      "$TRTLLM_RUNTIME_PATH")"
   echo "$hashes"
   gateway_hash="$(awk 'NR==1 {print $1}' <<<"$hashes")"
   trtllm_hash="$(awk 'NR==2 {print $1}' <<<"$hashes")"
+  loaded_trtllm_hash="$(awk 'NR==3 {print $1}' <<<"$hashes")"
   [[ "$gateway_hash" == "$EXPECTED_GATEWAY_SHA256" ]] \
     || die "gateway hash mismatch: $gateway_hash"
   [[ "$trtllm_hash" == "$EXPECTED_TRTLLM_SHA256" ]] \
     || die "TensorRT-LLM hash mismatch: $trtllm_hash"
+  [[ "$loaded_trtllm_hash" == "$EXPECTED_TRTLLM_SHA256" ]] \
+    || die "loaded TensorRT-LLM hash mismatch: $loaded_trtllm_hash"
 
   ldd_output="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$CONTAINER" -- \
     sh -c 'unset LD_PRELOAD; ldd "$1"' sh \
       "$POD_RUNTIME_DIR/bin/brpc_inference_server")"
   echo "$ldd_output" | grep -E 'tensorrt_llm|not found' || true
   ! grep -q 'not found' <<<"$ldd_output" || die "F19 gateway has missing runtime libraries"
-  grep -Fq "libtensorrt_llm.so => $POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
+  grep -Fq "libtensorrt_llm.so => $TRTLLM_RUNTIME_PATH" \
     <<<"$ldd_output" || die "gateway did not load the F19 TensorRT-LLM overlay"
 
   health_check "$pod"
@@ -150,10 +155,10 @@ PY
     *) new_ld="$POD_RUNTIME_DIR/lib:$current_ld" ;;
   esac
 
-  python3 - "$CONTAINER" "$HOST_RUNTIME_DIR" "$POD_RUNTIME_DIR" "$new_ld" \
-      "$patch_file" <<'PY'
+  python3 - "$CONTAINER" "$HOST_RUNTIME_DIR" "$POD_RUNTIME_DIR" \
+      "$TRTLLM_RUNTIME_PATH" "$new_ld" "$patch_file" <<'PY'
 import json, pathlib, sys
-container, host_runtime, pod_runtime, ld_library_path, output = sys.argv[1:]
+container, host_runtime, pod_runtime, trtllm_runtime_path, ld_library_path, output = sys.argv[1:]
 patch = {
     "spec": {"template": {"spec": {
         "containers": [{
@@ -168,6 +173,7 @@ patch = {
             "volumeMounts": [
                 {"name": "f19-runtime-bin", "mountPath": f"{pod_runtime}/bin", "readOnly": True},
                 {"name": "f19-runtime-lib", "mountPath": f"{pod_runtime}/lib", "readOnly": True},
+                {"name": "f19-trtllm-file", "mountPath": trtllm_runtime_path, "readOnly": True},
             ],
         }],
         "volumes": [
@@ -175,6 +181,8 @@ patch = {
                 "path": f"{host_runtime}/bin", "type": "Directory"}},
             {"name": "f19-runtime-lib", "hostPath": {
                 "path": f"{host_runtime}/lib", "type": "Directory"}},
+            {"name": "f19-trtllm-file", "hostPath": {
+                "path": f"{host_runtime}/lib/libtensorrt_llm.so", "type": "File"}},
         ],
     }}}
 }
