@@ -176,7 +176,7 @@ patch = {
             {"name": "f19-runtime-lib", "hostPath": {
                 "path": f"{host_runtime}/lib", "type": "Directory"}},
         ],
-    }}}}
+    }}}
 }
 pathlib.Path(output).write_text(json.dumps(patch, indent=2) + "\n")
 PY

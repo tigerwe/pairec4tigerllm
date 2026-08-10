@@ -256,7 +256,8 @@
         "scripts/deploy_f19_datasystem_attribution_overlay.sh",
         "scripts/summarize_pairec_pipeline_trace.py",
         "scripts/trace_single_brpc_datasystem_request.sh",
-        "docs/F19_NATIVE_DATASYSTEM_ATTRIBUTION.md"
+        "docs/F19_NATIVE_DATASYSTEM_ATTRIBUTION.md",
+        "tests/test_f19_overlay_script.py"
       ],
       "validation_method": "在真实 native TRT KVC 工作负载中打开 REQUIRE_DATASYSTEM_ATTRIBUTION=1；1000 请求均必须 attribution_complete=true，Get/Set 只能来自相同 request_id 的原生事件，不允许从时间窗口或聚合日志推断；业务、trace闭合、资源和无fallback门禁继续通过。",
       "validation_evidence": "本地：补丁对全新TensorRT-LLM源码副本连续应用两次成功；独立C++17 tracker smoke确认两个native lifecycle聚合同一UUID的Get/Set并在pending超时时输出incomplete；pipeline summary 8项单测通过。远端worker1：历史DataSystem/parallel-Get源码树成功应用兼容补丁；ARM64 libtensorrt_llm.so完成链接且包含datasystem_request_complete，F19 brpc_inference_server完成链接且包含严格Ready与completion-pending标识，两个overlay已写入/home/zcx/pairec-f19-runtime。F18正式1000请求仍是改造前基线attribution_complete=0/1000。",
