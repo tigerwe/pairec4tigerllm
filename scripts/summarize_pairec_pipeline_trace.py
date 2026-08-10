@@ -63,6 +63,30 @@ def extract_traces(path):
     return traces
 
 
+def extract_datasystem_completions(path):
+    completions = {}
+    duplicates = set()
+    if not path:
+        return completions, duplicates
+    for line in Path(path).read_text(errors="replace").splitlines():
+        if '"event":"datasystem_request_complete"' not in line:
+            continue
+        start = line.find("{")
+        if start < 0:
+            continue
+        try:
+            event = json.loads(line[start:])
+        except json.JSONDecodeError:
+            continue
+        request_id = event.get("request_id")
+        if not request_id:
+            continue
+        if request_id in completions:
+            duplicates.add(request_id)
+        completions[request_id] = event
+    return completions, duplicates
+
+
 def extract_quota_stats(path):
     fields = (
         "primary_minimum", "primary_input", "secondary_input", "primary_selected",
@@ -152,9 +176,22 @@ def validate(trace, require_datasystem, require_source_rerank=False):
     threshold_us = max(3000, round(max(total_us, 0) * 0.05))
     if closure_error_us > threshold_us:
         reasons.append("closure_error")
-    datasystem = trace.get("datasystem") or {}
-    if require_datasystem and not datasystem.get("attribution_complete"):
-        reasons.append("datasystem_attribution_incomplete")
+    if require_datasystem:
+        datasystem = trace.get("_datasystem_final")
+        if not datasystem:
+            reasons.append("datasystem_completion_missing")
+        else:
+            if datasystem.get("attribution_complete") is not True:
+                reasons.append("datasystem_attribution_incomplete")
+            for field in ("get_count", "get_us", "set_count", "set_us",
+                          "get_failed_count", "set_failed_count",
+                          "pending_count", "unknown_count"):
+                if not isinstance(datasystem.get(field), int) or datasystem[field] < 0:
+                    reasons.append(f"datasystem_invalid_field:{field}")
+            for field in ("get_failed_count", "set_failed_count",
+                          "pending_count", "unknown_count"):
+                if isinstance(datasystem.get(field), int) and datasystem[field] != 0:
+                    reasons.append(f"datasystem_nonzero:{field}")
     quota = trace.get("_quota")
     if not quota:
         reasons.append("missing_quota_multi_recall")
@@ -176,6 +213,7 @@ def main():
     parser.add_argument("--requests-tsv")
     parser.add_argument("--expected", type=int, default=0)
     parser.add_argument("--require-datasystem-attribution", action="store_true")
+    parser.add_argument("--datasystem-log")
     parser.add_argument("--require-source-rerank", action="store_true")
     parser.add_argument("--max-rerank-p99-ms", type=float, default=0.0)
     parser.add_argument("--max-client-p99-ms", type=float, default=0.0)
@@ -183,6 +221,8 @@ def main():
     args = parser.parse_args()
 
     traces = extract_traces(args.log)
+    datasystem_completions, datasystem_duplicates = extract_datasystem_completions(
+        args.datasystem_log)
     quota_stats = extract_quota_stats(args.log)
     requests = read_requests(args.requests_tsv)
     expected_ids = set(requests) if requests else set(traces)
@@ -191,8 +231,11 @@ def main():
     valid = []
     for request_id in sorted(expected_ids & set(traces)):
         traces[request_id]["_quota"] = quota_stats.get(request_id)
+        traces[request_id]["_datasystem_final"] = datasystem_completions.get(request_id)
         reasons = validate(traces[request_id], args.require_datasystem_attribution,
                            args.require_source_rerank)
+        if request_id in datasystem_duplicates:
+            reasons.append("datasystem_completion_duplicate")
         if reasons:
             invalid[request_id] = reasons
         else:
@@ -223,15 +266,20 @@ def main():
         "spans": {name: metric(values) for name, values in sorted(span_values.items())},
         "service_phases": {
             name: metric(values) for name, values in sorted(service_values.items())},
-        "datasystem_complete_count": sum(
-            bool(trace.get("datasystem", {}).get("attribution_complete")) for trace in valid),
+        "datasystem_completion_event_count": len(datasystem_completions),
+        "datasystem_duplicate_count": len(datasystem_duplicates),
+        "datasystem_complete_count": sum(bool(
+            (trace.get("_datasystem_final") or trace.get("datasystem") or {}).get(
+                "attribution_complete")) for trace in valid),
         "datasystem": {
-            "sync_get": metric([int(trace.get("datasystem", {}).get("synchronous_get_us", 0))
-                                for trace in valid
-                                if trace.get("datasystem", {}).get("attribution_complete")]),
-            "sync_set": metric([int(trace.get("datasystem", {}).get("synchronous_set_us", 0))
-                                for trace in valid
-                                if trace.get("datasystem", {}).get("attribution_complete")]),
+            "get": metric([int(trace["_datasystem_final"]["get_us"])
+                           for trace in valid if trace.get("_datasystem_final")]),
+            "set": metric([int(trace["_datasystem_final"]["set_us"])
+                           for trace in valid if trace.get("_datasystem_final")]),
+            "get_count": sum(int(trace["_datasystem_final"]["get_count"])
+                             for trace in valid if trace.get("_datasystem_final")),
+            "set_count": sum(int(trace["_datasystem_final"]["set_count"])
+                             for trace in valid if trace.get("_datasystem_final")),
         },
         "quota_multi_recall_count": sum(bool(trace.get("_quota")) for trace in valid),
     }

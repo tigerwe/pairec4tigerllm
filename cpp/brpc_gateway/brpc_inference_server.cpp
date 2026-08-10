@@ -33,12 +33,58 @@
 
 #if defined(PAIREC_ENABLE_TRTLLM_CPP) && PAIREC_ENABLE_TRTLLM_CPP
 #include <NvInferRuntime.h>
+#include <tensorrt_llm/batch_manager/datasystemRequestTracker.h>
 #include <tensorrt_llm/executor/executor.h>
 #include <tensorrt_llm/executor/types.h>
 #include <tensorrt_llm/plugins/api/tllmPlugin.h>
 #endif
 
 namespace {
+
+#if defined(PAIREC_ENABLE_TRTLLM_CPP) && PAIREC_ENABLE_TRTLLM_CPP
+class NativeDataSystemRequestLifecycle {
+ public:
+  NativeDataSystemRequestLifecycle(uint64_t correlation_id,
+                                   const std::string& request_id,
+                                   uint64_t native_lifecycle_count)
+      : correlation_id_(correlation_id),
+        unhanded_lifecycles_(native_lifecycle_count) {
+    tensorrt_llm::batch_manager::kv_cache_manager::
+        registerDataSystemRequest(
+            correlation_id_, request_id, native_lifecycle_count);
+  }
+
+  ~NativeDataSystemRequestLifecycle() {
+    while (unhanded_lifecycles_ > 0) {
+      FinishOne();
+    }
+  }
+
+  void HandOffOne() {
+    if (unhanded_lifecycles_ > 0) {
+      --unhanded_lifecycles_;
+    }
+  }
+
+  void FinishOne() {
+    if (unhanded_lifecycles_ == 0) {
+      return;
+    }
+    --unhanded_lifecycles_;
+    tensorrt_llm::batch_manager::kv_cache_manager::
+        finishDataSystemRequest(correlation_id_);
+  }
+
+  NativeDataSystemRequestLifecycle(
+      const NativeDataSystemRequestLifecycle&) = delete;
+  NativeDataSystemRequestLifecycle& operator=(
+      const NativeDataSystemRequestLifecycle&) = delete;
+
+ private:
+  uint64_t correlation_id_;
+  uint64_t unhanded_lifecycles_;
+};
+#endif
 
 struct ServerConfig {
   int listen_port = 18100;
@@ -959,6 +1005,14 @@ class TrtllmCppBackend final : public InferenceBackend {
   void Recommend(
       const pairec::inference::RecommendRequest& request,
       pairec::inference::RecommendResponse* response) override {
+    const uint64_t datasystem_correlation_id =
+        datasystem_correlation_id_.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t native_lifecycle_count = static_cast<uint64_t>(
+        std::max(config_.trt_num_samples, 1));
+    NativeDataSystemRequestLifecycle datasystem_lifecycle(
+        datasystem_correlation_id,
+        request.request_id(),
+        native_lifecycle_count);
     auto* trace = response->mutable_trace();
     butil::Timer prompt_timer;
     prompt_timer.start();
@@ -981,15 +1035,24 @@ class TrtllmCppBackend final : public InferenceBackend {
       std::vector<int> output_tokens;
       double runner_ms = 0.0;
       std::string error;
+      bool executor_enqueued = false;
       if (!RunExecutor(
               prompt_tokens,
               base_seed + static_cast<uint64_t>(sample),
+              datasystem_correlation_id,
               &output_tokens,
               &runner_ms,
+              &executor_enqueued,
               &error)) {
+        if (executor_enqueued) {
+          datasystem_lifecycle.HandOffOne();
+        } else {
+          datasystem_lifecycle.FinishOne();
+        }
         response->set_error(error);
         return;
       }
+      datasystem_lifecycle.HandOffOne();
       runner_total_ms += runner_ms;
       runner_max_ms = std::max(runner_max_ms, runner_ms);
       ++runner_calls;
@@ -1135,12 +1198,15 @@ class TrtllmCppBackend final : public InferenceBackend {
   bool RunExecutor(
       const std::vector<int>& prompt_tokens,
       uint64_t seed,
+      uint64_t datasystem_correlation_id,
       std::vector<int>* output_tokens,
       double* elapsed_ms,
+      bool* executor_enqueued,
       std::string* error) {
     namespace texec = tensorrt_llm::executor;
     butil::Timer timer;
     timer.start();
+    *executor_enqueued = false;
     try {
       texec::SamplingConfig sampling_config(1);
       if (config_.trt_top_k > 0) {
@@ -1167,7 +1233,9 @@ class TrtllmCppBackend final : public InferenceBackend {
               static_cast<texec::SizeType32>(tokenizer_.eos_id)),
           std::optional<texec::SizeType32>(
               static_cast<texec::SizeType32>(tokenizer_.pad_id)));
+      executor_request.setClientId(datasystem_correlation_id);
       const auto request_id = executor_->enqueueRequest(executor_request);
+      *executor_enqueued = true;
       const auto deadline = std::chrono::steady_clock::now() +
                             std::chrono::milliseconds(config_.trt_request_timeout_ms);
 
@@ -1517,6 +1585,7 @@ class TrtllmCppBackend final : public InferenceBackend {
   std::unordered_map<std::string, const Candidate*> semantic_to_candidate_;
   std::unique_ptr<tensorrt_llm::executor::Executor> executor_;
   std::atomic<uint64_t> seed_{42};
+  std::atomic<uint64_t> datasystem_correlation_id_{1};
 #if defined(PAIREC_ENABLE_DATASYSTEM_KV_PROBE) && PAIREC_ENABLE_DATASYSTEM_KV_PROBE
   std::unique_ptr<datasystem::KVClient> datasystem_probe_client_;
   std::atomic<uint64_t> datasystem_probe_sequence_{1};
@@ -1589,7 +1658,18 @@ class NativeInferenceServiceImpl final : public pairec::inference::RecommendServ
       trace->set_datasystem_sync_set_us(static_cast<int64_t>(trace->kv_write_ms() * 1000.0));
       trace->set_datasystem_attribution_reason("request_correlated_explicit_probe");
     } else if (trace->datasystem_expected()) {
+#if defined(PAIREC_ENABLE_TRTLLM_CPP) && PAIREC_ENABLE_TRTLLM_CPP
+      if (tensorrt_llm::batch_manager::kv_cache_manager::
+              dataSystemRequestAttributionEnabled()) {
+        trace->set_datasystem_attribution_reason(
+            "native_datasystem_completion_event_pending");
+      } else {
+        trace->set_datasystem_attribution_reason(
+            "native_trt_kvc_request_identity_not_propagated");
+      }
+#else
       trace->set_datasystem_attribution_reason("native_trt_kvc_request_identity_not_propagated");
+#endif
     } else {
       trace->set_datasystem_attribution_reason("datasystem_not_expected");
     }
@@ -1616,6 +1696,20 @@ class NativeInferenceServiceImpl final : public pairec::inference::RecommendServ
       pairec::inference::HealthResponse* response,
       google::protobuf::Closure* done) override {
     brpc::ClosureGuard done_guard(done);
+#if defined(PAIREC_ENABLE_TRTLLM_CPP) && PAIREC_ENABLE_TRTLLM_CPP
+    const bool attribution_required =
+        ParseBoolFlag(std::getenv("PAIREC_REQUIRE_NATIVE_DATASYSTEM_ATTRIBUTION") == nullptr
+                          ? "0"
+                          : std::getenv("PAIREC_REQUIRE_NATIVE_DATASYSTEM_ATTRIBUTION"));
+    if (attribution_required &&
+        !tensorrt_llm::batch_manager::kv_cache_manager::
+            dataSystemRequestAttributionEnabled()) {
+      response->set_code(503);
+      response->set_status("not_ready_datasystem_attribution");
+      response->set_backend(backend_->Name());
+      return;
+    }
+#endif
     response->set_code(200);
     response->set_status("healthy");
     response->set_backend(backend_->Name());

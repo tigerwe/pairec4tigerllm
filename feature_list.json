@@ -243,18 +243,23 @@
     {
       "id": "F19",
       "name": "Native TRT KVC 请求级 DataSystem 归因",
-      "status": "pending",
+      "status": "in_progress",
       "description": "在 native TensorRT-LLM KVC offload/onboard 路径传播 PaiRec request identity，并将同一请求的 DataSystem Get/Set 次数与整数微秒耗时准确回传到 pipeline trace。",
       "branch": "pairec-brpc-observability",
       "files": [
         "cpp/brpc_gateway/",
         "proto/recommend.proto",
         "services/observability/",
-        "scripts/deploy_and_validate_pairec_brpc_observed.sh"
+        "scripts/deploy_and_validate_pairec_brpc_observed.sh",
+        "scripts/patch_trtllm_datasystem_request_attribution.py",
+        "scripts/apply_trtllm_datasystem_request_attribution_patch.sh",
+        "scripts/summarize_pairec_pipeline_trace.py",
+        "scripts/trace_single_brpc_datasystem_request.sh",
+        "docs/F19_NATIVE_DATASYSTEM_ATTRIBUTION.md"
       ],
       "validation_method": "在真实 native TRT KVC 工作负载中打开 REQUIRE_DATASYSTEM_ATTRIBUTION=1；1000 请求均必须 attribution_complete=true，Get/Set 只能来自相同 request_id 的原生事件，不允许从时间窗口或聚合日志推断；业务、trace闭合、资源和无fallback门禁继续通过。",
-      "validation_evidence": "F18 正式1000请求中 attribution_complete=0/1000，reason=native_trt_kvc_request_identity_not_propagated；该结果证明缺口被准确暴露，没有错误归因。",
-      "next_step": "盘点 native TensorRT-LLM DataSystem patch 的请求上下文入口和 offload/onboard 回调边界，设计低开销 request identity 传播后再实现，不先打开严格门禁。"
+      "validation_evidence": "本地：补丁对全新TensorRT-LLM源码副本连续应用两次成功；独立C++17 tracker smoke确认两个native lifecycle聚合同一UUID的Get/Set并在pending超时时输出incomplete；pipeline summary 8项单测通过。F18正式1000请求仍是改造前基线attribution_complete=0/1000。",
+      "next_step": "在master的真实DataSystem TRT-LLM源码应用补丁并重编libtensorrt_llm和brpc inference镜像；先跑3请求strict smoke，再跑1000请求strict gate与三组交替disabled/enabled开销A/B。"
     },
     {
       "id": "F20",

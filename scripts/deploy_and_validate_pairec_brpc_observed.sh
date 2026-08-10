@@ -63,6 +63,13 @@ MILVUS_IP="$(kubectl -n "$NAMESPACE" get service "$MILVUS_SERVICE" -o jsonpath='
 [[ -n "$INFERENCE_IP" && -n "$MILVUS_IP" ]] || die "dependency ClusterIP is empty"
 INFERENCE_ENDPOINT="${INFERENCE_IP}:${INFERENCE_PORT}"
 
+echo "== Configure native DataSystem request attribution =="
+kubectl -n "$NAMESPACE" set env "deployment/$INFERENCE_SERVICE" \
+    "TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION=$REQUIRE_DATASYSTEM_ATTRIBUTION" \
+    TRTLLM_DATASYSTEM_ATTRIBUTION_TTL_SECONDS=30 \
+    "PAIREC_REQUIRE_NATIVE_DATASYSTEM_ATTRIBUTION=$REQUIRE_DATASYSTEM_ATTRIBUTION"
+kubectl -n "$NAMESPACE" rollout status "deployment/$INFERENCE_SERVICE" --timeout=10m
+
 echo "== Build and import code images =="
 if [[ "$BUILD_IMAGES" = 1 ]]; then
   BASE_IMAGE="$ADAPTER_BASE_IMAGE" \
@@ -160,7 +167,7 @@ PY
 kubectl apply -f "$OUTPUT_DIR/pairec.yaml"
 kubectl -n "$NAMESPACE" set image deployment/pairec-brpc-observed "pairec=$PAIREC_IMAGE"
 kubectl -n "$NAMESPACE" set env deployment/pairec-brpc-observed \
-  "PAIREC_REQUIRE_DATASYSTEM_ATTRIBUTION=$REQUIRE_DATASYSTEM_ATTRIBUTION"
+  PAIREC_REQUIRE_DATASYSTEM_ATTRIBUTION=0
 kubectl -n "$NAMESPACE" rollout restart deployment/pairec-brpc-observed
 kubectl -n "$NAMESPACE" rollout status deployment/pairec-brpc-observed --timeout=5m
 
@@ -257,9 +264,48 @@ if (( WARMUP_REQUESTS > 0 )); then
 fi
 
 echo "== Run pure BRPC observed workload: $REQUESTS requests =="
+INFERENCE_POD="$(kubectl -n "$NAMESPACE" get pod -l "app=$INFERENCE_SERVICE" \
+  -o jsonpath='{.items[0].metadata.name}')"
+if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
+  kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference \
+    >"$OUTPUT_DIR/brpc/inference-startup.log"
+  grep -q '"event":"datasystem_attribution_ready"' \
+    "$OUTPUT_DIR/brpc/inference-startup.log" \
+    || die "native DataSystem attribution capability marker is missing"
+fi
 since="$(date --iso-8601=seconds)"
 run_requests "$PAIREC_URL" "$REQUESTS" "$OUTPUT_DIR/brpc" 1
 kubectl -n "$NAMESPACE" logs "$PAIREC_POD" --since-time="$since" >"$OUTPUT_DIR/brpc/pairec.log"
+
+attribution_deadline="$((SECONDS + 35))"
+while true; do
+  kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference \
+    --since-time="$since" >"$OUTPUT_DIR/brpc/inference.log"
+  if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" != 1 ]]; then
+    break
+  fi
+  if python3 - "$OUTPUT_DIR/brpc/requests.tsv" "$OUTPUT_DIR/brpc/inference.log" <<'PY'
+import csv, json, pathlib, sys
+expected = {row["request_id"] for row in csv.DictReader(open(sys.argv[1]), delimiter="\t")}
+observed = set()
+for line in pathlib.Path(sys.argv[2]).read_text(errors="replace").splitlines():
+    if '"event":"datasystem_request_complete"' not in line:
+        continue
+    try:
+        event = json.loads(line[line.index("{"):])
+    except (ValueError, json.JSONDecodeError):
+        continue
+    if event.get("request_id"):
+        observed.add(event["request_id"])
+raise SystemExit(0 if expected <= observed else 1)
+PY
+  then
+    break
+  fi
+  (( SECONDS < attribution_deadline )) \
+    || die "timed out waiting for native DataSystem completion events"
+  sleep 1
+done
 
 summary_args=(
   --log "$OUTPUT_DIR/brpc/pairec.log"
@@ -271,7 +317,10 @@ summary_args=(
   --max-client-p99-ms "$CLIENT_MAX_P99_MS"
 )
 if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
-  summary_args+=(--require-datasystem-attribution)
+  summary_args+=(
+    --require-datasystem-attribution
+    --datasystem-log "$OUTPUT_DIR/brpc/inference.log"
+  )
 fi
 python3 scripts/summarize_pairec_pipeline_trace.py "${summary_args[@]}"
 

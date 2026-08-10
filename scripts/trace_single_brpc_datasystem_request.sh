@@ -10,6 +10,8 @@ USER_ID="${USER_ID:-6312}"
 SIZE="${SIZE:-1}"
 SCENE_ID="${SCENE_ID:-home_feed}"
 TIMEOUT="${TIMEOUT:-30}"
+REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION="${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION:-0}"
+ATTRIBUTION_WAIT_SECONDS="${ATTRIBUTION_WAIT_SECONDS:-35}"
 
 PAIREC_URL_WAS_SET=0
 if [ "${PAIREC_URL+x}" = "x" ]; then
@@ -296,7 +298,15 @@ trt_set_get_probe_lines = [
 trt_set_get_probe_events = [parse_kv_fields(line) for line in trt_set_get_probe_lines]
 
 ds_events = []
+datasystem_completion = None
 for line in trt_log.splitlines():
+    if '"event":"datasystem_request_complete"' in line:
+        try:
+            candidate = json.loads(line[line.index("{"):])
+        except (ValueError, json.JSONDecodeError):
+            candidate = None
+        if candidate and candidate.get("request_id") == request_id:
+            datasystem_completion = candidate
     if "[Datasystem][TRACE]" not in line:
         continue
     fields = parse_kv_fields(line)
@@ -326,6 +336,7 @@ summary = {
     },
     "pairec_generative_trace": generative_trace,
     "pairec_recommend_trace": recommend_trace,
+    "datasystem_request_complete": datasystem_completion,
 }
 
 with open(summary_json, "w", encoding="utf-8") as handle:
@@ -391,6 +402,14 @@ else:
     print("PaiRec RecommendTrace stages: not found in captured logs")
 
 print("KVC/DataSystem access:")
+if datasystem_completion:
+    print("  exact_request_attribution=true")
+    for key in ("get_count", "get_us", "set_count", "set_us",
+                "get_failed_count", "set_failed_count", "pending_count",
+                "unknown_count", "attribution_complete", "reason"):
+        print(f"  {key}={datasystem_completion.get(key)}")
+else:
+    print("  exact_request_attribution=false")
 print(f"  offload_count={len(offloads)}")
 print(f"  onboard_count={len(onboards)}")
 print(f"  total_count={len(ds_events)}")
@@ -419,6 +438,15 @@ PY
 mkdir -p "$OUT_DIR"
 require_command kubectl
 require_command python3
+[[ "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" = 0 \
+  || "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" = 1 ]] || {
+  echo "ERROR: REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION must be 0 or 1" >&2
+  exit 1
+}
+[[ "$ATTRIBUTION_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "ERROR: ATTRIBUTION_WAIT_SECONDS must be a positive integer" >&2
+  exit 1
+}
 
 log "Output directory"
 echo "$OUT_DIR"
@@ -432,12 +460,6 @@ kubectl -n "$NAMESPACE" get svc pairec inference-brpc-trtllm -o wide \
 start_port_forward
 start_log_collectors
 send_request
-sleep 3
-cleanup_pid "$PAIREC_LOG_PID"
-cleanup_pid "$TRT_LOG_PID"
-PAIREC_LOG_PID=""
-TRT_LOG_PID=""
-
 REQUEST_ID="$(python3 - "$CLIENT_JSON" <<'PY'
 import json
 import sys
@@ -445,6 +467,26 @@ with open(sys.argv[1], "r", encoding="utf-8") as handle:
     print(json.load(handle).get("request_id", ""))
 PY
 )"
+
+if [[ "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
+  log "Wait for exact native DataSystem completion"
+  deadline="$((SECONDS + ATTRIBUTION_WAIT_SECONDS))"
+  while ! grep -F '"event":"datasystem_request_complete"' "$TRT_LOG" \
+      | grep -Fq "\"request_id\":\"${REQUEST_ID}\""; do
+    (( SECONDS < deadline )) || {
+      echo "ERROR: no native DataSystem completion for request_id=$REQUEST_ID" >&2
+      exit 1
+    }
+    sleep 1
+  done
+else
+  sleep 3
+fi
+
+cleanup_pid "$PAIREC_LOG_PID"
+cleanup_pid "$TRT_LOG_PID"
+PAIREC_LOG_PID=""
+TRT_LOG_PID=""
 
 collect_pairec_request_trace "$REQUEST_ID"
 summarize

@@ -125,6 +125,45 @@ class PipelineTraceSummaryTest(unittest.TestCase):
         }, False, True)
         self.assertIn("source_rerank_not_enabled", reasons)
 
+    def test_native_datasystem_completion_is_joined_by_request_id(self):
+        module = __import__(
+            "scripts.summarize_pairec_pipeline_trace",
+            fromlist=["extract_datasystem_completions", "validate"])
+        event = {
+            "event": "datasystem_request_complete", "request_id": "r1",
+            "get_count": 2, "get_us": 12000,
+            "set_count": 3, "set_us": 19000,
+            "get_failed_count": 0, "set_failed_count": 0,
+            "pending_count": 0, "unknown_count": 0,
+            "attribution_complete": True,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "inference.log"
+            log.write_text("native-prefix " + json.dumps(event, separators=(",", ":")) + "\n")
+            completions, duplicates = module.extract_datasystem_completions(log)
+        self.assertEqual(completions["r1"]["get_count"], 2)
+        self.assertFalse(duplicates)
+
+        trace = {"valid": True, "_datasystem_final": completions["r1"]}
+        reasons = module.validate(trace, True)
+        self.assertNotIn("datasystem_completion_missing", reasons)
+        self.assertNotIn("datasystem_attribution_incomplete", reasons)
+
+    def test_native_datasystem_pending_or_failure_is_rejected(self):
+        module = __import__(
+            "scripts.summarize_pairec_pipeline_trace", fromlist=["validate"])
+        event = {
+            "get_count": 1, "get_us": 100, "set_count": 1, "set_us": 200,
+            "get_failed_count": 1, "set_failed_count": 0,
+            "pending_count": 1, "unknown_count": 0,
+            "attribution_complete": False,
+        }
+        reasons = module.validate(
+            {"valid": True, "_datasystem_final": event}, True)
+        self.assertIn("datasystem_attribution_incomplete", reasons)
+        self.assertIn("datasystem_nonzero:get_failed_count", reasons)
+        self.assertIn("datasystem_nonzero:pending_count", reasons)
+
 
 if __name__ == "__main__":
     unittest.main()
