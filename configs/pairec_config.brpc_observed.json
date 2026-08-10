@@ -53,6 +53,19 @@
         "expected_candidates": 50,
         "required_model_role": "__DEEPFM_MODEL_ROLE__"
       }
+    ],
+    "RerankConfs": [
+      {
+        "name": "source_quota_tail",
+        "enabled": true,
+        "generative_source": "generative_recall",
+        "vector_source": "milvus_recall",
+        "expected_candidates": 50,
+        "minimum_generative": 1,
+        "max_generative": 2,
+        "placement": "tail",
+        "fail_closed": true
+      }
     ]
   }
 }

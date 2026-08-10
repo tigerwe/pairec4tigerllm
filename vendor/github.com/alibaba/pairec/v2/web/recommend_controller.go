@@ -17,6 +17,7 @@ import (
 	"github.com/alibaba/pairec/v2/utils"
 	"github.com/aliyun/aliyun-pairec-config-go-sdk/v2/model"
 	"pairec4tigerllm/services/observability"
+	"pairec4tigerllm/services/rerank"
 )
 
 const (
@@ -120,7 +121,7 @@ func (c *RecommendController) doProcess(w http.ResponseWriter, r *http.Request) 
 	observability.Attach(c.context, recorder)
 	traceStatus := "ok"
 	defer func() {
-		if c.context.GetContextParam("deepfm_rank_error") != nil {
+		if c.hasPipelineFailure() {
 			traceStatus = "error"
 		}
 		observability.FinalizeContext(c.context, traceStatus)
@@ -128,17 +129,21 @@ func (c *RecommendController) doProcess(w http.ResponseWriter, r *http.Request) 
 	userRecommendService := service.NewUserRecommendService()
 	recommendStarted := time.Now()
 	items := userRecommendService.Recommend(c.context)
-	observability.RecordDuration(c.context, "recommend_service", "pairec", "in_process", "", true,
-		recommendStarted, "ok", map[string]interface{}{"item_count": len(items)})
-	if c.context.GetContextParam("deepfm_rank_error") != nil {
+	if c.hasPipelineFailure() {
 		traceStatus = "error"
 	}
+	observability.RecordDuration(c.context, "recommend_service", "pairec", "in_process", "", true,
+		recommendStarted, traceStatus, map[string]interface{}{"item_count": len(items)})
 	responseStarted := time.Now()
 	defer func() {
 		observability.RecordDuration(c.context, "response_build", "pairec", "http", "", true,
 			responseStarted, traceStatus, nil)
 	}()
 	if response := c.deepFMRankFailureResponse(); response != nil {
+		io.WriteString(w, response.ToString())
+		return
+	}
+	if response := c.rerankFailureResponse(); response != nil {
 		io.WriteString(w, response.ToString())
 		return
 	}
@@ -201,6 +206,26 @@ func (c *RecommendController) deepFMRankFailureResponse() *RecommendResponse {
 			Message:   "deepfm rank failed",
 		},
 	}
+}
+
+func (c *RecommendController) rerankFailureResponse() *RecommendResponse {
+	if c.context == nil || c.context.GetContextParam(rerank.ErrorContextKey) == nil {
+		return nil
+	}
+	return &RecommendResponse{
+		Size:  0,
+		Items: []*ItemData{},
+		Response: Response{
+			RequestId: c.RequestId,
+			Code:      SERVER_ERROR_CODE,
+			Message:   "rerank failed",
+		},
+	}
+}
+
+func (c *RecommendController) hasPipelineFailure() bool {
+	return c.context != nil && (c.context.GetContextParam("deepfm_rank_error") != nil ||
+		c.context.GetContextParam(rerank.ErrorContextKey) != nil)
 }
 
 func allowPartialRecommendResults(itemCount int) bool {

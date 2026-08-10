@@ -94,7 +94,7 @@ def read_requests(path):
                 for row in rows}
 
 
-def validate(trace, require_datasystem):
+def validate(trace, require_datasystem, require_source_rerank=False):
     reasons = list(trace.get("invalid_reasons") or [])
     if trace.get("valid") is not True:
         reasons.append("trace_marked_invalid")
@@ -107,8 +107,36 @@ def validate(trace, require_datasystem):
         if span.get("duration_us", 0) < 0 or span.get("start_offset_us", 0) < 0:
             reasons.append(f"invalid_duration:{span.get('name')}")
     rerank = next((span for span in spans if span.get("name") == "rerank"), None)
-    if rerank and rerank.get("enabled") is not False:
-        reasons.append("rerank_must_be_explicitly_disabled")
+    if require_source_rerank:
+        if not rerank or rerank.get("enabled") is not True:
+            reasons.append("source_rerank_not_enabled")
+        elif rerank.get("status") != "ok" or rerank.get("protocol") != "in_process":
+            reasons.append("source_rerank_status")
+        else:
+            attributes = rerank.get("attributes") or {}
+            required = {
+                "policy", "placement", "input_count", "output_count",
+                "generative_input", "vector_input", "generative_selected",
+                "vector_selected", "minimum_generative", "maximum_generative",
+                "moved_count",
+            }
+            for field in sorted(required - set(attributes)):
+                reasons.append(f"missing_rerank_field:{field}")
+            if required <= set(attributes):
+                if attributes["policy"] != "source_quota_tail" or attributes["placement"] != "tail":
+                    reasons.append("source_rerank_policy")
+                selected = int(attributes["generative_selected"])
+                minimum = int(attributes["minimum_generative"])
+                maximum = int(attributes["maximum_generative"])
+                available = int(attributes["generative_input"])
+                output_count = int(attributes["output_count"])
+                vector_selected = int(attributes["vector_selected"])
+                if selected < minimum or selected > maximum:
+                    reasons.append("source_rerank_quota")
+                if selected != min(maximum, available, output_count):
+                    reasons.append("source_rerank_did_not_preserve_available")
+                if selected + vector_selected != output_count:
+                    reasons.append("source_rerank_output_count")
     protocols = {span.get("name"): span.get("protocol") for span in spans}
     for name in ("generative_recall", "vector_recall", "deepfm_rank"):
         if protocols.get(name) != "brpc":
@@ -148,6 +176,9 @@ def main():
     parser.add_argument("--requests-tsv")
     parser.add_argument("--expected", type=int, default=0)
     parser.add_argument("--require-datasystem-attribution", action="store_true")
+    parser.add_argument("--require-source-rerank", action="store_true")
+    parser.add_argument("--max-rerank-p99-ms", type=float, default=0.0)
+    parser.add_argument("--max-client-p99-ms", type=float, default=0.0)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
@@ -160,7 +191,8 @@ def main():
     valid = []
     for request_id in sorted(expected_ids & set(traces)):
         traces[request_id]["_quota"] = quota_stats.get(request_id)
-        reasons = validate(traces[request_id], args.require_datasystem_attribution)
+        reasons = validate(traces[request_id], args.require_datasystem_attribution,
+                           args.require_source_rerank)
         if reasons:
             invalid[request_id] = reasons
         else:
@@ -207,6 +239,16 @@ def main():
         summary["classification"] = "PAIREC_BRPC_PIPELINE_TRACE_FAILED"
     if missing or invalid or len(valid) < math.ceil(max(len(expected_ids), 1) * 0.999):
         summary["classification"] = "PAIREC_BRPC_PIPELINE_TRACE_FAILED"
+    rerank_p99 = summary["spans"].get("rerank", {}).get("p99_ms", 0.0)
+    if args.max_rerank_p99_ms and rerank_p99 > args.max_rerank_p99_ms:
+        summary["classification"] = "PAIREC_BRPC_PIPELINE_TRACE_FAILED"
+        summary["rerank_p99_gate"] = {
+            "actual_ms": rerank_p99, "maximum_ms": args.max_rerank_p99_ms}
+    client_p99 = summary["client_e2e"].get("p99_ms", 0.0)
+    if args.max_client_p99_ms and client_p99 > args.max_client_p99_ms:
+        summary["classification"] = "PAIREC_BRPC_PIPELINE_TRACE_FAILED"
+        summary["client_p99_gate"] = {
+            "actual_ms": client_p99, "maximum_ms": args.max_client_p99_ms}
     Path(args.output).write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 
     print("metric count avg_ms p50_ms p95_ms p99_ms max_ms")

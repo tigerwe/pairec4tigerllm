@@ -14,6 +14,7 @@ import (
 	"github.com/alibaba/pairec/v2/service/recall"
 
 	myrecall "pairec4tigerllm/services/recall"
+	"pairec4tigerllm/services/rerank"
 	ranksort "pairec4tigerllm/services/sort"
 )
 
@@ -60,6 +61,10 @@ func main() {
 	}
 	if err := ranksort.RegisterFromConfig(); err != nil {
 		fmt.Printf("Failed to register DeepFM rank sort: %v\n", err)
+		os.Exit(1)
+	}
+	if err := rerank.RegisterFromConfig(); err != nil {
+		fmt.Printf("Failed to register rerank: %v\n", err)
 		os.Exit(1)
 	}
 

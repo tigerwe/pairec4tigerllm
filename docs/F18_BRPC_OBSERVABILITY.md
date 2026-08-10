@@ -31,9 +31,10 @@ user_feature, recall, filter, general_rank, feature_load, framework_rank,
 pipeline_wait, pipeline_merge, sort, response_build, controller_overhead
 ```
 
-It also contains `generative_recall`, `vector_recall`, and `deepfm_rank`. `rerank` is emitted as
-an explicitly disabled span because DeepFM currently performs the Sort/reorder stage and no
-post-rank reranker exists.
+It also contains `generative_recall`, `vector_recall`, and `deepfm_rank`. The original F18
+validation emitted `rerank` as explicitly disabled. F20 adds an optional in-process
+`source_quota_tail` reranker after DeepFM; it is enabled only by the isolated observed config and
+has its own validation gate. See `docs/F20_SOURCE_QUOTA_RERANK.md`.
 
 Service-reported inner phases are carried as span attributes and summarized independently:
 

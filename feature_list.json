@@ -255,6 +255,26 @@
       "validation_method": "在真实 native TRT KVC 工作负载中打开 REQUIRE_DATASYSTEM_ATTRIBUTION=1；1000 请求均必须 attribution_complete=true，Get/Set 只能来自相同 request_id 的原生事件，不允许从时间窗口或聚合日志推断；业务、trace闭合、资源和无fallback门禁继续通过。",
       "validation_evidence": "F18 正式1000请求中 attribution_complete=0/1000，reason=native_trt_kvc_request_identity_not_propagated；该结果证明缺口被准确暴露，没有错误归因。",
       "next_step": "盘点 native TensorRT-LLM DataSystem patch 的请求上下文入口和 offload/onboard 回调边界，设计低开销 request identity 传播后再实现，不先打开严格门禁。"
+    },
+    {
+      "id": "F20",
+      "name": "DeepFM 后来源配额重排",
+      "status": "in_progress",
+      "description": "在 DeepFM 对50个候选稳定排序后执行进程内来源配额重排，保留最多2个生成式候选并连续放到最终结果末尾，防止TopN全部来自向量召回。",
+      "branch": "pairec-brpc-observability",
+      "files": [
+        "services/rerank/",
+        "services/main.go",
+        "vendor/github.com/alibaba/pairec/v2/service/user_recommend.go",
+        "vendor/github.com/alibaba/pairec/v2/web/recommend_controller.go",
+        "configs/pairec_config.brpc_observed.json",
+        "scripts/deploy_and_validate_pairec_brpc_observed.sh",
+        "scripts/summarize_pairec_pipeline_trace.py",
+        "docs/F20_SOURCE_QUOTA_RERANK.md"
+      ],
+      "validation_method": "隔离配置启用source_quota_tail；3次smoke和1000次稳定性全部code=200、输出唯一且数量等于size，生成式候选为1或2个并连续位于末尾；有2个生成式输入时必须保留2个；原DeepFM分数不变；rerank trace 100%有效、p99<=1ms，E2E p99相对F18历史120.622ms增量<=2ms。缺少生成式候选的故障注入必须返回code=500和空items。",
+      "validation_evidence": "2026-08-10: 本地工程实现完成。新增可配置SourceQuotaTail、严格来源/唯一性/数量校验、fail-closed Controller响应、真实rerank span、低基数Prometheus指标及隔离部署门禁。Go race覆盖rerank/observability/sort/web并通过；完整services build通过；Python trace summary unittest 6/6、Shell语法、JSON解析和diff check通过。尚未执行ARM64/Kubernetes远端3/1000请求与缺生成式候选故障注入，因此未标done。",
+      "next_step": "在master隔离工作树重建PaiRec镜像，先以REQUESTS=3 RUN_HTTP_AB=0执行smoke，再以REQUESTS=1000、RERANK_MAX_P99_MS=1.0、CLIENT_MAX_P99_MS=122.622执行正式验收；随后注入无生成式候选验证code=500/items=[]，证据通过后标记done。"
     }
   ]
 }

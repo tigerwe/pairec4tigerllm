@@ -18,6 +18,8 @@ RUN_HTTP_AB="${RUN_HTTP_AB:-1}"
 HTTP_BASELINE_SERVICE="${HTTP_BASELINE_SERVICE:-pairec-multi-recall-rank}"
 HTTP_BASELINE_REQUESTS="${HTTP_BASELINE_REQUESTS:-100}"
 REQUIRE_DATASYSTEM_ATTRIBUTION="${REQUIRE_DATASYSTEM_ATTRIBUTION:-0}"
+RERANK_MAX_P99_MS="${RERANK_MAX_P99_MS:-1.0}"
+CLIENT_MAX_P99_MS="${CLIENT_MAX_P99_MS:-122.622}"
 PAIREC_IMAGE="${PAIREC_IMAGE:-docker.io/library/pairec-server:k8s-arm64-brpc-v1}"
 ADAPTER_IMAGE="${ADAPTER_IMAGE:-docker.io/library/pairec-brpc-inference:k8s-arm64-v1}"
 ADAPTER_BASE_IMAGE="${ADAPTER_BASE_IMAGE:-zcx-pairec-brpc-sdk:v1}"
@@ -132,6 +134,13 @@ assert recalls["milvus_recall"]["brpc_endpoint"] == vector_endpoint
 rank = config["UserDefineConfs"]["DeepFMRankSorts"][0]
 assert rank["protocol"] == "brpc" and "server_url" not in rank
 assert rank["brpc_endpoint"] == rank_endpoint
+rerank = config["UserDefineConfs"]["RerankConfs"][0]
+assert rerank == {
+    "name": "source_quota_tail", "enabled": True,
+    "generative_source": "generative_recall", "vector_source": "milvus_recall",
+    "expected_candidates": 50, "minimum_generative": 1, "max_generative": 2,
+    "placement": "tail", "fail_closed": True,
+}
 pathlib.Path(target).write_text(json.dumps(config, indent=2) + "\n")
 print("PAIREC_PURE_BRPC_CONFIG_OK")
 PY
@@ -209,7 +218,7 @@ for tuple in "${RESOURCE_TARGETS[@]}"; do
 done
 
 run_requests() {
-  local url="$1" count="$2" directory="$3"
+  local url="$1" count="$2" directory="$3" require_rerank="${4:-0}"
   mkdir -p "$directory"
   printf 'index\te2e_ms\trequest_id\n' >"$directory/requests.tsv"
   for index in $(seq 1 "$count"); do
@@ -218,15 +227,22 @@ run_requests() {
       "$url" -H 'Content-Type: application/json' \
       -d "{\"scene_id\":\"$SCENE_ID\",\"uid\":\"$USER_ID\",\"size\":$SIZE}" \
       -o "$response" -w '%{time_total}')"
-    read -r request_id item_count < <(python3 - "$response" "$SIZE" <<'PY'
+    read -r request_id item_count < <(python3 - "$response" "$SIZE" "$require_rerank" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 size = int(sys.argv[2])
+require_rerank = sys.argv[3] == "1"
 assert data.get("code") == 200, data
 items = data.get("items", [])
 assert len(items) == size and len({item["item_id"] for item in items}) == size, data
 assert all(item.get("retrieve_id") in {"generative_recall", "milvus_recall"}
            for item in items), data
+if require_rerank:
+    sources = [item["retrieve_id"] for item in items]
+    generative = sources.count("generative_recall")
+    assert 1 <= generative <= min(2, size), data
+    assert sources == (["milvus_recall"] * (size - generative) +
+                       ["generative_recall"] * generative), data
 print(data["request_id"], len(items))
 PY
 )
@@ -237,12 +253,12 @@ PY
 
 echo "== Warm up PaiRec =="
 if (( WARMUP_REQUESTS > 0 )); then
-  run_requests "$PAIREC_URL" "$WARMUP_REQUESTS" "$OUTPUT_DIR/warmup"
+  run_requests "$PAIREC_URL" "$WARMUP_REQUESTS" "$OUTPUT_DIR/warmup" 1
 fi
 
 echo "== Run pure BRPC observed workload: $REQUESTS requests =="
 since="$(date --iso-8601=seconds)"
-run_requests "$PAIREC_URL" "$REQUESTS" "$OUTPUT_DIR/brpc"
+run_requests "$PAIREC_URL" "$REQUESTS" "$OUTPUT_DIR/brpc" 1
 kubectl -n "$NAMESPACE" logs "$PAIREC_POD" --since-time="$since" >"$OUTPUT_DIR/brpc/pairec.log"
 
 summary_args=(
@@ -250,6 +266,9 @@ summary_args=(
   --requests-tsv "$OUTPUT_DIR/brpc/requests.tsv"
   --expected "$REQUESTS"
   --output "$OUTPUT_DIR/brpc/summary.json"
+  --require-source-rerank
+  --max-rerank-p99-ms "$RERANK_MAX_P99_MS"
+  --max-client-p99-ms "$CLIENT_MAX_P99_MS"
 )
 if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
   summary_args+=(--require-datasystem-attribution)
@@ -261,13 +280,15 @@ curl --noproxy '*' -fsS "http://${PAIREC_IP}:18080/metrics" >"$OUTPUT_DIR/metric
 grep -q 'pairec_pipeline_span_duration_seconds' "$OUTPUT_DIR/metrics.txt"
 grep -q 'pairec_pipeline_trace_total' "$OUTPUT_DIR/metrics.txt"
 grep -q 'pairec_pipeline_service_phase_duration_seconds' "$OUTPUT_DIR/metrics.txt"
+grep -q 'pairec_rerank_duration_seconds' "$OUTPUT_DIR/metrics.txt"
+grep -q 'pairec_rerank_requests_total' "$OUTPUT_DIR/metrics.txt"
 ! grep -Eqi 'fallback.to.http|protocol=http|http fallback' "$OUTPUT_DIR/brpc/pairec.log" \
   || die "HTTP fallback marker detected"
 
 if [[ "$RUN_HTTP_AB" = 1 ]]; then
   HTTP_IP="$(kubectl -n "$NAMESPACE" get service "$HTTP_BASELINE_SERVICE" -o jsonpath='{.spec.clusterIP}')"
   echo "== Run retained HTTP baseline: $HTTP_BASELINE_REQUESTS requests =="
-  run_requests "http://${HTTP_IP}:18080/api/recommend" "$HTTP_BASELINE_REQUESTS" "$OUTPUT_DIR/http"
+  run_requests "http://${HTTP_IP}:18080/api/recommend" "$HTTP_BASELINE_REQUESTS" "$OUTPUT_DIR/http" 0
   python3 - "$OUTPUT_DIR/http/requests.tsv" "$OUTPUT_DIR/brpc/requests.tsv" "$OUTPUT_DIR/ab.json" <<'PY'
 import csv, json, math, statistics, sys
 def values(path):

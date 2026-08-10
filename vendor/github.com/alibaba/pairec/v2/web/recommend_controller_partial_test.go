@@ -41,3 +41,27 @@ func TestDeepFMRankFailureResponse(t *testing.T) {
 		t.Fatalf("unexpected response body: %#v", body)
 	}
 }
+
+func TestRerankFailureResponse(t *testing.T) {
+	controller := &RecommendController{}
+	controller.RequestId = "request-rerank"
+	controller.context = context.NewRecommendContext()
+	if controller.rerankFailureResponse() != nil {
+		t.Fatal("rerank failure response should be absent without context error")
+	}
+	controller.context.AddContextParam("rerank_error", "missing generative candidates")
+	response := controller.rerankFailureResponse()
+	if response == nil || response.Code != SERVER_ERROR_CODE || response.Size != 0 || len(response.Items) != 0 {
+		t.Fatalf("unexpected fail-closed response: %#v", response)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal([]byte(response.ToString()), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["msg"] != "rerank failed" || body["request_id"] != "request-rerank" {
+		t.Fatalf("unexpected response body: %#v", body)
+	}
+	if !controller.hasPipelineFailure() {
+		t.Fatal("rerank error must mark the pipeline failed")
+	}
+}

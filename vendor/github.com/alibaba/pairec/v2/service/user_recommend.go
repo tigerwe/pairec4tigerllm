@@ -19,6 +19,7 @@ import (
 	"github.com/alibaba/pairec/v2/service/rank"
 	"github.com/alibaba/pairec/v2/utils"
 	"pairec4tigerllm/services/observability"
+	"pairec4tigerllm/services/rerank"
 )
 
 type UserRecommendService struct {
@@ -173,6 +174,15 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	}
 	debugService.WriteSortLog(user, items, context)
 
+	rerankStart := time.Now()
+	rerankedItems, rerankEnabled, _ := rerank.ApplyConfigured(context, items, context.Size)
+	if rerankEnabled {
+		items = rerankedItems
+	} else if recorder := observability.FromContext(context); recorder != nil {
+		recorder.RecordDisabled("rerank", "pairec", "recommend_service")
+	}
+	rerankDuration := time.Since(rerankStart)
+
 	size := context.Size
 	if size > len(items) {
 		size = len(items)
@@ -184,9 +194,6 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	}
 
 	items = items[:size]
-	if recorder := observability.FromContext(context); recorder != nil {
-		recorder.RecordDisabled("rerank", "pairec", "recommend_service")
-	}
 	go feature_log.FeatureLog(user, items, context)
 	go r.featureConsistencyJobService.LogSampleResult(user, items, context)
 	debugService.WriteRecommendLog(user, items, context)
@@ -199,13 +206,13 @@ func (r *UserRecommendService) Recommend(context *context.RecommendContext) []*m
 	log.Info(fmt.Sprintf(
 		"requestId=%s\tmodule=RecommendTrace\tuid=%s\tcount=%d\ttotal_ms=%d"+
 			"\tuser_feature_ms=%d\trecall_ms=%d\tfilter_ms=%d\tgeneral_rank_ms=%d"+
-			"\tfeature_ms=%d\trank_ms=%d\tpipeline_wait_ms=%d\tmerge_ms=%d\tsort_ms=%d",
+			"\tfeature_ms=%d\trank_ms=%d\tpipeline_wait_ms=%d\tmerge_ms=%d\tsort_ms=%d\trerank_ms=%d",
 		context.RecommendId, userId, len(items), totalDuration.Milliseconds(),
 		userFeatureDuration.Milliseconds(), recallDuration.Milliseconds(),
 		filterDuration.Milliseconds(), generalRankDuration.Milliseconds(),
 		featureDuration.Milliseconds(), rankDuration.Milliseconds(),
 		pipelineWaitDuration.Milliseconds(), mergeDuration.Milliseconds(),
-		sortDuration.Milliseconds(),
+		sortDuration.Milliseconds(), rerankDuration.Milliseconds(),
 	))
 
 	if metrics.Enabled() {

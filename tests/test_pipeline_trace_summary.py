@@ -76,6 +76,55 @@ class PipelineTraceSummaryTest(unittest.TestCase):
             "scripts.summarize_pairec_pipeline_trace", fromlist=["validate"]
         ).validate({"valid": False}, False))
 
+    def test_required_source_rerank_is_validated(self):
+        module = __import__(
+            "scripts.summarize_pairec_pipeline_trace", fromlist=["validate"])
+        trace = {
+            "valid": True,
+            "contract_version": "pairec.pipeline_trace.v1",
+            "pairec_total_us": 100,
+            "accounted_us": 100,
+            "_quota": {
+                "primary_minimum": 1, "primary_selected": 2,
+                "final_count": 50, "degraded": False,
+            },
+            "spans": [{
+                "name": "rerank", "enabled": True, "status": "ok",
+                "protocol": "in_process", "duration_us": 20, "start_offset_us": 0,
+                "attributes": {
+                    "policy": "source_quota_tail", "placement": "tail",
+                    "input_count": 50, "output_count": 10,
+                    "generative_input": 2, "vector_input": 48,
+                    "generative_selected": 2, "vector_selected": 8,
+                    "minimum_generative": 1, "maximum_generative": 2,
+                    "moved_count": 2,
+                },
+            }],
+            "datasystem": {"attribution_complete": False},
+        }
+        reasons = module.validate(trace, False, True)
+        self.assertNotIn("source_rerank_not_enabled", reasons)
+        self.assertNotIn("source_rerank_quota", reasons)
+        trace["spans"][0]["attributes"]["generative_selected"] = 1
+        reasons = module.validate(trace, False, True)
+        self.assertIn("source_rerank_did_not_preserve_available", reasons)
+
+    def test_source_rerank_must_be_enabled_when_required(self):
+        module = __import__(
+            "scripts.summarize_pairec_pipeline_trace", fromlist=["validate"])
+        reasons = module.validate({
+            "valid": True,
+            "contract_version": "pairec.pipeline_trace.v1",
+            "pairec_total_us": 1,
+            "accounted_us": 1,
+            "spans": [{"name": "rerank", "enabled": False}],
+            "_quota": {
+                "primary_minimum": 1, "primary_selected": 1,
+                "final_count": 50, "degraded": False,
+            },
+        }, False, True)
+        self.assertIn("source_rerank_not_enabled", reasons)
+
 
 if __name__ == "__main__":
     unittest.main()
