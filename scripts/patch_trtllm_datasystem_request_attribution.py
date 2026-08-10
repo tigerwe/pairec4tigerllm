@@ -427,6 +427,41 @@ def write_managed(path: Path, content: str) -> None:
     path.write_text(content)
 
 
+def patch_parallel_get(transfer: Path) -> None:
+    transfer_text = transfer.read_text()
+    if ("TRTLLM_DATASYSTEM_PARALLEL_GET" not in transfer_text
+            or "attributionParallelGetToken" in transfer_text):
+        return
+    replace_once(transfer,
+        "                for (auto const& key : keys)\n"
+        "                {\n"
+        "                    futures.emplace_back(dataSystemGetExecutor().submit("
+        "[kvClient, key, monotonicMs]() mutable {\n"
+        "                        DataSystemGetResult result;\n"
+        "                        auto const started = monotonicMs();\n",
+        "                for (auto const& key : keys)\n"
+        "                {\n"
+        "                    auto const attributionParallelGetToken\n"
+        "                        = beginDataSystemOperation(DataSystemOperation::kGet);\n"
+        "                    futures.emplace_back(dataSystemGetExecutor().submit(\n"
+        "                        [kvClient, key, monotonicMs, attributionParallelGetToken]() mutable {\n"
+        "                        DataSystemGetResult result;\n"
+        "                        auto const started = monotonicMs();\n"
+        "                        auto const attributionParallelGetStarted = std::chrono::steady_clock::now();\n")
+    replace_once(transfer,
+        "                        result.getMs = monotonicMs() - started;\n"
+        "                        return result;\n",
+        "                        result.getMs = monotonicMs() - started;\n"
+        "                        auto const attributionParallelGetUs\n"
+        "                            = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "                                std::chrono::steady_clock::now()\n"
+        "                                - attributionParallelGetStarted)\n"
+        "                                  .count();\n"
+        "                        finishDataSystemOperation(attributionParallelGetToken,\n"
+        "                            DataSystemOperation::kGet, attributionParallelGetUs, !result.ok);\n"
+        "                        return result;\n")
+
+
 def patch_tree(root: Path) -> None:
     include_dir = root / "cpp/include/tensorrt_llm/batch_manager"
     source_dir = root / "cpp/tensorrt_llm/batch_manager"
@@ -517,7 +552,9 @@ def patch_tree(root: Path) -> None:
          "getRet", "kGet", "getRet.IsError()", "attributionGet"),
         (("datasystem::Status setRet = kvClient->MSet(buffers);",), "setRet", "kSet", "setRet.IsError()",
          "attributionMSet"),
-        (("datasystem::Status getRet = kvClient->Get(keys, buffers, 0);",), "getRet", "kGet", "getRet.IsError()",
+        (("datasystem::Status getRet = kvClient->Get(keys, buffers, 0);",
+          "auto const getRet = kvClient->Get(keys, buffers, 0);"),
+         "getRet", "kGet", "getRet.IsError()",
          "attributionMGet"),
     ]
     for calls, status, operation, failed, prefix in api_replacements:
@@ -538,6 +575,8 @@ def patch_tree(root: Path) -> None:
             f"                std::chrono::steady_clock::now() - {prefix}Started).count();\n"
             f"            finishDataSystemOperation({prefix}Token, DataSystemOperation::{operation}, {prefix}Us, {failed});")
         replace_once(transfer, call, wrapped)
+
+    patch_parallel_get(transfer)
 
 
 def main() -> None:
