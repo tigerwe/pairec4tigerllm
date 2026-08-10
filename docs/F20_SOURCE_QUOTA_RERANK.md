@@ -102,3 +102,10 @@ bash scripts/test_pairec_source_quota_rerank_fail_closed.sh
 正式门禁要求每个响应生成式数量为 1 或 2 且连续位于末尾；Trace 必须证明有两个生成式
 输入时保留两个；rerank p99 不超过 1ms，客户端 E2E p99 不超过历史基线
 `120.622ms + 2ms`。
+
+## 验收结果
+
+2026-08-10 ARM64/Kubernetes 验收通过：1000/1000 请求 Trace 有效，E2E p99 为
+`120.318ms`，rerank p99 为 `0.030ms`。故障注入确认缺少生成式配额时返回
+`code=500/items=[]` 且 rerank/pipeline Trace 为 error；恢复后返回 `code=200`，最终结果为
+8 个向量商品加末尾 2 个生成式商品。

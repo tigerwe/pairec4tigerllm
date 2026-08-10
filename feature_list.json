@@ -259,7 +259,7 @@
     {
       "id": "F20",
       "name": "DeepFM 后来源配额重排",
-      "status": "in_progress",
+      "status": "done",
       "description": "在 DeepFM 对50个候选稳定排序后执行进程内来源配额重排，保留最多2个生成式候选并连续放到最终结果末尾，防止TopN全部来自向量召回。",
       "branch": "pairec-brpc-observability",
       "files": [
@@ -274,8 +274,9 @@
         "docs/F20_SOURCE_QUOTA_RERANK.md"
       ],
       "validation_method": "隔离配置启用source_quota_tail；3次smoke和1000次稳定性全部code=200、输出唯一且数量等于size，生成式候选为1或2个并连续位于末尾；有2个生成式输入时必须保留2个；原DeepFM分数不变；rerank trace 100%有效、p99<=1ms，E2E p99相对F18历史120.622ms增量<=2ms。缺少生成式候选的故障注入必须返回code=500和空items。",
-      "validation_evidence": "2026-08-10: 本地Go race、services测试、Python trace summary unittest 6/6及静态检查通过。ARM64/Kubernetes正向正式验收1000/1000有效，missing=0、invalid=0；E2E p99=120.318ms（门禁122.622ms），rerank p99=0.030ms（门禁1ms）；HTTP基线p99=118.604ms，BRPC增量1.713ms；PaiRec CPU throttled period=0.067%，其余adapter/backend均0%，无fallback，分类PAIREC_PURE_BRPC_OBSERVABILITY_OK。失败关闭注入已实现为自动备份/恢复脚本并通过Shell、JSON和diff静态检查；尚缺远端实际执行，因此未标done。",
-      "next_step": "在master执行scripts/test_pairec_source_quota_rerank_fail_closed.sh；脚本自动备份并恢复隔离ConfigMap，要求故障响应code=500、msg=rerank failed、items=[]、rerank trace status=error，恢复后code=200。证据通过后标记done。"
+      "validation_evidence": "2026-08-10: 本地Go race、services测试、Python trace summary unittest 6/6及静态检查通过。ARM64/Kubernetes正向正式验收1000/1000有效，missing=0、invalid=0；E2E p99=120.318ms（门禁122.622ms），rerank p99=0.030ms（门禁1ms）；HTTP基线p99=118.604ms，BRPC增量1.713ms；PaiRec CPU throttled period=0.067%，其余adapter/backend均0%，无fallback，分类PAIREC_PURE_BRPC_OBSERVABILITY_OK。远端故障注入请求cd303256-5a8b-483c-9ddc-a0cf3ebbe11c验证code=500、空items、source_quota_rerank及pipeline trace均为error；原ConfigMap恢复后请求4fc2fee7-5f61-4777-ac58-bbf380a92cec返回code=200、8个向量加末尾2个生成式商品。正向、失败关闭和恢复门禁全部通过。",
+      "next_step": "F20已完成。下一任务转入F19，在native TRT KVC offload/onboard路径传播request_id并实现DataSystem Get/Set请求级精确归因。",
+      "done_date": "2026-08-10"
     }
   ]
 }
