@@ -5,7 +5,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="${REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd -P)}"
 TRTLLM_DIR="${TRTLLM_DIR:-/home/zcx/TensorRT-LLM}"
 RUNTIME_DIR="${RUNTIME_DIR:-/home/zcx/pairec-f19-runtime}"
-JOBS="${JOBS:-$(nproc)}"
+CONTAINER_REPO_DIR="${CONTAINER_REPO_DIR:-/mnt/pairec-src}"
+CONTAINER_TRTLLM_DIR="${CONTAINER_TRTLLM_DIR:-/TensorRT-LLM}"
+detected_jobs="$(nproc)"
+default_jobs="$detected_jobs"
+if (( default_jobs > 32 )); then default_jobs=32; fi
+JOBS="${JOBS:-$default_jobs}"
 BUILD_IMAGE="${BUILD_IMAGE:-}"
 SHOW_HISTORY="${SHOW_HISTORY:-1}"
 APPLY_PATCH="${APPLY_PATCH:-1}"
@@ -36,7 +41,7 @@ if [[ "$SHOW_HISTORY" = 1 ]]; then
   history_found=0
   for history_file in /root/.bash_history "$HOME/.bash_history"; do
     [[ -r "$history_file" ]] || continue
-    if grep -E 'f19-gateway-build|host-driver|cudadevrt|cudart_static|pairec-f19-runtime' \
+    if grep -E 'trtllm-parallel-get-build|f19-gateway-build|host-driver|cudadevrt|cudart_static|pairec-f19-runtime' \
         "$history_file" | tail -40; then
       history_found=1
     fi
@@ -48,6 +53,7 @@ fi
 
 if [[ -z "$BUILD_IMAGE" ]]; then
   candidates=(
+    "zcx-pairec-image:v1.1"
     "pairec-brpc-inference:k8s-arm64-trtllm-multisequence-kvc-ctx224-v1"
     "pairec-brpc-inference:k8s-arm64-trtllm-parallel-get-ctx224-v1"
     "pairec-brpc-inference:k8s-arm64-trtllm-multisequence-ctx224-v3"
@@ -67,25 +73,18 @@ docker image inspect "$BUILD_IMAGE" >/dev/null 2>&1 \
 image_arch="$(docker image inspect "$BUILD_IMAGE" --format '{{.Architecture}}')"
 [[ "$image_arch" = arm64 ]] || die "build image architecture must be arm64, got $image_arch"
 
-cuda_driver="${CUDA_DRIVER_LIBRARY:-}"
-if [[ -z "$cuda_driver" ]]; then
-  while IFS= read -r candidate; do
-    if [[ -f "$candidate" ]]; then
-      cuda_driver="$candidate"
+cuda_driver_dir="${CUDA_DRIVER_DIR:-}"
+if [[ -z "$cuda_driver_dir" ]]; then
+  for candidate in /lib64 /usr/lib64 /usr/lib/aarch64-linux-gnu /usr/local/nvidia/lib64; do
+    if [[ -f "$candidate/libcuda.so.1" ]]; then
+      cuda_driver_dir="$candidate"
       break
     fi
-  done < <(
-    {
-      ldconfig -p 2>/dev/null | awk '/libcuda\.so\.1/{print $NF}'
-      printf '%s\n' \
-        /usr/lib64/libcuda.so.1 \
-        /usr/lib/aarch64-linux-gnu/libcuda.so.1 \
-        /usr/local/nvidia/lib64/libcuda.so.1
-    } | awk '!seen[$0]++'
-  )
+  done
 fi
-[[ -n "$cuda_driver" && -f "$cuda_driver" ]] \
-  || die "host libcuda.so.1 was not found; set CUDA_DRIVER_LIBRARY"
+[[ -n "$cuda_driver_dir" && -d "$cuda_driver_dir" \
+    && -f "$cuda_driver_dir/libcuda.so.1" ]] \
+  || die "host driver directory containing libcuda.so.1 was not found; set CUDA_DRIVER_DIR"
 
 mkdir -p "$RUNTIME_DIR/bin" "$RUNTIME_DIR/lib"
 
@@ -93,10 +92,12 @@ echo "== F19 V2 worker1 build configuration =="
 echo "repo_dir=$REPO_DIR"
 echo "trtllm_dir=$TRTLLM_DIR"
 echo "runtime_dir=$RUNTIME_DIR"
+echo "container_repo_dir=$CONTAINER_REPO_DIR"
+echo "container_trtllm_dir=$CONTAINER_TRTLLM_DIR"
 echo "build_image=$BUILD_IMAGE"
 echo "image_arch=$image_arch"
-echo "cuda_driver=$cuda_driver"
-echo "jobs=$JOBS"
+echo "cuda_driver_dir=$cuda_driver_dir"
+echo "jobs=$JOBS detected_jobs=$detected_jobs"
 echo "apply_patch=$APPLY_PATCH"
 
 docker run --rm \
@@ -105,12 +106,12 @@ docker run --rm \
   --ipc host \
   --entrypoint /bin/bash \
   -e JOBS="$JOBS" \
-  -e REPO_DIR="$REPO_DIR" \
-  -e TRTLLM_DIR="$TRTLLM_DIR" \
-  -v "$REPO_DIR:$REPO_DIR:ro" \
-  -v "$TRTLLM_DIR:$TRTLLM_DIR" \
+  -e REPO_DIR="$CONTAINER_REPO_DIR" \
+  -e TRTLLM_DIR="$CONTAINER_TRTLLM_DIR" \
+  -v "$REPO_DIR:$CONTAINER_REPO_DIR:ro" \
+  -v "$TRTLLM_DIR:$CONTAINER_TRTLLM_DIR" \
   -v "$RUNTIME_DIR:/out" \
-  -v "$cuda_driver:/host-driver/libcuda.so.1:ro" \
+  -v "$cuda_driver_dir:/host-driver:ro" \
   "$BUILD_IMAGE" \
   -lc '
     set -euo pipefail

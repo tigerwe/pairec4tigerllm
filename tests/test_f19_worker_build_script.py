@@ -7,14 +7,27 @@ SCRIPT = ROOT / "scripts" / "build_f19_attribution_runtime_worker1.sh"
 
 
 class F19WorkerBuildScriptTest(unittest.TestCase):
-    def test_build_uses_known_kvc_image_and_gpu_runtime(self):
+    def test_build_uses_historical_image_and_gpu_runtime(self):
         text = SCRIPT.read_text()
+        self.assertIn("zcx-pairec-image:v1.1", text)
         self.assertIn(
             "pairec-brpc-inference:k8s-arm64-trtllm-multisequence-kvc-ctx224-v1",
             text)
         self.assertIn("--gpus all", text)
         self.assertIn("--entrypoint /bin/bash", text)
-        self.assertIn("/host-driver/libcuda.so.1:ro", text)
+        self.assertIn('"$cuda_driver_dir:/host-driver:ro"', text)
+
+    def test_host_paths_use_known_container_mount_points(self):
+        text = SCRIPT.read_text()
+        self.assertIn('CONTAINER_REPO_DIR="${CONTAINER_REPO_DIR:-/mnt/pairec-src}"', text)
+        self.assertIn('CONTAINER_TRTLLM_DIR="${CONTAINER_TRTLLM_DIR:-/TensorRT-LLM}"', text)
+        self.assertIn('-v "$TRTLLM_DIR:$CONTAINER_TRTLLM_DIR"', text)
+        self.assertNotIn('-v "$TRTLLM_DIR:$TRTLLM_DIR"', text)
+
+    def test_default_parallelism_is_capped(self):
+        text = SCRIPT.read_text()
+        self.assertIn("if (( default_jobs > 32 )); then default_jobs=32; fi", text)
+        self.assertIn('JOBS="${JOBS:-$default_jobs}"', text)
 
     def test_build_restores_both_previous_link_requirements(self):
         text = SCRIPT.read_text()

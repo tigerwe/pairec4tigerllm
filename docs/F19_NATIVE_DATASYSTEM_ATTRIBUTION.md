@@ -50,11 +50,17 @@ The build script idempotently reapplies the current repository patch by default,
 an already-patched V1/V2 tree also receives managed-source updates such as the V2
 ready marker. Set `APPLY_PATCH=0` only for a deliberate compile-only rerun.
 
+The recovered worker1 command used `zcx-pairec-image:v1.1`, mounted the host source
+at `/TensorRT-LLM`, and mounted `/lib64` at `/host-driver`. The script preserves
+those container paths while keeping the host paths configurable; this avoids trying
+to mount a host directory over a non-directory image path. Its default build
+parallelism is capped at 32 even when worker1 reports hundreds of CPUs. Set `JOBS`
+explicitly only when a different memory/CPU tradeoff has been validated.
+
 The build script runs on worker1 and writes both overlay artifacts to
-`/home/zcx/pairec-f19-runtime/{bin,lib}` only after all build checks pass. It prefers the locally observed
-`pairec-brpc-inference:k8s-arm64-trtllm-multisequence-kvc-ctx224-v1` image because
-that image matches the current DataSystem/KVC runtime. The exact temporary container
-name used by the earlier manual build was not persisted in the project handoff. Override the selected image
+`/home/zcx/pairec-f19-runtime/{bin,lib}` only after all build checks pass. It prefers
+the recovered `zcx-pairec-image:v1.1` build image, then falls back to locally
+observed TRT-LLM inference images. Override the selected image
 only when another local image is known to contain the BRPC, TensorRT-LLM, CUDA and
 DataSystem development files:
 
