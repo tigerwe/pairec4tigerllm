@@ -39,15 +39,16 @@ cd /home/zcx/workspace/pairec4tigerllm
 git pull gitcode pairec-brpc-observability
 
 TRTLLM_DIR=/home/zcx/TensorRT-LLM \
-  bash scripts/apply_trtllm_datasystem_request_attribution_patch.sh
-
-TRTLLM_DIR=/home/zcx/TensorRT-LLM \
   bash scripts/build_f19_attribution_runtime_worker1.sh \
   | tee /tmp/f19-v2-runtime-build.log
 ```
 
 The source tree must already contain the project DataSystem KVC modifications. The
 F19 patch is idempotent, but it is not a replacement for those earlier modifications.
+
+The build script idempotently reapplies the current repository patch by default, so
+an already-patched V1/V2 tree also receives managed-source updates such as the V2
+ready marker. Set `APPLY_PATCH=0` only for a deliberate compile-only rerun.
 
 The build script runs on worker1 and writes both overlay artifacts to
 `/home/zcx/pairec-f19-runtime/{bin,lib}` only after all build checks pass. It prefers the locally observed

@@ -8,6 +8,7 @@ RUNTIME_DIR="${RUNTIME_DIR:-/home/zcx/pairec-f19-runtime}"
 JOBS="${JOBS:-$(nproc)}"
 BUILD_IMAGE="${BUILD_IMAGE:-}"
 SHOW_HISTORY="${SHOW_HISTORY:-1}"
+APPLY_PATCH="${APPLY_PATCH:-1}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -16,8 +17,16 @@ for command in docker find grep install sha256sum strings; do
 done
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
 [[ "$SHOW_HISTORY" = 0 || "$SHOW_HISTORY" = 1 ]] || die "SHOW_HISTORY must be 0 or 1"
+[[ "$APPLY_PATCH" = 0 || "$APPLY_PATCH" = 1 ]] || die "APPLY_PATCH must be 0 or 1"
 test -d "$REPO_DIR/cpp/brpc_gateway" || die "invalid REPO_DIR: $REPO_DIR"
 test -d "$TRTLLM_DIR/cpp/build" || die "TensorRT-LLM build tree is missing: $TRTLLM_DIR"
+
+if [[ "$APPLY_PATCH" = 1 ]]; then
+  echo "== Apply current F19 attribution patch idempotently =="
+  TRTLLM_DIR="$TRTLLM_DIR" \
+    bash "$REPO_DIR/scripts/apply_trtllm_datasystem_request_attribution_patch.sh"
+fi
+
 grep -Fq PAIREC_DATASYSTEM_REQUEST_ATTRIBUTION_ZERO_INTRUSION_DISABLED_V2 \
   "$TRTLLM_DIR/cpp/tensorrt_llm/batch_manager/kvCacheManager.cpp" \
   || die "V2 attribution patch is not present in $TRTLLM_DIR"
@@ -88,6 +97,7 @@ echo "build_image=$BUILD_IMAGE"
 echo "image_arch=$image_arch"
 echo "cuda_driver=$cuda_driver"
 echo "jobs=$JOBS"
+echo "apply_patch=$APPLY_PATCH"
 
 docker run --rm \
   --gpus all \

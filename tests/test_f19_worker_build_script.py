@@ -35,6 +35,9 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
 
     def test_v2_and_token_trace_are_hard_gates(self):
         text = SCRIPT.read_text()
+        self.assertIn('APPLY_PATCH="${APPLY_PATCH:-1}"', text)
+        self.assertIn(
+            'apply_trtllm_datasystem_request_attribution_patch.sh', text)
         self.assertIn("ZERO_INTRUSION_DISABLED_V2", text)
         self.assertIn("datasystem_request_complete", text)
         self.assertIn("'\"version\":2'", text)
