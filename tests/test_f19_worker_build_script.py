@@ -14,6 +14,8 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
             text)
         self.assertIn('GATEWAY_BUILD_IMAGE="${GATEWAY_BUILD_IMAGE:-}"', text)
         self.assertIn(
+            "zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1", text)
+        self.assertIn(
             "pairec-brpc-inference:k8s-arm64-trtllm-multisequence-kvc-ctx224-v1",
             text)
         self.assertIn("Stage 1/2: build TensorRT-LLM shared library", text)

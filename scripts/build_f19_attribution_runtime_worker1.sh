@@ -81,6 +81,7 @@ if [[ -n "$GATEWAY_BUILD_IMAGE" ]]; then
     || die "gateway build image lacks protoc/protobuf/brpc SDK: $GATEWAY_BUILD_IMAGE"
 else
   gateway_candidates=(
+    "zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1"
     "pairec-brpc-inference:k8s-arm64-trtllm-multisequence-kvc-ctx224-v1"
     "pairec-brpc-inference:k8s-arm64-trtllm-parallel-get-ctx224-v1"
     "pairec-brpc-inference:k8s-arm64-trtllm-multisequence-ctx224-v3"

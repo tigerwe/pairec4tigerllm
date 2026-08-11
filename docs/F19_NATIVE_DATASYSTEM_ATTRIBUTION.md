@@ -59,9 +59,11 @@ The script consequently uses two isolated build stages:
 
 1. `TRT_BUILD_IMAGE` defaults to `zcx-pairec-image:v1.1` and builds only
    `libtensorrt_llm.so`.
-2. `GATEWAY_BUILD_IMAGE` is selected from the local BRPC inference images only after
-   an executable preflight confirms `protoc`, protobuf headers and the brpc SDK. It
-   builds only `brpc_inference_server` against the stage-one native library.
+2. `GATEWAY_BUILD_IMAGE` first tries the recovered historical SDK image
+   `zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1`, then local BRPC inference
+   images. Every candidate must pass an executable preflight for `protoc`, protobuf
+   headers and the brpc SDK. The selected image builds only `brpc_inference_server`
+   against the stage-one native library.
 
 Both containers mount the host TensorRT-LLM tree at `/TensorRT-LLM`; the gateway
 container mounts this repository at `/mnt/pairec-src`. The default build parallelism
