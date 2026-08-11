@@ -58,6 +58,24 @@ print(max(candidates)[1])
 ' "$app"
 }
 
+PAIREC_LOG_PID=""
+INFERENCE_LOG_PID=""
+
+stop_log_collector() {
+  local pid="${1:-}"
+  if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+  fi
+}
+
+cleanup() {
+  stop_log_collector "$PAIREC_LOG_PID"
+  stop_log_collector "$INFERENCE_LOG_PID"
+}
+
+trap cleanup EXIT
+
 for value in "$REQUESTS" "$HTTP_BASELINE_REQUESTS"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "request counts must be positive integers"
 done
@@ -285,10 +303,13 @@ PY
 
 wait_for_native_completions() {
   local requests_tsv="$1" since_time="$2" output_log="$3" phase="$4"
+  local refresh_log="${5:-1}"
   local deadline="$((SECONDS + 35))"
   while true; do
-    kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference \
-      --since-time="$since_time" >"$output_log"
+    if [[ "$refresh_log" = 1 ]]; then
+      kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference \
+        --since-time="$since_time" >"$output_log"
+    fi
     if python3 - "$requests_tsv" "$output_log" <<'PY'
 import csv
 import json
@@ -354,17 +375,32 @@ fi
 echo "== Run pure BRPC observed workload: $REQUESTS requests =="
 mkdir -p "$OUTPUT_DIR/brpc"
 since="$(date --iso-8601=seconds)"
+: >"$OUTPUT_DIR/brpc/pairec.log"
+: >"$OUTPUT_DIR/brpc/inference.log"
+kubectl -n "$NAMESPACE" logs "$PAIREC_POD" --since-time="$since" -f \
+  >"$OUTPUT_DIR/brpc/pairec.log" 2>&1 &
+PAIREC_LOG_PID="$!"
+kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference \
+  --since-time="$since" -f >"$OUTPUT_DIR/brpc/inference.log" 2>&1 &
+INFERENCE_LOG_PID="$!"
+sleep 1
+kill -0 "$PAIREC_LOG_PID" >/dev/null 2>&1 \
+  || die "PaiRec log collector exited before workload"
+kill -0 "$INFERENCE_LOG_PID" >/dev/null 2>&1 \
+  || die "inference log collector exited before workload"
+
 run_requests "$PAIREC_URL" "$REQUESTS" "$OUTPUT_DIR/brpc" 1
-kubectl -n "$NAMESPACE" logs "$PAIREC_POD" --since-time="$since" >"$OUTPUT_DIR/brpc/pairec.log"
 
 if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
   wait_for_native_completions \
     "$OUTPUT_DIR/brpc/requests.tsv" "$since" \
-    "$OUTPUT_DIR/brpc/inference.log" workload
-else
-  kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference \
-    --since-time="$since" >"$OUTPUT_DIR/brpc/inference.log"
+    "$OUTPUT_DIR/brpc/inference.log" workload 0
 fi
+sleep 1
+stop_log_collector "$PAIREC_LOG_PID"
+stop_log_collector "$INFERENCE_LOG_PID"
+PAIREC_LOG_PID=""
+INFERENCE_LOG_PID=""
 
 summary_args=(
   --log "$OUTPUT_DIR/brpc/pairec.log"

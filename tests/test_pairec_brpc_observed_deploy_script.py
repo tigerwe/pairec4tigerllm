@@ -88,6 +88,31 @@ class PaiRecBrpcObservedDeployScriptTest(unittest.TestCase):
         self.assertLess(warmup, gate)
         self.assertLess(gate, workload)
 
+    def test_workload_logs_are_streamed_before_requests(self):
+        text = SCRIPT.read_text()
+        workload = text.index('echo "== Run pure BRPC observed workload')
+        pairec_follow = text.index('--since-time="$since" -f', workload)
+        inference_follow = text.index(
+            '--since-time="$since" -f >"$OUTPUT_DIR/brpc/inference.log"',
+            pairec_follow,
+        )
+        requests = text.index(
+            'run_requests "$PAIREC_URL" "$REQUESTS" "$OUTPUT_DIR/brpc" 1',
+            inference_follow,
+        )
+        completion_gate = text.index(
+            '"$OUTPUT_DIR/brpc/inference.log" workload 0', requests
+        )
+        self.assertLess(pairec_follow, requests)
+        self.assertLess(inference_follow, requests)
+        self.assertLess(requests, completion_gate)
+
+    def test_log_collectors_are_cleaned_on_exit(self):
+        text = SCRIPT.read_text()
+        self.assertIn('trap cleanup EXIT', text)
+        self.assertIn('stop_log_collector "$PAIREC_LOG_PID"', text)
+        self.assertIn('stop_log_collector "$INFERENCE_LOG_PID"', text)
+
 
 if __name__ == "__main__":
     unittest.main()
