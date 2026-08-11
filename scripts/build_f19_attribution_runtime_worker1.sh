@@ -57,17 +57,37 @@ fi
 
 trt_image_has_toolchain() {
   local image="$1"
-  docker image inspect "$image" >/dev/null 2>&1 || return 1
-  [[ "$(docker image inspect "$image" --format '{{.Architecture}}')" = arm64 ]] || return 1
-  docker run --rm --entrypoint /bin/bash "$image" -lc '
+  local output
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "TRT candidate rejected: image not found: $image" >&2
+    return 1
+  fi
+  if [[ "$(docker image inspect "$image" --format '{{.Architecture}}')" != arm64 ]]; then
+    echo "TRT candidate rejected: image is not arm64: $image" >&2
+    return 1
+  fi
+  if ! output="$(docker run --rm --entrypoint /bin/bash -e LD_PRELOAD= "$image" -lc '
     set -e
-    command -v cmake >/dev/null
-    command -v c++ >/dev/null
-    cuda_static_dir="$(dirname "$(find /usr/local/cuda -type f -name libcudadevrt.a -print -quit)")"
+    command -v cmake >/dev/null || { echo "missing cmake" >&2; exit 1; }
+    command -v c++ >/dev/null || { echo "missing c++" >&2; exit 1; }
+    cuda_static_dir=""
+    for cuda_root in /usr/local/cuda /usr/local/cuda-*; do
+      [[ -e "$cuda_root" ]] || continue
+      cuda_devrt="$(find -L "$cuda_root" -type f -name libcudadevrt.a -print -quit 2>/dev/null || true)"
+      if [[ -n "$cuda_devrt" ]]; then
+        cuda_static_dir="$(dirname "$cuda_devrt")"
+        break
+      fi
+    done
+    [[ -n "$cuda_static_dir" ]] \
+      || { echo "missing libcudadevrt.a under /usr/local/cuda*" >&2; exit 1; }
     test -f "$cuda_static_dir/libcudadevrt.a"
-    test -f "$cuda_static_dir/libcudart_static.a"
-    { test ! -e /TensorRT-LLM || test -d /TensorRT-LLM; }
-  ' >/dev/null 2>&1
+    test -f "$cuda_static_dir/libcudart_static.a" \
+      || { echo "missing libcudart_static.a beside $cuda_static_dir/libcudadevrt.a" >&2; exit 1; }
+  ' 2>&1)"; then
+    echo "TRT candidate rejected: $image: $output" >&2
+    return 1
+  fi
 }
 
 if [[ -n "$TRT_BUILD_IMAGE" ]]; then
@@ -91,16 +111,24 @@ trt_image_arch="$(docker image inspect "$TRT_BUILD_IMAGE" --format '{{.Architect
 
 gateway_image_has_sdk() {
   local image="$1"
-  docker image inspect "$image" >/dev/null 2>&1 || return 1
-  [[ "$(docker image inspect "$image" --format '{{.Architecture}}')" = arm64 ]] || return 1
-  docker run --rm --entrypoint /bin/bash "$image" -lc '
+  local output
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "gateway candidate rejected: image not found: $image" >&2
+    return 1
+  fi
+  if [[ "$(docker image inspect "$image" --format '{{.Architecture}}')" != arm64 ]]; then
+    echo "gateway candidate rejected: image is not arm64: $image" >&2
+    return 1
+  fi
+  if ! output="$(docker run --rm --entrypoint /bin/bash -e LD_PRELOAD= "$image" -lc '
     set -e
-    command -v cmake >/dev/null
-    command -v c++ >/dev/null
-    { test -f /usr/local/include/brpc/server.h || test -f /usr/include/brpc/server.h; }
+    command -v cmake >/dev/null || { echo "missing cmake" >&2; exit 1; }
+    command -v c++ >/dev/null || { echo "missing c++" >&2; exit 1; }
+    { test -f /usr/local/include/brpc/server.h || test -f /usr/include/brpc/server.h; } \
+      || { echo "missing brpc/server.h" >&2; exit 1; }
     { test -f /usr/local/include/google/protobuf/message.h \
-      || test -f /usr/include/google/protobuf/message.h; }
-    { test ! -e /TensorRT-LLM || test -d /TensorRT-LLM; }
+      || test -f /usr/include/google/protobuf/message.h; } \
+      || { echo "missing protobuf/message.h" >&2; exit 1; }
     brpc_library_found=0
     for root in /usr/local/lib /usr/local/lib64 /usr/lib64 /usr/lib; do
       test -d "$root" || continue
@@ -111,8 +139,11 @@ gateway_image_has_sdk() {
         break
       fi
     done
-    test "$brpc_library_found" = 1
-  ' >/dev/null 2>&1
+    test "$brpc_library_found" = 1 || { echo "missing libbrpc" >&2; exit 1; }
+  ' 2>&1)"; then
+    echo "gateway candidate rejected: $image: $output" >&2
+    return 1
+  fi
 }
 
 if [[ -n "$GATEWAY_BUILD_IMAGE" ]]; then
@@ -195,8 +226,16 @@ docker run --rm \
       }
     done
 
-    cuda_static_dir="$(dirname "$(find /usr/local/cuda -type f -name libcudadevrt.a -print -quit)")"
-    [[ -f "$cuda_static_dir/libcudadevrt.a" ]] || {
+    cuda_static_dir=""
+    for cuda_root in /usr/local/cuda /usr/local/cuda-*; do
+      [[ -e "$cuda_root" ]] || continue
+      cuda_devrt="$(find -L "$cuda_root" -type f -name libcudadevrt.a -print -quit 2>/dev/null || true)"
+      if [[ -n "$cuda_devrt" ]]; then
+        cuda_static_dir="$(dirname "$cuda_devrt")"
+        break
+      fi
+    done
+    [[ -n "$cuda_static_dir" && -f "$cuda_static_dir/libcudadevrt.a" ]] || {
       echo "ERROR: libcudadevrt.a not found in TRT build image" >&2
       exit 1
     }

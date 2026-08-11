@@ -30,6 +30,9 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
     def test_trt_image_is_preflighted_for_static_cuda_runtime(self):
         text = SCRIPT.read_text()
         self.assertIn("trt_image_has_toolchain()", text)
+        self.assertIn('find -L "$cuda_root"', text)
+        self.assertIn("TRT candidate rejected:", text)
+        self.assertIn("-e LD_PRELOAD=", text)
         self.assertIn("libcudadevrt.a", text)
         self.assertIn("libcudart_static.a", text)
         self.assertIn(
