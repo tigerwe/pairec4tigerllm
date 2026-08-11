@@ -33,6 +33,31 @@ DSSM_MODEL_DIR="${DSSM_MODEL_DIR:-/home/zcx/workspace/pairec4tigerllm/dssm_out}"
 DEEPFM_MODEL_DIR="${DEEPFM_MODEL_DIR:-/home/zcx/workspace/pairec4tigerllm/deepfm_out}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+ready_pod_for_app() {
+  local app="$1"
+  kubectl -n "$NAMESPACE" get pod -l "app=$app" -o json | python3 -c '
+import json
+import sys
+
+app = sys.argv[1]
+pods = json.load(sys.stdin).get("items", [])
+candidates = []
+for pod in pods:
+    metadata = pod.get("metadata", {})
+    status = pod.get("status", {})
+    containers = status.get("containerStatuses", [])
+    if metadata.get("deletionTimestamp") or status.get("phase") != "Running":
+        continue
+    if not containers or not all(container.get("ready") for container in containers):
+        continue
+    candidates.append((metadata.get("creationTimestamp", ""), metadata.get("name", "")))
+if not candidates:
+    raise SystemExit(f"no Running/Ready Pod found for app={app}")
+print(max(candidates)[1])
+' "$app"
+}
+
 for value in "$REQUESTS" "$HTTP_BASELINE_REQUESTS"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "request counts must be positive integers"
 done
@@ -112,7 +137,7 @@ RANK_IP="$(kubectl -n "$NAMESPACE" get service deepfm-rank-brpc -o jsonpath='{.s
 echo "== Verify adapter contracts =="
 for specification in "vector-recall-brpc:vector:18201" "deepfm-rank-brpc:rank:18211"; do
   IFS=: read -r deployment service port <<<"$specification"
-  pod="$(kubectl -n "$NAMESPACE" get pod -l "app=$deployment" -o jsonpath='{.items[0].metadata.name}')"
+  pod="$(ready_pod_for_app "$deployment")"
   kubectl -n "$NAMESPACE" exec "$pod" -c adapter -- \
     /opt/pairec-brpc/bin/brpc_pipeline_client \
       "--server=127.0.0.1:${port}" "--service=${service}" --timeout_ms=1000
@@ -171,7 +196,7 @@ kubectl -n "$NAMESPACE" set env deployment/pairec-brpc-observed \
 kubectl -n "$NAMESPACE" rollout restart deployment/pairec-brpc-observed
 kubectl -n "$NAMESPACE" rollout status deployment/pairec-brpc-observed --timeout=5m
 
-PAIREC_POD="$(kubectl -n "$NAMESPACE" get pod -l app=pairec-brpc-observed -o jsonpath='{.items[0].metadata.name}')"
+PAIREC_POD="$(ready_pod_for_app pairec-brpc-observed)"
 PAIREC_IP="$(kubectl -n "$NAMESPACE" get service pairec-brpc-observed -o jsonpath='{.spec.clusterIP}')"
 [[ -n "$PAIREC_IP" && "$PAIREC_IP" != "None" ]] \
   || die "service/pairec-brpc-observed has no ClusterIP"
@@ -206,7 +231,7 @@ echo "PAIREC_BRPC_OBSERVED_SERVICE_READY endpoint=${PAIREC_IP}:18080 addresses=$
 collect_cpu_stat() {
   local deployment="$1" container="$2" output="$3"
   local pod
-  pod="$(kubectl -n "$NAMESPACE" get pod -l "app=$deployment" -o jsonpath='{.items[0].metadata.name}')"
+  pod="$(ready_pod_for_app "$deployment")"
   kubectl -n "$NAMESPACE" exec "$pod" -c "$container" -- /bin/sh -ec \
     'if test -f /sys/fs/cgroup/cpu.stat; then cat /sys/fs/cgroup/cpu.stat; else cat /sys/fs/cgroup/cpu/cpu.stat; fi' \
     >"$output"
@@ -265,14 +290,16 @@ fi
 
 echo "== Run pure BRPC observed workload: $REQUESTS requests =="
 mkdir -p "$OUTPUT_DIR/brpc"
-INFERENCE_POD="$(kubectl -n "$NAMESPACE" get pod -l "app=$INFERENCE_SERVICE" \
-  -o jsonpath='{.items[0].metadata.name}')"
+INFERENCE_POD="$(ready_pod_for_app "$INFERENCE_SERVICE")"
 if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
   kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference \
     >"$OUTPUT_DIR/brpc/inference-startup.log"
-  grep -q '"event":"datasystem_attribution_ready"' \
-    "$OUTPUT_DIR/brpc/inference-startup.log" \
-    || die "native DataSystem attribution capability marker is missing"
+  if ! grep -q '"event":"datasystem_attribution_ready"' \
+      "$OUTPUT_DIR/brpc/inference-startup.log"; then
+    kubectl -n "$NAMESPACE" get pod -l "app=$INFERENCE_SERVICE" -o wide || true
+    tail -200 "$OUTPUT_DIR/brpc/inference-startup.log" >&2 || true
+    die "native DataSystem attribution capability marker is missing from ready pod $INFERENCE_POD"
+  fi
 fi
 since="$(date --iso-8601=seconds)"
 run_requests "$PAIREC_URL" "$REQUESTS" "$OUTPUT_DIR/brpc" 1
@@ -378,7 +405,7 @@ assert ratio <= 5.0, f"CPU throttled period gate failed: {ratio:.3f}%"
 PY
 done
 for deployment in pairec-brpc-observed vector-recall-brpc deepfm-rank-brpc; do
-  pod="$(kubectl -n "$NAMESPACE" get pod -l "app=$deployment" -o jsonpath='{.items[0].metadata.name}')"
+  pod="$(ready_pod_for_app "$deployment")"
   restarts="$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[*].restartCount}')"
   [[ "$restarts" =~ ^(0[[:space:]]*)+$ ]] || die "$deployment restart count is not zero: $restarts"
   if kubectl -n "$NAMESPACE" get events \

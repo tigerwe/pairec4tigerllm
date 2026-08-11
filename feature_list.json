@@ -264,8 +264,8 @@
         "tests/test_pairec_brpc_observed_deploy_script.py"
       ],
       "validation_method": "在真实 native TRT KVC 工作负载中打开 REQUIRE_DATASYSTEM_ATTRIBUTION=1；1000 请求均必须 attribution_complete=true，Get/Set 只能来自相同 request_id 的原生事件，不允许从时间窗口或聚合日志推断；业务、trace闭合、资源和无fallback门禁继续通过。",
-      "validation_evidence": "本地：补丁对全新TensorRT-LLM源码副本连续应用两次成功；独立C++17 tracker smoke确认两个native lifecycle聚合同一UUID的Get/Set并在pending超时时输出incomplete；pipeline/patcher/overlay/真实I/O门禁专项17项单测通过，动态正反夹具确认旧窗口3/2不能掩盖native completion 0/0。远端worker1：K8s Pod以F19 gateway作为PID1，loader实际路径SHA256匹配F19 native library，ldd无缺库，严格Health通过。首个新鲜缓存UUID得到唯一0/0 completion并正确闭合。随后连续3轮reset + prime195 + PaiRec replay全部PASS：旧trace和唯一同UUID native completion每轮均为3 Set + 2 Get，complete=true，失败/pending/unknown为0，Pod无重启/crash；E2E均值256.487ms、BRPC差值4ms、KVC均值33.714ms。",
-      "next_step": "拉取验收目录顺序修复后重跑1000请求严格UUID join稳定性验收；通过后在相同缓存形态下完成至少三组交替disabled/enabled A/B，验证平均开销<=0.1ms、p99<=0.5ms、吞吐损失<=1%，再决定F19是否done。"
+      "validation_evidence": "本地：补丁对全新TensorRT-LLM源码副本连续应用两次成功；独立C++17 tracker smoke确认两个native lifecycle聚合同一UUID的Get/Set并在pending超时时输出incomplete；pipeline/patcher/overlay/真实I/O/Pod选择专项21项单测通过，动态正反夹具确认旧窗口3/2不能掩盖native completion 0/0，且多Pod并存时只选择最新Running/Ready Pod。远端worker1：K8s Pod以F19 gateway作为PID1，loader实际路径SHA256匹配F19 native library，ldd无缺库，严格Health通过。首个新鲜缓存UUID得到唯一0/0 completion并正确闭合。随后连续3轮reset + prime195 + PaiRec replay全部PASS：旧trace和唯一同UUID native completion每轮均为3 Set + 2 Get，complete=true，失败/pending/unknown为0，Pod无重启/crash；E2E均值256.487ms、BRPC差值4ms、KVC均值33.714ms。",
+      "next_step": "拉取最新Running/Ready Pod确定性选择修复后重跑1000请求严格UUID join稳定性验收；通过后在相同缓存形态下完成至少三组交替disabled/enabled A/B，验证平均开销<=0.1ms、p99<=0.5ms、吞吐损失<=1%，再决定F19是否done。"
     },
     {
       "id": "F20",
