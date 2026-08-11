@@ -23,11 +23,13 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: bash scripts/deploy_f19_datasystem_attribution_overlay.sh [apply|verify|rollback]
+Usage: bash scripts/deploy_f19_datasystem_attribution_overlay.sh [apply|verify|smoke|rollback]
 
 apply     Mount the worker1 F19 runtime, verify it with attribution disabled,
           enable strict attribution, and run one exact request smoke by default.
 verify    Verify the currently running Pod without changing the Deployment.
+smoke     Verify the current strict Pod, run one exact request, and require the
+          native ready marker and request completion event.
 rollback  Roll the Deployment back one revision and wait for it to become ready.
 
 Important environment overrides:
@@ -77,6 +79,26 @@ health_check() {
   grep -q 'health ok' <<<"$output" || die "BRPC Health did not succeed"
 }
 
+require_attribution_marker() {
+  local pod
+  pod="$(current_pod)"
+  kubectl -n "$NAMESPACE" logs "$pod" -c "$CONTAINER" \
+    | grep -F '"event":"datasystem_attribution_ready"' \
+    || die "native DataSystem attribution marker is missing after a tracked request"
+  echo "F19_DATASYSTEM_ATTRIBUTION_MARKER_OK pod=$pod"
+}
+
+run_exact_attribution_smoke() {
+  echo "== Run one exact request-id attribution smoke =="
+  NAMESPACE="$NAMESPACE" \
+  PAIREC_TARGET="$PAIREC_TARGET" \
+  BRPC_TARGET="deployment/$DEPLOYMENT" \
+  REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION=1 \
+    bash scripts/trace_single_brpc_datasystem_request.sh
+  require_attribution_marker
+  echo "F19_DATASYSTEM_ATTRIBUTION_SMOKE_OK"
+}
+
 verify_runtime() {
   local require_attribution="$1"
   local pod process_path hashes ldd_output gateway_hash trtllm_hash loaded_trtllm_hash
@@ -116,12 +138,6 @@ verify_runtime() {
     <<<"$ldd_output" || die "gateway did not load the F19 TensorRT-LLM overlay"
 
   health_check "$pod"
-
-  if [[ "$require_attribution" == 1 ]]; then
-    kubectl -n "$NAMESPACE" logs "$pod" -c "$CONTAINER" \
-      | grep -F '"event":"datasystem_attribution_ready"' \
-      || die "native DataSystem attribution startup marker is missing"
-  fi
 
   echo "F19_RUNTIME_VERIFY_OK attribution_required=$require_attribution pod=$pod"
 }
@@ -206,12 +222,9 @@ PY
   verify_runtime 1
 
   if [[ "$RUN_EXACT_SMOKE" == 1 ]]; then
-    echo "== Run one exact request-id attribution smoke =="
-    NAMESPACE="$NAMESPACE" \
-    PAIREC_TARGET="$PAIREC_TARGET" \
-    BRPC_TARGET="deployment/$DEPLOYMENT" \
-    REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION=1 \
-      bash scripts/trace_single_brpc_datasystem_request.sh
+    run_exact_attribution_smoke
+  else
+    echo "note=attribution marker is deferred until the first tracked Recommend"
   fi
 
   kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o yaml \
@@ -235,6 +248,13 @@ case "$ACTION" in
       require_command "$command"
     done
     verify_runtime 1
+    ;;
+  smoke)
+    for command in kubectl python3 curl sha256sum awk grep; do
+      require_command "$command"
+    done
+    verify_runtime 1
+    run_exact_attribution_smoke
     ;;
   rollback)
     require_command kubectl

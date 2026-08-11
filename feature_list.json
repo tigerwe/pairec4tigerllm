@@ -260,8 +260,8 @@
         "tests/test_f19_overlay_script.py"
       ],
       "validation_method": "在真实 native TRT KVC 工作负载中打开 REQUIRE_DATASYSTEM_ATTRIBUTION=1；1000 请求均必须 attribution_complete=true，Get/Set 只能来自相同 request_id 的原生事件，不允许从时间窗口或聚合日志推断；业务、trace闭合、资源和无fallback门禁继续通过。",
-      "validation_evidence": "本地：补丁对全新TensorRT-LLM源码副本连续应用两次成功；独立C++17 tracker smoke确认两个native lifecycle聚合同一UUID的Get/Set并在pending超时时输出incomplete；pipeline summary 8项单测通过。远端worker1：历史DataSystem/parallel-Get源码树成功应用兼容补丁；ARM64 libtensorrt_llm.so完成链接且包含datasystem_request_complete，F19 brpc_inference_server完成链接且包含严格Ready与completion-pending标识，两个overlay已写入/home/zcx/pairec-f19-runtime。F18正式1000请求仍是改造前基线attribution_complete=0/1000。",
-      "next_step": "在master运行scripts/deploy_f19_datasystem_attribution_overlay.sh apply，自动完成overlay备份、disabled依赖/Health基线、strict Ready启用和单请求精确归因smoke；通过后跑3/1000请求strict gate与三组交替disabled/enabled开销A/B。"
+      "validation_evidence": "本地：补丁对全新TensorRT-LLM源码副本连续应用两次成功；独立C++17 tracker smoke确认两个native lifecycle聚合同一UUID的Get/Set并在pending超时时输出incomplete；pipeline/patcher/overlay专项12项单测通过。远端worker1：历史DataSystem/parallel-Get源码树成功应用兼容补丁；ARM64 libtensorrt_llm.so完成链接且包含datasystem_request_complete，F19 brpc_inference_server完成链接且包含严格Ready与completion-pending标识。K8s Pod已以新gateway作为PID1，loader实际路径SHA256匹配F19 native library，ldd无缺库；disabled/enabled rollout与严格Health均通过。F18正式1000请求仍是改造前基线attribution_complete=0/1000。",
+      "next_step": "在当前严格Pod运行scripts/deploy_f19_datasystem_attribution_overlay.sh smoke，验证首个Recommend触发ready marker和同UUID completion event；通过后跑3/1000请求strict gate与三组交替disabled/enabled开销A/B。"
     },
     {
       "id": "F20",

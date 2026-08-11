@@ -72,9 +72,12 @@ bash scripts/deploy_f19_datasystem_attribution_overlay.sh apply
 The script backs up the current Deployment, first rolls out with attribution
 disabled to verify the executable, hashes, dynamic libraries and Health endpoint,
 then enables strict attribution and runs one exact request-id smoke. It is
-idempotent. Use `verify` for a read-only recheck and `rollback` to undo one
-Deployment revision. Set `RUN_EXACT_SMOKE=0` only when deployment validation must
-be separated from the business request.
+idempotent. Use `verify` for a read-only recheck, `smoke` to continue from an
+already enabled strict Pod without another rollout, and `rollback` to undo one
+Deployment revision. The native ready marker is emitted when the first tracked
+Recommend constructs the attribution tracker, not during process startup or Health.
+Set `RUN_EXACT_SMOKE=0` only when deployment validation must be separated from the
+business request.
 
 ## Validation
 

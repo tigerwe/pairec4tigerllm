@@ -65,6 +65,13 @@ class F19OverlayScriptTest(unittest.TestCase):
             )
             self.assertEqual("File", trtllm_volume["hostPath"]["type"])
 
+    def test_ready_marker_is_checked_after_exact_smoke(self):
+        text = SCRIPT.read_text()
+        smoke_function = text.index("run_exact_attribution_smoke()")
+        marker_call = text.index("require_attribution_marker", smoke_function)
+        request_call = text.index("trace_single_brpc_datasystem_request.sh", smoke_function)
+        self.assertLess(request_call, marker_call)
+
 
 if __name__ == "__main__":
     unittest.main()
