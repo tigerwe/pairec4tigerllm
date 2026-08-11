@@ -9,6 +9,37 @@ The native TensorRT-LLM process emits one later completion event for each PaiRec
 {"event":"datasystem_request_complete","request_id":"<uuid>","get_count":2,"get_us":12000,"set_count":3,"set_us":19000,"get_failed_count":0,"set_failed_count":0,"pending_count":0,"unknown_count":0,"attribution_complete":true}
 ```
 
+The same event now carries the V3 native Executor phase breakdown:
+
+```text
+executor_queue_us
+add_sequence_us
+prefill_gap_us
+add_token_us
+decode_gap_us
+finalization_gap_us
+remove_sequence_us
+native_lifecycle_us
+native_accounted_us
+native_closure_error_us
+```
+
+`prefill_gap_us` is the interval from KV sequence allocation to the first generation
+`addToken`; `decode_gap_us` is the sum of intervals between later `addToken` calls;
+`finalization_gap_us` is the interval from the final KV update to sequence removal.
+These gaps include scheduler and GPU execution between KV-manager calls. The detailed
+`attribution_lookup_us`, `sequence_lookup_us`, and `kv_update_us` fields are subsets of
+`add_token_us` and must not be added to the lifecycle total. `phase_record_us` reports
+the tracker bookkeeping cost; it is already present in a following gap and is also not
+an additive phase.
+
+The gateway emits one `trt_executor_request_complete` event per Executor sample after
+the measured runner interval has ended. It breaks runner time into request construction,
+the enqueue call, waiting for the final response, and response extraction. Logging is
+therefore outside the measured interval. Gateway phase clocks and this event are enabled
+only with `TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION=1`; the disabled path does not collect
+these timings.
+
 The correlation path is exact:
 
 ```text
@@ -47,8 +78,8 @@ The source tree must already contain the project DataSystem KVC modifications. T
 F19 patch is idempotent, but it is not a replacement for those earlier modifications.
 
 The build script idempotently reapplies the current repository patch by default, so
-an already-patched V1/V2 tree also receives managed-source updates such as the V2
-ready marker. Set `APPLY_PATCH=0` only for a deliberate compile-only rerun.
+an already-patched V1/V2 tree also receives managed-source updates such as the V3
+phase timing marker. Set `APPLY_PATCH=0` only for a deliberate compile-only rerun.
 
 The recovered worker1 history contains both `zcx-pairec-image:v1.1` exploration and
 the successful `zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1` build container.
@@ -88,8 +119,8 @@ TRTLLM_DIR=/home/zcx/TensorRT-LLM \
 The script reproduces the two requirements discovered during the manual native
 build: it mounts the worker1 driver directory at `/host-driver`, and adds the CUDA
 directory containing `libcudadevrt.a` and `libcudart_static.a` to `LIBRARY_PATH`.
-It rejects unresolved gateway libraries, missing V2 attribution markers and missing
-output-token trace fields before replacing the overlay. Success ends with
+It rejects unresolved gateway libraries, missing V2 attribution/V3 timing markers and
+missing output-token or Executor-phase trace fields before replacing the overlay. Success ends with
 `F19_ATTRIBUTION_RUNTIME_BUILD_OK`.
 
 The full image rebuild remains available as a slower fallback when a hostPath overlay
@@ -164,6 +195,22 @@ BRPC_TARGET=deployment/inference-brpc-trtllm \
 REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION=1 \
   bash scripts/trace_single_brpc_datasystem_request.sh
 ```
+
+The output prints both closure layers. Diagnose the regression from this request before
+running another enabled/disabled benchmark:
+
+1. A large `request_setup_us` or `enqueue_call_us` points to the gateway/Executor API.
+2. A large `executor_queue_us` points to scheduler admission or existing work.
+3. A large `prefill_gap_us` points to context execution after KV allocation.
+4. A large `decode_gap_us` points to token generation/model iterations.
+5. A large `add_token_us`, `finalization_gap_us`, or `remove_sequence_us` points to KV
+   management, DataSystem copy/offload, or request teardown.
+6. `runner_minus_native_us` in the single-request output isolates gateway work before
+   native admission and after native sequence removal. The aggregate summary reports
+   the same value as `runner_minus_native_ms` after converting microseconds to milliseconds.
+
+The strict 1000-request summary emits p50/p95/p99 for all of these fields and fails if
+the native phase event is absent, incomplete, duplicated, or cannot close within 100us.
 
 That fresh-cache smoke may correctly report `Get=0/Set=0`; it proves identity and
 lifecycle closure, but not real DataSystem I/O. To reproduce the previously stable

@@ -94,7 +94,10 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
             'apply_trtllm_datasystem_request_attribution_patch.sh', text)
         self.assertIn("ZERO_INTRUSION_DISABLED_V2", text)
         self.assertIn("datasystem_request_complete", text)
-        self.assertIn('\\"version\\":2', text)
+        self.assertIn('\\"version\\":3', text)
+        self.assertIn("PAIREC_TRT_EXECUTOR_PHASE_TIMING_V3", text)
+        self.assertIn("phase_timing_complete", text)
+        self.assertIn("trt_executor_request_complete", text)
         self.assertIn("output_token_count", text)
         self.assertIn("runner_ms_per_output_token", text)
 

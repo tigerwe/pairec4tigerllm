@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -119,6 +120,41 @@ struct Candidate {
   int item_id = 0;
   std::vector<int> semantic_id;
 };
+
+struct ExecutorPhaseTiming {
+  int64_t request_setup_us = 0;
+  int64_t enqueue_call_us = 0;
+  int64_t await_final_us = 0;
+  int64_t response_extract_us = 0;
+};
+
+std::string EscapeJsonString(const std::string& value) {
+  std::ostringstream escaped;
+  for (unsigned char ch : value) {
+    switch (ch) {
+      case '\\':
+        escaped << "\\\\";
+        break;
+      case '"':
+        escaped << "\\\"";
+        break;
+      case '\n':
+        escaped << "\\n";
+        break;
+      case '\r':
+        escaped << "\\r";
+        break;
+      case '\t':
+        escaped << "\\t";
+        break;
+      default:
+        if (ch >= 0x20) {
+          escaped << static_cast<char>(ch);
+        }
+    }
+  }
+  return escaped.str();
+}
 
 bool ConsumeArgValue(const char* arg, const std::string& name, std::string* out) {
   const std::string prefix = "--" + name + "=";
@@ -1039,6 +1075,9 @@ class TrtllmCppBackend final : public InferenceBackend {
     for (int sample = 0; sample < config_.trt_num_samples; ++sample) {
       std::vector<int> output_tokens;
       double runner_ms = 0.0;
+      ExecutorPhaseTiming executor_timing;
+      ExecutorPhaseTiming* executor_timing_ptr =
+          datasystem_lifecycle ? &executor_timing : nullptr;
       std::string error;
       bool executor_enqueued = false;
       if (!RunExecutor(
@@ -1047,6 +1086,7 @@ class TrtllmCppBackend final : public InferenceBackend {
               datasystem_correlation_id,
               &output_tokens,
               &runner_ms,
+              executor_timing_ptr,
               &executor_enqueued,
               &error)) {
         if (datasystem_lifecycle) {
@@ -1058,6 +1098,33 @@ class TrtllmCppBackend final : public InferenceBackend {
         }
         response->set_error(error);
         return;
+      }
+      if (executor_timing_ptr) {
+        const int64_t runner_us =
+            static_cast<int64_t>(std::llround(runner_ms * 1000.0));
+        const int64_t gateway_accounted_us = executor_timing.request_setup_us +
+            executor_timing.enqueue_call_us + executor_timing.await_final_us +
+            executor_timing.response_extract_us;
+        const int64_t gateway_closure_error_us = runner_us >= gateway_accounted_us
+            ? runner_us - gateway_accounted_us
+            : gateway_accounted_us - runner_us;
+        std::cout << "{\"event\":\"trt_executor_request_complete\""
+                  << ",\"request_id\":\""
+                  << EscapeJsonString(request.request_id()) << "\""
+                  << ",\"sample_index\":" << sample
+                  << ",\"runner_us\":" << runner_us
+                  << ",\"request_setup_us\":"
+                  << executor_timing.request_setup_us
+                  << ",\"enqueue_call_us\":"
+                  << executor_timing.enqueue_call_us
+                  << ",\"await_final_us\":"
+                  << executor_timing.await_final_us
+                  << ",\"response_extract_us\":"
+                  << executor_timing.response_extract_us
+                  << ",\"gateway_accounted_us\":" << gateway_accounted_us
+                  << ",\"gateway_closure_error_us\":"
+                  << gateway_closure_error_us
+                  << "}" << std::endl;
       }
       if (datasystem_lifecycle) {
         datasystem_lifecycle->HandOffOne();
@@ -1215,11 +1282,18 @@ class TrtllmCppBackend final : public InferenceBackend {
       std::optional<uint64_t> datasystem_correlation_id,
       std::vector<int>* output_tokens,
       double* elapsed_ms,
+      ExecutorPhaseTiming* phase_timing,
       bool* executor_enqueued,
       std::string* error) {
     namespace texec = tensorrt_llm::executor;
     butil::Timer timer;
     timer.start();
+    const auto request_setup_started = phase_timing
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
+    if (phase_timing) {
+      *phase_timing = ExecutorPhaseTiming{};
+    }
     *executor_enqueued = false;
     try {
       texec::SamplingConfig sampling_config(1);
@@ -1249,9 +1323,29 @@ class TrtllmCppBackend final : public InferenceBackend {
               static_cast<texec::SizeType32>(tokenizer_.pad_id)));
       if (datasystem_correlation_id) {
         executor_request.setClientId(*datasystem_correlation_id);
+        tensorrt_llm::batch_manager::kv_cache_manager::
+            markDataSystemRequestExecutorEnqueued(*datasystem_correlation_id);
       }
+      if (phase_timing) {
+        phase_timing->request_setup_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - request_setup_started)
+                .count();
+      }
+      const auto enqueue_started = phase_timing
+          ? std::chrono::steady_clock::now()
+          : std::chrono::steady_clock::time_point{};
       const auto request_id = executor_->enqueueRequest(executor_request);
+      if (phase_timing) {
+        phase_timing->enqueue_call_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - enqueue_started)
+                .count();
+      }
       *executor_enqueued = true;
+      const auto await_started = phase_timing
+          ? std::chrono::steady_clock::now()
+          : std::chrono::steady_clock::time_point{};
       const auto deadline = std::chrono::steady_clock::now() +
                             std::chrono::milliseconds(config_.trt_request_timeout_ms);
 
@@ -1269,10 +1363,25 @@ class TrtllmCppBackend final : public InferenceBackend {
           }
           const auto& result = response.getResult();
           if (result.isFinal) {
+            const auto response_extract_started = phase_timing
+                ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point{};
+            if (phase_timing) {
+              phase_timing->await_final_us =
+                  std::chrono::duration_cast<std::chrono::microseconds>(
+                      response_extract_started - await_started)
+                      .count();
+            }
             output_tokens->clear();
             if (!result.outputTokenIds.empty()) {
               output_tokens->assign(result.outputTokenIds[0].begin(),
                                     result.outputTokenIds[0].end());
+            }
+            if (phase_timing) {
+              phase_timing->response_extract_us =
+                  std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - response_extract_started)
+                      .count();
             }
             timer.stop();
             *elapsed_ms = timer.m_elapsed();

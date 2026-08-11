@@ -27,6 +27,10 @@ grep -q beginDataSystemOperation \
   "$TRTLLM_DIR/cpp/tensorrt_llm/batch_manager/kvCacheTransferManager.cpp"
 grep -q PAIREC_DATASYSTEM_REQUEST_ATTRIBUTION_ZERO_INTRUSION_DISABLED_V2 \
   "$TRTLLM_DIR/cpp/tensorrt_llm/batch_manager/kvCacheManager.cpp"
+grep -q PAIREC_TRT_EXECUTOR_PHASE_TIMING_V3 \
+  "$TRTLLM_DIR/cpp/tensorrt_llm/batch_manager/kvCacheManager.cpp"
+grep -q phase_timing_complete \
+  "$TRTLLM_DIR/cpp/tensorrt_llm/batch_manager/datasystemRequestTracker.cpp"
 
 echo "TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION_APPLY_OK dir=$TRTLLM_DIR"
 echo "next=cmake --build $TRTLLM_DIR/cpp/build -j\$(nproc)"

@@ -101,6 +101,26 @@ def extract_datasystem_completions(path):
     return completions, duplicates
 
 
+def extract_executor_completions(path):
+    completions = {}
+    if not path:
+        return completions
+    for line in Path(path).read_text(errors="replace").splitlines():
+        if '"event":"trt_executor_request_complete"' not in line:
+            continue
+        start = line.find("{")
+        if start < 0:
+            continue
+        try:
+            event = json.loads(line[start:])
+        except json.JSONDecodeError:
+            continue
+        request_id = event.get("request_id")
+        if request_id:
+            completions.setdefault(request_id, []).append(event)
+    return completions
+
+
 def extract_quota_stats(path):
     fields = (
         "primary_minimum", "primary_input", "secondary_input", "primary_selected",
@@ -212,6 +232,45 @@ def validate(trace, require_datasystem, require_source_rerank=False):
                           "pending_count", "unknown_count"):
                 if isinstance(datasystem.get(field), int) and datasystem[field] != 0:
                     reasons.append(f"datasystem_nonzero:{field}")
+            phase_duration_fields = (
+                "executor_queue_us", "add_sequence_us", "prefill_gap_us",
+                "add_token_us", "attribution_lookup_us", "sequence_lookup_us",
+                "kv_update_us", "phase_record_us", "decode_gap_us", "finalization_gap_us",
+                "remove_sequence_us", "native_lifecycle_us", "native_accounted_us",
+                "native_closure_error_us",
+            )
+            phase_count_fields = (
+                "add_sequence_count", "add_token_count", "remove_sequence_count",
+                "native_lifecycle_count", "phase_unknown_count",
+            )
+            for field in phase_duration_fields + phase_count_fields:
+                if not isinstance(datasystem.get(field), int) or datasystem[field] < 0:
+                    reasons.append(f"datasystem_invalid_phase_field:{field}")
+            if datasystem.get("phase_timing_complete") is not True:
+                reasons.append("datasystem_phase_timing_incomplete")
+            if isinstance(datasystem.get("phase_unknown_count"), int) \
+                    and datasystem["phase_unknown_count"] != 0:
+                reasons.append("datasystem_phase_unknown")
+            if isinstance(datasystem.get("native_closure_error_us"), int) \
+                    and datasystem["native_closure_error_us"] > 100:
+                reasons.append("datasystem_phase_closure_error")
+        executor_events = trace.get("_executor_final") or []
+        if not executor_events:
+            reasons.append("executor_phase_completion_missing")
+        for event in executor_events:
+            for field in (
+                "runner_us", "request_setup_us", "enqueue_call_us",
+                "await_final_us", "response_extract_us", "gateway_accounted_us",
+                "gateway_closure_error_us",
+            ):
+                if not isinstance(event.get(field), int) or event[field] < 0:
+                    reasons.append(f"executor_invalid_phase_field:{field}")
+            if isinstance(event.get("gateway_closure_error_us"), int) \
+                    and event["gateway_closure_error_us"] > 100:
+                reasons.append("executor_phase_closure_error")
+        if datasystem and isinstance(datasystem.get("native_lifecycle_count"), int) \
+                and len(executor_events) != datasystem["native_lifecycle_count"]:
+            reasons.append("executor_native_lifecycle_count_mismatch")
     quota = trace.get("_quota")
     if not quota:
         reasons.append("missing_quota_multi_recall")
@@ -243,6 +302,7 @@ def main():
     traces = extract_traces(args.log)
     datasystem_completions, datasystem_duplicates = extract_datasystem_completions(
         args.datasystem_log)
+    executor_completions = extract_executor_completions(args.datasystem_log)
     quota_stats = extract_quota_stats(args.log)
     requests = read_requests(args.requests_tsv)
     expected_ids = set(requests) if requests else set(traces)
@@ -252,6 +312,7 @@ def main():
     for request_id in sorted(expected_ids & set(traces)):
         traces[request_id]["_quota"] = quota_stats.get(request_id)
         traces[request_id]["_datasystem_final"] = datasystem_completions.get(request_id)
+        traces[request_id]["_executor_final"] = executor_completions.get(request_id, [])
         reasons = validate(traces[request_id], args.require_datasystem_attribution,
                            args.require_source_rerank)
         if request_id in datasystem_duplicates:
@@ -273,6 +334,45 @@ def main():
                         service_values.setdefault(f'{span["name"]}.{name}', []).append(int(value))
                     elif name.endswith("_count") and isinstance(value, (int, float)):
                         service_counts.setdefault(f'{span["name"]}.{name}', []).append(int(value))
+    native_phase_fields = (
+        "executor_queue_us", "add_sequence_us", "prefill_gap_us", "add_token_us",
+        "attribution_lookup_us", "sequence_lookup_us", "kv_update_us", "phase_record_us",
+        "decode_gap_us", "finalization_gap_us", "remove_sequence_us",
+        "native_lifecycle_us", "native_accounted_us", "native_closure_error_us",
+    )
+    native_count_fields = (
+        "add_sequence_count", "add_token_count", "remove_sequence_count",
+        "native_lifecycle_count", "phase_unknown_count",
+    )
+    gateway_phase_fields = (
+        "runner_us", "request_setup_us", "enqueue_call_us", "await_final_us",
+        "response_extract_us", "gateway_accounted_us", "gateway_closure_error_us",
+    )
+    native_phase_values = {
+        field: [int(trace["_datasystem_final"][field]) for trace in valid
+                if trace.get("_datasystem_final") and isinstance(
+                    trace["_datasystem_final"].get(field), int)]
+        for field in native_phase_fields
+    }
+    native_count_values = {
+        field: [int(trace["_datasystem_final"][field]) for trace in valid
+                if trace.get("_datasystem_final") and isinstance(
+                    trace["_datasystem_final"].get(field), int)]
+        for field in native_count_fields
+    }
+    gateway_phase_values = {
+        field: [sum(int(event[field]) for event in trace.get("_executor_final", []))
+                for trace in valid if trace.get("_executor_final")]
+        for field in gateway_phase_fields
+    }
+    runner_minus_native_values = []
+    for trace in valid:
+        native = trace.get("_datasystem_final") or {}
+        executor_events = trace.get("_executor_final") or []
+        if isinstance(native.get("native_lifecycle_us"), int) and executor_events:
+            runner_minus_native_values.append(
+                sum(int(event.get("runner_us", 0)) for event in executor_events)
+                - int(native["native_lifecycle_us"]))
     summary = {
         "classification": "PAIREC_BRPC_PIPELINE_TRACE_OK",
         "expected": args.expected or len(expected_ids),
@@ -305,6 +405,13 @@ def main():
                              for trace in valid if trace.get("_datasystem_final")),
             "set_count": sum(int(trace["_datasystem_final"]["set_count"])
                              for trace in valid if trace.get("_datasystem_final")),
+            "native_phases": {
+                field: metric(values) for field, values in native_phase_values.items()},
+            "native_counts": {
+                field: count_metric(values) for field, values in native_count_values.items()},
+            "gateway_phases": {
+                field: metric(values) for field, values in gateway_phase_values.items()},
+            "runner_minus_native": metric(runner_minus_native_values),
         },
         "quota_multi_recall_count": sum(bool(trace.get("_quota")) for trace in valid),
     }
@@ -340,6 +447,17 @@ def main():
         for name, values in summary["service_counts"].items():
             print(name, values["count"], values["avg"], values["p50"],
                   values["p95"], values["p99"], values["max"])
+    if any(values["count"] for values in summary["datasystem"]["native_phases"].values()):
+        print("native_phase count avg_ms p50_ms p95_ms p99_ms max_ms")
+        for name, values in summary["datasystem"]["native_phases"].items():
+            print(name, values["count"], values["avg_ms"], values["p50_ms"],
+                  values["p95_ms"], values["p99_ms"], values["max_ms"])
+        for name, values in summary["datasystem"]["gateway_phases"].items():
+            print(f"gateway_{name}", values["count"], values["avg_ms"], values["p50_ms"],
+                  values["p95_ms"], values["p99_ms"], values["max_ms"])
+        values = summary["datasystem"]["runner_minus_native"]
+        print("runner_minus_native_ms", values["count"], values["avg_ms"], values["p50_ms"],
+              values["p95_ms"], values["p99_ms"], values["max_ms"])
     print("valid={}/{} missing={} invalid={} datasystem_complete={}".format(
         len(valid), len(expected_ids), len(missing), len(invalid),
         summary["datasystem_complete_count"]))

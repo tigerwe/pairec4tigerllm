@@ -225,11 +225,13 @@ collect_pairec_request_trace() {
 
 summarize() {
   log "Single request summary"
-  python3 - "$CLIENT_JSON" "$RESPONSE_JSON" "$PAIREC_LOG" "$PAIREC_EXTRA_LOG" "$TRT_LOG" "$SUMMARY_JSON" <<'PY' | tee "$SUMMARY_TXT"
+  python3 - "$CLIENT_JSON" "$RESPONSE_JSON" "$PAIREC_LOG" "$PAIREC_EXTRA_LOG" "$TRT_LOG" "$SUMMARY_JSON" \
+    "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" <<'PY' | tee "$SUMMARY_TXT"
 import json
 import sys
 
 client_json, response_json, pairec_log_path, pairec_extra_path, trt_log_path, summary_json = sys.argv[1:7]
+require_exact_attribution = sys.argv[7] == "1"
 
 def read_text(path):
     try:
@@ -300,7 +302,15 @@ trt_set_get_probe_events = [parse_kv_fields(line) for line in trt_set_get_probe_
 ds_events = []
 datasystem_completion = None
 datasystem_completions = []
+executor_completions = []
 for line in trt_log.splitlines():
+    if '"event":"trt_executor_request_complete"' in line:
+        try:
+            candidate = json.loads(line[line.index("{"):])
+        except (ValueError, json.JSONDecodeError):
+            candidate = None
+        if candidate and candidate.get("request_id") == request_id:
+            executor_completions.append(candidate)
     if '"event":"datasystem_request_complete"' in line:
         try:
             candidate = json.loads(line[line.index("{"):])
@@ -340,6 +350,7 @@ summary = {
     "pairec_recommend_trace": recommend_trace,
     "datasystem_request_complete": datasystem_completion,
     "datasystem_request_completion_count": len(datasystem_completions),
+    "trt_executor_request_completions": executor_completions,
 }
 
 with open(summary_json, "w", encoding="utf-8") as handle:
@@ -404,14 +415,40 @@ if recommend_trace:
 else:
     print("PaiRec RecommendTrace stages: not found in captured logs")
 
+print("TRT Executor gateway phases:")
+if executor_completions:
+    for index, event in enumerate(executor_completions, start=1):
+        print(f"  sample[{index}]")
+        for key in (
+            "runner_us", "request_setup_us", "enqueue_call_us", "await_final_us",
+            "response_extract_us", "gateway_accounted_us", "gateway_closure_error_us",
+        ):
+            print(f"    {key}={event.get(key)}")
+else:
+    print("  completion_event=missing")
+
 print("KVC/DataSystem access:")
 if datasystem_completion:
     print("  exact_request_attribution=true")
     print(f"  completion_count={len(datasystem_completions)}")
     for key in ("get_count", "get_us", "set_count", "set_us",
                 "get_failed_count", "set_failed_count", "pending_count",
-                "unknown_count", "attribution_complete", "reason"):
+                "unknown_count", "executor_queue_us", "add_sequence_count",
+                "add_sequence_us", "prefill_gap_us", "add_token_count",
+                "add_token_us", "attribution_lookup_us", "sequence_lookup_us",
+                "kv_update_us", "phase_record_us", "decode_gap_us", "finalization_gap_us",
+                "remove_sequence_count", "remove_sequence_us",
+                "native_lifecycle_count", "native_lifecycle_us",
+                "native_accounted_us", "native_closure_error_us",
+                "phase_unknown_count", "phase_timing_complete",
+                "attribution_complete", "reason"):
         print(f"  {key}={datasystem_completion.get(key)}")
+    if executor_completions and isinstance(datasystem_completion.get("native_lifecycle_us"), int):
+        runner_us = sum(int(event.get("runner_us", 0)) for event in executor_completions)
+        print(
+            "  runner_minus_native_us="
+            f"{runner_us - int(datasystem_completion['native_lifecycle_us'])}"
+        )
 else:
     print("  exact_request_attribution=false")
 print(f"  offload_count={len(offloads)}")
@@ -434,6 +471,20 @@ for index, event in enumerate(onboards, start=1):
 if brpc_events:
     brpc_ms = sum(numeric(event, "latency_ms") for event in brpc_events)
     print(f"derived non_brpc_client_overhead_ms={client.get('client_e2e_ms', 0) - brpc_ms:.3f}")
+
+if require_exact_attribution:
+    assert len(datasystem_completions) == 1, "expected exactly one native completion"
+    assert datasystem_completion.get("attribution_complete") is True, datasystem_completion
+    assert datasystem_completion.get("phase_timing_complete") is True, datasystem_completion
+    assert int(datasystem_completion.get("phase_unknown_count", -1)) == 0, datasystem_completion
+    assert int(datasystem_completion.get("native_closure_error_us", -1)) <= 100, datasystem_completion
+    assert len(executor_completions) == int(
+        datasystem_completion.get("native_lifecycle_count", 0)), (
+            executor_completions, datasystem_completion)
+    assert all(
+        int(event.get("gateway_closure_error_us", 101)) <= 100
+        for event in executor_completions
+    ), executor_completions
 
 print(f"wrote_json={summary_json}")
 PY

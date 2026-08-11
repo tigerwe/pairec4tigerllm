@@ -36,6 +36,9 @@ fi
 grep -Fq PAIREC_DATASYSTEM_REQUEST_ATTRIBUTION_ZERO_INTRUSION_DISABLED_V2 \
   "$TRTLLM_DIR/cpp/tensorrt_llm/batch_manager/kvCacheManager.cpp" \
   || die "V2 attribution patch is not present in $TRTLLM_DIR"
+grep -Fq PAIREC_TRT_EXECUTOR_PHASE_TIMING_V3 \
+  "$TRTLLM_DIR/cpp/tensorrt_llm/batch_manager/kvCacheManager.cpp" \
+  || die "V3 executor phase timing patch is not present in $TRTLLM_DIR"
 
 if [[ "$SHOW_HISTORY" = 1 ]]; then
   echo "== Previous local build-command evidence (diagnostic only) =="
@@ -210,7 +213,8 @@ docker run --rm \
     [[ -f "$trt_library" ]] || { echo "ERROR: missing $trt_library" >&2; exit 1; }
     [[ -f "$plugin_library" ]] || { echo "ERROR: missing $plugin_library" >&2; exit 1; }
     grep -Fq datasystem_request_complete < <(strings "$trt_library")
-    grep -Fq "\"version\":2" < <(strings "$trt_library")
+    grep -Fq "\"version\":3" < <(strings "$trt_library")
+    grep -Fq phase_timing_complete < <(strings "$trt_library")
     install -m 0755 "$trt_library" /out/lib/libtensorrt_llm.so
   '
 
@@ -298,6 +302,7 @@ docker run --rm \
     [[ -x "$gateway" ]] || { echo "ERROR: missing $gateway" >&2; exit 1; }
     grep -Fq output_token_count < <(strings "$gateway")
     grep -Fq runner_ms_per_output_token < <(strings "$gateway")
+    grep -Fq trt_executor_request_complete < <(strings "$gateway")
     if ldd "$gateway" | grep -F "not found"; then
       echo "ERROR: gateway has unresolved runtime dependencies" >&2
       exit 1
@@ -312,7 +317,9 @@ test -f "$staging_dir/lib/libtensorrt_llm.so" \
   || die "staged TensorRT-LLM library is missing"
 grep -Fq output_token_count < <(strings "$staging_dir/bin/brpc_inference_server")
 grep -Fq runner_ms_per_output_token < <(strings "$staging_dir/bin/brpc_inference_server")
+grep -Fq trt_executor_request_complete < <(strings "$staging_dir/bin/brpc_inference_server")
 grep -Fq datasystem_attribution_ready < <(strings "$staging_dir/lib/libtensorrt_llm.so")
+grep -Fq phase_timing_complete < <(strings "$staging_dir/lib/libtensorrt_llm.so")
 
 mkdir -p "$RUNTIME_DIR/bin" "$RUNTIME_DIR/lib"
 install -m 0755 "$staging_dir/bin/brpc_inference_server" \

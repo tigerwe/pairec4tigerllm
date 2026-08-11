@@ -26,6 +26,13 @@ enum class DataSystemOperation
     kSet,
 };
 
+enum class DataSystemRequestPhase
+{
+    kAddSequence,
+    kAddToken,
+    kRemoveSequence,
+};
+
 class DataSystemRequestScope
 {
 public:
@@ -44,6 +51,10 @@ private:
 void registerDataSystemRequest(
     std::uint64_t correlationId, std::string const& requestId, std::uint64_t nativeLifecycleCount);
 void finishDataSystemRequest(std::uint64_t correlationId);
+void markDataSystemRequestExecutorEnqueued(std::uint64_t correlationId);
+void recordDataSystemRequestPhase(std::optional<std::uint64_t> correlationId, DataSystemRequestPhase phase,
+    std::int64_t durationUs, std::int64_t attributionLookupUs = 0, std::int64_t sequenceLookupUs = 0,
+    std::int64_t bodyUs = 0);
 [[nodiscard]] std::uint64_t beginDataSystemOperation(DataSystemOperation operation);
 void finishDataSystemOperation(
     std::uint64_t token, DataSystemOperation operation, std::int64_t durationUs, bool failed);
@@ -89,6 +100,27 @@ struct RequestStats
     std::uint64_t pendingCount{0};
     std::uint64_t unknownCount{0};
     std::uint64_t nativeLifecyclesPending{1};
+    std::optional<Clock::time_point> executorEnqueuedAt;
+    std::optional<Clock::time_point> nativeLifecycleStartedAt;
+    std::optional<Clock::time_point> previousPhaseEndedAt;
+    std::uint64_t currentAddTokenCount{0};
+    std::int64_t executorQueueUs{0};
+    std::int64_t addSequenceUs{0};
+    std::uint64_t addSequenceCount{0};
+    std::int64_t prefillGapUs{0};
+    std::int64_t addTokenUs{0};
+    std::uint64_t addTokenCount{0};
+    std::int64_t attributionLookupUs{0};
+    std::int64_t sequenceLookupUs{0};
+    std::int64_t kvUpdateUs{0};
+    std::int64_t phaseRecordUs{0};
+    std::int64_t decodeGapUs{0};
+    std::int64_t finalizationGapUs{0};
+    std::int64_t removeSequenceUs{0};
+    std::uint64_t removeSequenceCount{0};
+    std::int64_t nativeLifecycleUs{0};
+    std::uint64_t nativeLifecycleCount{0};
+    std::uint64_t phaseUnknownCount{0};
     bool lifecycleFinished{false};
     bool timedOut{false};
 };
@@ -142,6 +174,14 @@ std::string jsonEscape(std::string const& input)
 void emitComplete(std::uint64_t correlationId, RequestStats const& stats)
 {
     bool const complete = !stats.timedOut && stats.pendingCount == 0 && stats.unknownCount == 0;
+    auto const nativeAccountedUs = stats.executorQueueUs + stats.addSequenceUs + stats.prefillGapUs
+        + stats.addTokenUs + stats.decodeGapUs + stats.finalizationGapUs + stats.removeSequenceUs;
+    auto const nativeClosureErrorUs = stats.nativeLifecycleUs >= nativeAccountedUs
+        ? stats.nativeLifecycleUs - nativeAccountedUs
+        : nativeAccountedUs - stats.nativeLifecycleUs;
+    bool const phaseTimingComplete = stats.phaseUnknownCount == 0 && stats.nativeLifecycleCount > 0
+        && stats.nativeLifecycleCount == stats.addSequenceCount
+        && stats.nativeLifecycleCount == stats.removeSequenceCount && nativeClosureErrorUs <= 100;
     std::ostringstream event;
     event << "{\"event\":\"datasystem_request_complete\""
           << ",\"request_id\":\"" << jsonEscape(stats.requestId) << "\""
@@ -154,6 +194,26 @@ void emitComplete(std::uint64_t correlationId, RequestStats const& stats)
           << ",\"set_failed_count\":" << stats.setFailedCount
           << ",\"pending_count\":" << stats.pendingCount
           << ",\"unknown_count\":" << stats.unknownCount
+          << ",\"executor_queue_us\":" << stats.executorQueueUs
+          << ",\"add_sequence_count\":" << stats.addSequenceCount
+          << ",\"add_sequence_us\":" << stats.addSequenceUs
+          << ",\"prefill_gap_us\":" << stats.prefillGapUs
+          << ",\"add_token_count\":" << stats.addTokenCount
+          << ",\"add_token_us\":" << stats.addTokenUs
+          << ",\"attribution_lookup_us\":" << stats.attributionLookupUs
+          << ",\"sequence_lookup_us\":" << stats.sequenceLookupUs
+          << ",\"kv_update_us\":" << stats.kvUpdateUs
+          << ",\"phase_record_us\":" << stats.phaseRecordUs
+          << ",\"decode_gap_us\":" << stats.decodeGapUs
+          << ",\"finalization_gap_us\":" << stats.finalizationGapUs
+          << ",\"remove_sequence_count\":" << stats.removeSequenceCount
+          << ",\"remove_sequence_us\":" << stats.removeSequenceUs
+          << ",\"native_lifecycle_count\":" << stats.nativeLifecycleCount
+          << ",\"native_lifecycle_us\":" << stats.nativeLifecycleUs
+          << ",\"native_accounted_us\":" << nativeAccountedUs
+          << ",\"native_closure_error_us\":" << nativeClosureErrorUs
+          << ",\"phase_unknown_count\":" << stats.phaseUnknownCount
+          << ",\"phase_timing_complete\":" << (phaseTimingComplete ? "true" : "false")
           << ",\"attribution_complete\":" << (complete ? "true" : "false")
           << ",\"reason\":\"" << (stats.timedOut ? "attribution_timeout" : "request_lifecycle_complete")
           << "\"}";
@@ -168,7 +228,7 @@ public:
     {
         if (dataSystemRequestAttributionEnabled())
         {
-            TLLM_LOG_INFO("{\"event\":\"datasystem_attribution_ready\",\"version\":2}");
+            TLLM_LOG_INFO("{\"event\":\"datasystem_attribution_ready\",\"version\":3}");
         }
     }
 
@@ -232,6 +292,124 @@ public:
         {
             emitComplete(correlationId, *completed);
         }
+    }
+
+    void markExecutorEnqueued(std::uint64_t correlationId)
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto it = mRequests.find(correlationId);
+        if (it == mRequests.end())
+        {
+            return;
+        }
+        auto& stats = it->second;
+        stats.executorEnqueuedAt = Clock::now();
+        stats.nativeLifecycleStartedAt.reset();
+        stats.previousPhaseEndedAt.reset();
+        stats.currentAddTokenCount = 0;
+    }
+
+    void recordPhase(std::uint64_t correlationId, DataSystemRequestPhase phase, std::int64_t durationUs,
+        std::int64_t attributionLookupUs, std::int64_t sequenceLookupUs, std::int64_t bodyUs)
+    {
+        auto const recordStartedAt = Clock::now();
+        auto const endedAt = Clock::now();
+        auto const safeDurationUs = std::max<std::int64_t>(durationUs, 0);
+        auto const startedAt = endedAt - std::chrono::microseconds(safeDurationUs);
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto it = mRequests.find(correlationId);
+        if (it == mRequests.end())
+        {
+            return;
+        }
+        auto& stats = it->second;
+        if (phase == DataSystemRequestPhase::kAddSequence)
+        {
+            if (stats.executorEnqueuedAt)
+            {
+                stats.executorQueueUs += std::max<std::int64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(startedAt - *stats.executorEnqueuedAt)
+                        .count(),
+                    0);
+                stats.nativeLifecycleStartedAt = stats.executorEnqueuedAt;
+            }
+            else
+            {
+                stats.nativeLifecycleStartedAt = startedAt;
+                stats.phaseUnknownCount++;
+            }
+            stats.addSequenceUs += safeDurationUs;
+            stats.addSequenceCount++;
+            stats.previousPhaseEndedAt = endedAt;
+            stats.currentAddTokenCount = 0;
+            stats.phaseRecordUs += std::chrono::duration_cast<std::chrono::microseconds>(
+                Clock::now() - recordStartedAt).count();
+            return;
+        }
+        if (phase == DataSystemRequestPhase::kAddToken)
+        {
+            if (stats.previousPhaseEndedAt)
+            {
+                auto const gapUs = std::max<std::int64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(startedAt - *stats.previousPhaseEndedAt)
+                        .count(),
+                    0);
+                if (stats.currentAddTokenCount == 0)
+                {
+                    stats.prefillGapUs += gapUs;
+                }
+                else
+                {
+                    stats.decodeGapUs += gapUs;
+                }
+            }
+            else
+            {
+                stats.phaseUnknownCount++;
+            }
+            stats.addTokenUs += safeDurationUs;
+            stats.addTokenCount++;
+            stats.attributionLookupUs += std::max<std::int64_t>(attributionLookupUs, 0);
+            stats.sequenceLookupUs += std::max<std::int64_t>(sequenceLookupUs, 0);
+            stats.kvUpdateUs += std::max<std::int64_t>(bodyUs, 0);
+            stats.previousPhaseEndedAt = endedAt;
+            stats.currentAddTokenCount++;
+            stats.phaseRecordUs += std::chrono::duration_cast<std::chrono::microseconds>(
+                Clock::now() - recordStartedAt).count();
+            return;
+        }
+
+        if (stats.previousPhaseEndedAt)
+        {
+            stats.finalizationGapUs += std::max<std::int64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(startedAt - *stats.previousPhaseEndedAt)
+                    .count(),
+                0);
+        }
+        else
+        {
+            stats.phaseUnknownCount++;
+        }
+        stats.removeSequenceUs += safeDurationUs;
+        stats.removeSequenceCount++;
+        if (stats.nativeLifecycleStartedAt)
+        {
+            stats.nativeLifecycleUs += std::max<std::int64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(endedAt - *stats.nativeLifecycleStartedAt)
+                    .count(),
+                0);
+            stats.nativeLifecycleCount++;
+        }
+        else
+        {
+            stats.phaseUnknownCount++;
+        }
+        stats.executorEnqueuedAt.reset();
+        stats.nativeLifecycleStartedAt.reset();
+        stats.previousPhaseEndedAt.reset();
+        stats.currentAddTokenCount = 0;
+        stats.phaseRecordUs += std::chrono::duration_cast<std::chrono::microseconds>(
+            Clock::now() - recordStartedAt).count();
     }
 
     std::uint64_t beginOperation()
@@ -395,6 +573,25 @@ void finishDataSystemRequest(std::uint64_t correlationId)
     tracker().finishRequest(correlationId);
 }
 
+void markDataSystemRequestExecutorEnqueued(std::uint64_t correlationId)
+{
+    if (!dataSystemRequestAttributionEnabled())
+    {
+        return;
+    }
+    tracker().markExecutorEnqueued(correlationId);
+}
+
+void recordDataSystemRequestPhase(std::optional<std::uint64_t> correlationId, DataSystemRequestPhase phase,
+    std::int64_t durationUs, std::int64_t attributionLookupUs, std::int64_t sequenceLookupUs, std::int64_t bodyUs)
+{
+    if (!dataSystemRequestAttributionEnabled() || !correlationId)
+    {
+        return;
+    }
+    tracker().recordPhase(*correlationId, phase, durationUs, attributionLookupUs, sequenceLookupUs, bodyUs);
+}
+
 std::uint64_t beginDataSystemOperation(DataSystemOperation)
 {
     if (!dataSystemRequestAttributionEnabled())
@@ -522,6 +719,20 @@ def patch_tree(root: Path) -> None:
         '#include "tensorrt_llm/batch_manager/kvCacheManager.h"\n',
         '#include "tensorrt_llm/batch_manager/kvCacheManager.h"\n'
         '#include "tensorrt_llm/batch_manager/datasystemRequestTracker.h"\n')
+    manager_text = manager.read_text()
+    if "#include <chrono>" not in manager_text:
+        if "#include <algorithm>\n" in manager_text:
+            replace_once(manager, "#include <algorithm>\n", "#include <algorithm>\n#include <chrono>\n")
+        else:
+            replace_once(manager,
+                '#include "tensorrt_llm/batch_manager/datasystemRequestTracker.h"\n',
+                '#include "tensorrt_llm/batch_manager/datasystemRequestTracker.h"\n#include <chrono>\n')
+
+    original_add_token = (
+        "void KVCacheManager::addToken(RequestIdType requestId)\n{\n"
+        "    auto& sequence = getSequence(requestId);\n"
+        "    updateToken(sequence, true);\n"
+        "}\n")
     old_add_token = (
         "void KVCacheManager::addToken(RequestIdType requestId)\n{\n"
         "    std::optional<RequestIdType> clientId;\n"
@@ -531,8 +742,10 @@ def patch_tree(root: Path) -> None:
         "        if (it != mDataSystemClientIds.end()) clientId = it->second;\n"
         "    }\n"
         "    DataSystemRequestScope attributionScope(clientId);\n"
-        "    auto& sequence = getSequence(requestId);\n")
-    new_add_token = (
+        "    auto& sequence = getSequence(requestId);\n"
+        "    updateToken(sequence, true);\n"
+        "}\n")
+    v2_add_token = (
         "void KVCacheManager::addToken(RequestIdType requestId)\n{\n"
         "    // PAIREC_DATASYSTEM_REQUEST_ATTRIBUTION_ZERO_INTRUSION_DISABLED_V2\n"
         "    std::optional<RequestIdType> clientId;\n"
@@ -543,10 +756,90 @@ def patch_tree(root: Path) -> None:
         "        if (it != mDataSystemClientIds.end()) clientId = it->second;\n"
         "    }\n"
         "    DataSystemRequestScope attributionScope(clientId);\n"
-        "    auto& sequence = getSequence(requestId);\n")
+        "    auto& sequence = getSequence(requestId);\n"
+        "    updateToken(sequence, true);\n"
+        "}\n")
+    legacy_v3_add_token = (
+        "void KVCacheManager::addToken(RequestIdType requestId)\n{\n"
+        "    // PAIREC_DATASYSTEM_REQUEST_ATTRIBUTION_ZERO_INTRUSION_DISABLED_V2\n"
+        "    // PAIREC_TRT_EXECUTOR_PHASE_TIMING_V3\n"
+        "    auto const attributionAddTokenStarted = std::chrono::steady_clock::now();\n"
+        "    std::optional<RequestIdType> clientId;\n"
+        "    std::int64_t attributionLookupUs = 0;\n"
+        "    if (dataSystemRequestAttributionEnabled())\n"
+        "    {\n"
+        "        auto const attributionLookupStarted = std::chrono::steady_clock::now();\n"
+        "        {\n"
+        "            std::scoped_lock lock(mDataSystemClientIdsMtx);\n"
+        "            auto const it = mDataSystemClientIds.find(requestId);\n"
+        "            if (it != mDataSystemClientIds.end()) clientId = it->second;\n"
+        "        }\n"
+        "        attributionLookupUs = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "            std::chrono::steady_clock::now() - attributionLookupStarted).count();\n"
+        "    }\n"
+        "    DataSystemRequestScope attributionScope(clientId);\n"
+        "    auto const attributionSequenceLookupStarted = std::chrono::steady_clock::now();\n"
+        "    auto& sequence = getSequence(requestId);\n"
+        "    auto const attributionSequenceLookupUs = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "        std::chrono::steady_clock::now() - attributionSequenceLookupStarted).count();\n"
+        "    auto const attributionKvUpdateStarted = std::chrono::steady_clock::now();\n"
+        "    updateToken(sequence, true);\n"
+        "    auto const attributionKvUpdateUs = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "        std::chrono::steady_clock::now() - attributionKvUpdateStarted).count();\n"
+        "    auto const attributionAddTokenUs = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "        std::chrono::steady_clock::now() - attributionAddTokenStarted).count();\n"
+        "    recordDataSystemRequestPhase(clientId, DataSystemRequestPhase::kAddToken, attributionAddTokenUs,\n"
+        "        attributionLookupUs, attributionSequenceLookupUs, attributionKvUpdateUs);\n"
+        "}\n")
+    new_add_token = (
+        "void KVCacheManager::addToken(RequestIdType requestId)\n{\n"
+        "    // PAIREC_DATASYSTEM_REQUEST_ATTRIBUTION_ZERO_INTRUSION_DISABLED_V2\n"
+        "    // PAIREC_TRT_EXECUTOR_PHASE_TIMING_V3\n"
+        "    auto const attributionEnabled = dataSystemRequestAttributionEnabled();\n"
+        "    auto const attributionAddTokenStarted = attributionEnabled\n"
+        "        ? std::chrono::steady_clock::now()\n"
+        "        : std::chrono::steady_clock::time_point{};\n"
+        "    std::optional<RequestIdType> clientId;\n"
+        "    std::int64_t attributionLookupUs = 0;\n"
+        "    if (attributionEnabled)\n"
+        "    {\n"
+        "        auto const attributionLookupStarted = std::chrono::steady_clock::now();\n"
+        "        {\n"
+        "            std::scoped_lock lock(mDataSystemClientIdsMtx);\n"
+        "            auto const it = mDataSystemClientIds.find(requestId);\n"
+        "            if (it != mDataSystemClientIds.end()) clientId = it->second;\n"
+        "        }\n"
+        "        attributionLookupUs = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "            std::chrono::steady_clock::now() - attributionLookupStarted).count();\n"
+        "    }\n"
+        "    DataSystemRequestScope attributionScope(clientId);\n"
+        "    auto const attributionSequenceLookupStarted = attributionEnabled\n"
+        "        ? std::chrono::steady_clock::now()\n"
+        "        : std::chrono::steady_clock::time_point{};\n"
+        "    auto& sequence = getSequence(requestId);\n"
+        "    auto const attributionSequenceLookupUs = attributionEnabled\n"
+        "        ? std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "              std::chrono::steady_clock::now() - attributionSequenceLookupStarted).count()\n"
+        "        : 0;\n"
+        "    auto const attributionKvUpdateStarted = attributionEnabled\n"
+        "        ? std::chrono::steady_clock::now()\n"
+        "        : std::chrono::steady_clock::time_point{};\n"
+        "    updateToken(sequence, true);\n"
+        "    if (attributionEnabled)\n"
+        "    {\n"
+        "        auto const attributionKvUpdateUs = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "            std::chrono::steady_clock::now() - attributionKvUpdateStarted).count();\n"
+        "        auto const attributionAddTokenUs = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "            std::chrono::steady_clock::now() - attributionAddTokenStarted).count();\n"
+        "        recordDataSystemRequestPhase(clientId, DataSystemRequestPhase::kAddToken, attributionAddTokenUs,\n"
+        "            attributionLookupUs, attributionSequenceLookupUs, attributionKvUpdateUs);\n"
+        "    }\n"
+        "}\n")
     replace_supported(manager, (
-        "void KVCacheManager::addToken(RequestIdType requestId)\n{\n    auto& sequence = getSequence(requestId);\n",
+        original_add_token,
         old_add_token,
+        v2_add_token,
+        legacy_v3_add_token,
     ), new_add_token)
 
     old_add_sequence = (
@@ -554,9 +847,29 @@ def patch_tree(root: Path) -> None:
         "    auto const clientId = llmRequest ? llmRequest->mClientId : std::optional<RequestIdType>{};\n"
         "    DataSystemRequestScope attributionScope(clientId);\n"
         "    // Need to add the bubble after the sink tokens to use even block size\n")
+    v2_add_sequence = (
+        "{\n"
+        "    auto const attributionEnabled = dataSystemRequestAttributionEnabled();\n"
+        "    auto const clientId = attributionEnabled && llmRequest\n"
+        "        ? llmRequest->mClientId\n"
+        "        : std::optional<RequestIdType>{};\n"
+        "    DataSystemRequestScope attributionScope(clientId);\n"
+        "    // Need to add the bubble after the sink tokens to use even block size\n")
+    legacy_v3_add_sequence = (
+        "{\n"
+        "    auto const attributionAddSequenceStarted = std::chrono::steady_clock::now();\n"
+        "    auto const attributionEnabled = dataSystemRequestAttributionEnabled();\n"
+        "    auto const clientId = attributionEnabled && llmRequest\n"
+        "        ? llmRequest->mClientId\n"
+        "        : std::optional<RequestIdType>{};\n"
+        "    DataSystemRequestScope attributionScope(clientId);\n"
+        "    // Need to add the bubble after the sink tokens to use even block size\n")
     new_add_sequence = (
         "{\n"
         "    auto const attributionEnabled = dataSystemRequestAttributionEnabled();\n"
+        "    auto const attributionAddSequenceStarted = attributionEnabled\n"
+        "        ? std::chrono::steady_clock::now()\n"
+        "        : std::chrono::steady_clock::time_point{};\n"
         "    auto const clientId = attributionEnabled && llmRequest\n"
         "        ? llmRequest->mClientId\n"
         "        : std::optional<RequestIdType>{};\n"
@@ -565,6 +878,8 @@ def patch_tree(root: Path) -> None:
     replace_supported(manager, (
         "{\n    // Need to add the bubble after the sink tokens to use even block size\n",
         old_add_sequence,
+        v2_add_sequence,
+        legacy_v3_add_sequence,
     ), new_add_sequence)
 
     old_add_sequence_store = (
@@ -587,6 +902,32 @@ def patch_tree(root: Path) -> None:
         old_add_sequence_store,
     ), new_add_sequence_store)
 
+    add_sequence_timing = (
+        "        llmRequest->updateMissedBlocksPerRequest(mBlockManager.getNumMissedBlocks() - numMissedBlocksPreRequest);\n"
+        "    }\n"
+        "    if (attributionEnabled)\n"
+        "    {\n"
+        "        auto const attributionAddSequenceUs = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "            std::chrono::steady_clock::now() - attributionAddSequenceStarted).count();\n"
+        "        recordDataSystemRequestPhase(\n"
+        "            clientId, DataSystemRequestPhase::kAddSequence, attributionAddSequenceUs);\n"
+        "    }\n"
+        "}\n\nvoid KVCacheManager::storeContextBlocks")
+    legacy_add_sequence_timing = (
+        "        llmRequest->updateMissedBlocksPerRequest(mBlockManager.getNumMissedBlocks() - numMissedBlocksPreRequest);\n"
+        "    }\n"
+        "    auto const attributionAddSequenceUs = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "        std::chrono::steady_clock::now() - attributionAddSequenceStarted).count();\n"
+        "    recordDataSystemRequestPhase(\n"
+        "        clientId, DataSystemRequestPhase::kAddSequence, attributionAddSequenceUs);\n"
+        "}\n\nvoid KVCacheManager::storeContextBlocks")
+    replace_supported(manager, (
+        "        llmRequest->updateMissedBlocksPerRequest(mBlockManager.getNumMissedBlocks() - numMissedBlocksPreRequest);\n"
+        "    }\n"
+        "}\n\nvoid KVCacheManager::storeContextBlocks",
+        legacy_add_sequence_timing,
+    ), add_sequence_timing)
+
     old_remove_sequence = (
         "void KVCacheManager::removeSequence(RequestIdType requestId, OptionalRef<LlmRequest const> llmRequest)\n{\n"
         "    std::optional<RequestIdType> clientId = llmRequest ? llmRequest->mClientId : std::nullopt;\n"
@@ -596,9 +937,37 @@ def patch_tree(root: Path) -> None:
         "        if (!clientId && it != mDataSystemClientIds.end()) clientId = it->second;\n"
         "    }\n"
         "    DataSystemRequestScope attributionScope(clientId);\n")
+    v2_remove_sequence = (
+        "void KVCacheManager::removeSequence(RequestIdType requestId, OptionalRef<LlmRequest const> llmRequest)\n{\n"
+        "    auto const attributionEnabled = dataSystemRequestAttributionEnabled();\n"
+        "    std::optional<RequestIdType> clientId;\n"
+        "    if (attributionEnabled)\n"
+        "    {\n"
+        "        clientId = llmRequest ? llmRequest->mClientId : std::nullopt;\n"
+        "        std::scoped_lock lock(mDataSystemClientIdsMtx);\n"
+        "        auto const it = mDataSystemClientIds.find(requestId);\n"
+        "        if (!clientId && it != mDataSystemClientIds.end()) clientId = it->second;\n"
+        "    }\n"
+        "    DataSystemRequestScope attributionScope(clientId);\n")
+    legacy_v3_remove_sequence = (
+        "void KVCacheManager::removeSequence(RequestIdType requestId, OptionalRef<LlmRequest const> llmRequest)\n{\n"
+        "    auto const attributionRemoveSequenceStarted = std::chrono::steady_clock::now();\n"
+        "    auto const attributionEnabled = dataSystemRequestAttributionEnabled();\n"
+        "    std::optional<RequestIdType> clientId;\n"
+        "    if (attributionEnabled)\n"
+        "    {\n"
+        "        clientId = llmRequest ? llmRequest->mClientId : std::nullopt;\n"
+        "        std::scoped_lock lock(mDataSystemClientIdsMtx);\n"
+        "        auto const it = mDataSystemClientIds.find(requestId);\n"
+        "        if (!clientId && it != mDataSystemClientIds.end()) clientId = it->second;\n"
+        "    }\n"
+        "    DataSystemRequestScope attributionScope(clientId);\n")
     new_remove_sequence = (
         "void KVCacheManager::removeSequence(RequestIdType requestId, OptionalRef<LlmRequest const> llmRequest)\n{\n"
         "    auto const attributionEnabled = dataSystemRequestAttributionEnabled();\n"
+        "    auto const attributionRemoveSequenceStarted = attributionEnabled\n"
+        "        ? std::chrono::steady_clock::now()\n"
+        "        : std::chrono::steady_clock::time_point{};\n"
         "    std::optional<RequestIdType> clientId;\n"
         "    if (attributionEnabled)\n"
         "    {\n"
@@ -611,6 +980,8 @@ def patch_tree(root: Path) -> None:
     replace_supported(manager, (
         "void KVCacheManager::removeSequence(RequestIdType requestId, OptionalRef<LlmRequest const> llmRequest)\n{\n",
         old_remove_sequence,
+        v2_remove_sequence,
+        legacy_v3_remove_sequence,
     ), new_remove_sequence)
 
     old_remove_sequence_end = (
@@ -621,7 +992,7 @@ def patch_tree(root: Path) -> None:
         "    if (clientId) finishDataSystemRequest(*clientId);\n"
         "    TLLM_LOG_TRACE(\"[%s]::%s stop\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n"
         "}\n\nvoid KVCacheManager::schedulingRemoveSequence")
-    new_remove_sequence_end = (
+    v2_remove_sequence_end = (
         "    if (attributionEnabled)\n"
         "    {\n"
         "        std::scoped_lock lock(mDataSystemClientIdsMtx);\n"
@@ -630,9 +1001,40 @@ def patch_tree(root: Path) -> None:
         "    if (clientId) finishDataSystemRequest(*clientId);\n"
         "    TLLM_LOG_TRACE(\"[%s]::%s stop\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n"
         "}\n\nvoid KVCacheManager::schedulingRemoveSequence")
+    legacy_v3_remove_sequence_end = (
+        "    if (attributionEnabled)\n"
+        "    {\n"
+        "        std::scoped_lock lock(mDataSystemClientIdsMtx);\n"
+        "        mDataSystemClientIds.erase(requestId);\n"
+        "    }\n"
+        "    auto const attributionRemoveSequenceUs = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "        std::chrono::steady_clock::now() - attributionRemoveSequenceStarted).count();\n"
+        "    recordDataSystemRequestPhase(\n"
+        "        clientId, DataSystemRequestPhase::kRemoveSequence, attributionRemoveSequenceUs);\n"
+        "    if (clientId) finishDataSystemRequest(*clientId);\n"
+        "    TLLM_LOG_TRACE(\"[%s]::%s stop\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n"
+        "}\n\nvoid KVCacheManager::schedulingRemoveSequence")
+    new_remove_sequence_end = (
+        "    if (attributionEnabled)\n"
+        "    {\n"
+        "        std::scoped_lock lock(mDataSystemClientIdsMtx);\n"
+        "        mDataSystemClientIds.erase(requestId);\n"
+        "    }\n"
+        "    if (attributionEnabled)\n"
+        "    {\n"
+        "        auto const attributionRemoveSequenceUs = std::chrono::duration_cast<std::chrono::microseconds>(\n"
+        "            std::chrono::steady_clock::now() - attributionRemoveSequenceStarted).count();\n"
+        "        recordDataSystemRequestPhase(\n"
+        "            clientId, DataSystemRequestPhase::kRemoveSequence, attributionRemoveSequenceUs);\n"
+        "    }\n"
+        "    if (clientId) finishDataSystemRequest(*clientId);\n"
+        "    TLLM_LOG_TRACE(\"[%s]::%s stop\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n"
+        "}\n\nvoid KVCacheManager::schedulingRemoveSequence")
     replace_supported(manager, (
         "    TLLM_LOG_TRACE(\"[%s]::%s stop\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n}\n\nvoid KVCacheManager::schedulingRemoveSequence",
         old_remove_sequence_end,
+        v2_remove_sequence_end,
+        legacy_v3_remove_sequence_end,
     ), new_remove_sequence_end)
 
     transfer = source_dir / "kvCacheTransferManager.cpp"
@@ -643,6 +1045,18 @@ def patch_tree(root: Path) -> None:
     text = transfer.read_text()
     if "#include <chrono>" not in text:
         replace_once(transfer, "#include <algorithm>\n", "#include <algorithm>\n#include <chrono>\n")
+
+    malformed_debug = (
+        "        TLLM_LOG_DEBUG(\"[TensorRT-LLM][Datasystem] mode = %d: pools.size() = %u, "
+        "numTokensToCopy = %d.\",\n"
+        "            pools.size(), numTokensToCopy);\n")
+    corrected_debug = (
+        "        TLLM_LOG_DEBUG(\"[TensorRT-LLM][Datasystem] mode = %d: pools.size() = %zu, "
+        "numTokensToCopy = %d.\",\n"
+        "            static_cast<int>(mode), pools.size(), numTokensToCopy);\n")
+    transfer_text = transfer.read_text()
+    if malformed_debug in transfer_text:
+        replace_once(transfer, malformed_debug, corrected_debug)
 
     api_replacements = [
         (("datasystem::Status setRet = kvClient->Set(buffer);",), "setRet", "kSet", "setRet.IsError()",

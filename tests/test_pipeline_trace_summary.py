@@ -141,19 +141,56 @@ class PipelineTraceSummaryTest(unittest.TestCase):
             "set_count": 3, "set_us": 19000,
             "get_failed_count": 0, "set_failed_count": 0,
             "pending_count": 0, "unknown_count": 0,
+            "executor_queue_us": 10,
+            "add_sequence_count": 1, "add_sequence_us": 20,
+            "prefill_gap_us": 30,
+            "add_token_count": 2, "add_token_us": 40,
+            "attribution_lookup_us": 2, "sequence_lookup_us": 3,
+            "kv_update_us": 20, "phase_record_us": 1, "decode_gap_us": 50,
+            "finalization_gap_us": 60,
+            "remove_sequence_count": 1, "remove_sequence_us": 10,
+            "native_lifecycle_count": 1, "native_lifecycle_us": 220,
+            "native_accounted_us": 220, "native_closure_error_us": 0,
+            "phase_unknown_count": 0, "phase_timing_complete": True,
             "attribution_complete": True,
+        }
+        executor = {
+            "event": "trt_executor_request_complete", "request_id": "r1",
+            "runner_us": 230, "request_setup_us": 2, "enqueue_call_us": 3,
+            "await_final_us": 224, "response_extract_us": 1,
+            "gateway_accounted_us": 230, "gateway_closure_error_us": 0,
         }
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "inference.log"
-            log.write_text("native-prefix " + json.dumps(event, separators=(",", ":")) + "\n")
+            log.write_text(
+                "native-prefix " + json.dumps(event, separators=(",", ":")) + "\n"
+                + json.dumps(executor, separators=(",", ":")) + "\n")
             completions, duplicates = module.extract_datasystem_completions(log)
+            executor_completions = module.extract_executor_completions(log)
         self.assertEqual(completions["r1"]["get_count"], 2)
         self.assertFalse(duplicates)
 
-        trace = {"valid": True, "_datasystem_final": completions["r1"]}
+        trace = {
+            "valid": True,
+            "_datasystem_final": completions["r1"],
+            "_executor_final": executor_completions["r1"],
+        }
         reasons = module.validate(trace, True)
         self.assertNotIn("datasystem_completion_missing", reasons)
         self.assertNotIn("datasystem_attribution_incomplete", reasons)
+        self.assertNotIn("datasystem_phase_timing_incomplete", reasons)
+        self.assertNotIn("executor_phase_completion_missing", reasons)
+
+        completions["r1"]["native_closure_error_us"] = 101
+        executor_completions["r1"][0]["gateway_closure_error_us"] = 101
+        reasons = module.validate(trace, True)
+        self.assertIn("datasystem_phase_closure_error", reasons)
+        self.assertIn("executor_phase_closure_error", reasons)
+
+        completions["r1"]["native_closure_error_us"] = 0
+        executor_completions["r1"].append(dict(executor_completions["r1"][0]))
+        reasons = module.validate(trace, True)
+        self.assertIn("executor_native_lifecycle_count_mismatch", reasons)
 
     def test_native_datasystem_pending_or_failure_is_rejected(self):
         module = __import__(

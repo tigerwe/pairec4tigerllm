@@ -1,9 +1,77 @@
+import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 
 class DataSystemAttributionPatcherTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("c++"), "C++ compiler is required")
+    def test_tracker_phase_timing_runtime_smoke(self):
+        module = __import__(
+            "scripts.patch_trtllm_datasystem_request_attribution",
+            fromlist=["TRACKER_HEADER", "TRACKER_SOURCE"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            include = root / "include"
+            tracker_include = include / "tensorrt_llm/batch_manager"
+            logger_include = include / "tensorrt_llm/common"
+            tracker_include.mkdir(parents=True)
+            logger_include.mkdir(parents=True)
+            (tracker_include / "datasystemRequestTracker.h").write_text(
+                module.TRACKER_HEADER)
+            (logger_include / "logger.h").write_text(
+                "#pragma once\n#include <cstdio>\n"
+                "namespace fake_logger { template <typename... Args> "
+                "void log(char const* format, Args... args) { "
+                "std::printf(format, args...); std::printf(\"\\n\"); } }\n"
+                "#define TLLM_LOG_INFO(...) fake_logger::log(__VA_ARGS__)\n"
+                "#define TLLM_LOG_WARNING(...) fake_logger::log(__VA_ARGS__)\n")
+            source = root / "datasystemRequestTracker.cpp"
+            source.write_text(module.TRACKER_SOURCE)
+            main = root / "main.cpp"
+            main.write_text(r'''
+#include "tensorrt_llm/batch_manager/datasystemRequestTracker.h"
+#include <chrono>
+#include <cstdlib>
+#include <thread>
+using namespace tensorrt_llm::batch_manager::kv_cache_manager;
+int main()
+{
+    setenv("TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION", "1", 1);
+    registerDataSystemRequest(7, "request-7", 1);
+    markDataSystemRequestExecutorEnqueued(7);
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+    recordDataSystemRequestPhase(7, DataSystemRequestPhase::kAddSequence, 20);
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+    recordDataSystemRequestPhase(7, DataSystemRequestPhase::kAddToken, 30, 2, 3, 20);
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+    recordDataSystemRequestPhase(7, DataSystemRequestPhase::kRemoveSequence, 10);
+    finishDataSystemRequest(7);
+}
+''')
+            binary = root / "tracker-smoke"
+            subprocess.run([
+                "c++", "-std=c++17", "-pthread", f"-I{include}",
+                str(source), str(main), "-o", str(binary),
+            ], check=True, capture_output=True, text=True)
+            result = subprocess.run(
+                [str(binary)], check=True, capture_output=True, text=True)
+
+        events = [json.loads(line) for line in result.stdout.splitlines()
+                  if '"event":"datasystem_request_complete"' in line]
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["request_id"], "request-7")
+        self.assertEqual(event["add_sequence_count"], 1)
+        self.assertEqual(event["add_token_count"], 1)
+        self.assertEqual(event["remove_sequence_count"], 1)
+        self.assertEqual(event["native_lifecycle_count"], 1)
+        self.assertEqual(event["phase_unknown_count"], 0)
+        self.assertTrue(event["phase_timing_complete"])
+        self.assertGreater(event["native_lifecycle_us"], 0)
+
     def test_existing_v1_tree_is_upgraded_to_v2_idempotently(self):
         module = __import__(
             "scripts.patch_trtllm_datasystem_request_attribution",
@@ -18,6 +86,7 @@ class DataSystemAttributionPatcherTest(unittest.TestCase):
     }
     DataSystemRequestScope attributionScope(clientId);
     auto& sequence = getSequence(requestId);
+    updateToken(sequence, true);
 }
 """
         old_add_sequence = """void KVCacheManager::addSequence()
@@ -31,7 +100,13 @@ class DataSystemAttributionPatcherTest(unittest.TestCase):
         mDataSystemClientIds[requestId] = clientId;
     }
     auto& sequence = seqIt->second;
+    if (llmRequest)
+    {
+        llmRequest->updateMissedBlocksPerRequest(mBlockManager.getNumMissedBlocks() - numMissedBlocksPreRequest);
+    }
 }
+
+void KVCacheManager::storeContextBlocks() {}
 """
         old_remove_sequence = """void KVCacheManager::removeSequence(RequestIdType requestId, OptionalRef<LlmRequest const> llmRequest)
 {
@@ -88,9 +163,13 @@ void KVCacheManager::schedulingRemoveSequence() {}
         self.assertIn(
             "PAIREC_DATASYSTEM_REQUEST_ATTRIBUTION_ZERO_INTRUSION_DISABLED_V2",
             first)
-        self.assertIn("if (dataSystemRequestAttributionEnabled())", first)
+        self.assertIn("auto const attributionEnabled = dataSystemRequestAttributionEnabled();", first)
+        self.assertIn("if (attributionEnabled)", first)
         self.assertIn("if (attributionEnabled)", first)
         self.assertIn("std::scoped_lock lock(mDataSystemClientIdsMtx);", first)
+        self.assertIn("PAIREC_TRT_EXECUTOR_PHASE_TIMING_V3", first)
+        self.assertIn("recordDataSystemRequestPhase", first)
+        self.assertIn("attributionLookupUs", first)
         add_token = first.split("void KVCacheManager::addToken", 1)[1].split(
             "void KVCacheManager::addSequence", 1)[0]
         self.assertNotIn("mSequencesMtx", add_token)
@@ -109,6 +188,15 @@ void KVCacheManager::schedulingRemoveSequence() {}
         lock = patcher.index(
             '"        std::scoped_lock lock(mDataSystemClientIdsMtx);\\n"', gate)
         self.assertLess(gate, lock)
+        self.assertIn("legacy_v3_add_token", patcher)
+        self.assertIn("legacy_v3_add_sequence", patcher)
+        self.assertIn("legacy_v3_remove_sequence", patcher)
+
+        gateway = Path("cpp/brpc_gateway/brpc_inference_server.cpp").read_text()
+        self.assertIn(
+            "datasystem_lifecycle ? &executor_timing : nullptr", gateway)
+        self.assertIn("if (executor_timing_ptr)", gateway)
+        self.assertIn("const auto request_setup_started = phase_timing", gateway)
 
     def test_replace_supported_upgrades_nested_old_anchor(self):
         module = __import__(

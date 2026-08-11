@@ -328,7 +328,15 @@ expected = {
     for row in csv.DictReader(open(requests_path, encoding="utf-8"), delimiter="\t")
 }
 observed = {request_id: [] for request_id in expected}
+executor_observed = {request_id: [] for request_id in expected}
 for line in pathlib.Path(log_path).read_text(errors="replace").splitlines():
+    if '"event":"trt_executor_request_complete"' in line:
+        try:
+            event = json.loads(line[line.index("{"):])
+        except (ValueError, json.JSONDecodeError):
+            event = None
+        if event and event.get("request_id") in executor_observed:
+            executor_observed[event["request_id"]].append(event)
     if '"event":"datasystem_request_complete"' not in line:
         continue
     try:
@@ -347,10 +355,35 @@ for events in observed.values():
     event = events[0]
     if event.get("attribution_complete") is not True:
         valid = False
+    if event.get("phase_timing_complete") is not True:
+        valid = False
     for field in (
-        "get_failed_count", "set_failed_count", "pending_count", "unknown_count"
+        "get_failed_count", "set_failed_count", "pending_count", "unknown_count",
+        "phase_unknown_count",
     ):
         if int(event.get(field, 0)) != 0:
+            valid = False
+    if int(event.get("native_closure_error_us", 101)) > 100:
+        valid = False
+    for field in (
+        "executor_queue_us", "add_sequence_us", "prefill_gap_us", "add_token_us",
+        "decode_gap_us", "finalization_gap_us", "remove_sequence_us",
+        "native_lifecycle_us", "native_accounted_us",
+    ):
+        if not isinstance(event.get(field), int) or event[field] < 0:
+            valid = False
+    request_id = event.get("request_id")
+    gateway_events = executor_observed.get(request_id, [])
+    if len(gateway_events) != int(event.get("native_lifecycle_count", 0)):
+        valid = False
+    for gateway_event in gateway_events:
+        for field in (
+            "runner_us", "request_setup_us", "enqueue_call_us", "await_final_us",
+            "response_extract_us", "gateway_accounted_us", "gateway_closure_error_us",
+        ):
+            if not isinstance(gateway_event.get(field), int) or gateway_event[field] < 0:
+                valid = False
+        if int(gateway_event.get("gateway_closure_error_us", 101)) > 100:
             valid = False
 raise SystemExit(0 if valid else 1)
 PY
