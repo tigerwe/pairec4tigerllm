@@ -14,9 +14,7 @@ GENERATED = ROOT / "cpp" / "brpc_gateway" / "generated"
 class F19WorkerBuildScriptTest(unittest.TestCase):
     def test_build_uses_separate_trt_and_gateway_images(self):
         text = SCRIPT.read_text()
-        self.assertIn(
-            'TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-zcx-pairec-image:v1.1}"',
-            text)
+        self.assertIn('TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-}"', text)
         self.assertIn('GATEWAY_BUILD_IMAGE="${GATEWAY_BUILD_IMAGE:-}"', text)
         self.assertIn(
             "zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1", text)
@@ -28,6 +26,17 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
         self.assertIn("--gpus all", text)
         self.assertIn("--entrypoint /bin/bash", text)
         self.assertIn('"$cuda_driver_dir:/host-driver:ro"', text)
+
+    def test_trt_image_is_preflighted_for_static_cuda_runtime(self):
+        text = SCRIPT.read_text()
+        self.assertIn("trt_image_has_toolchain()", text)
+        self.assertIn("libcudadevrt.a", text)
+        self.assertIn("libcudart_static.a", text)
+        self.assertIn(
+            "no local arm64 TRT image contains compiler, libcudadevrt.a", text)
+        sdk = text.index("zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1")
+        base = text.index("zcx-pairec-image:v1.1", sdk)
+        self.assertLess(sdk, base)
 
     def test_gateway_image_is_preflighted_for_full_sdk(self):
         text = SCRIPT.read_text()

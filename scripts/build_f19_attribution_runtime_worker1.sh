@@ -11,7 +11,7 @@ detected_jobs="$(nproc)"
 default_jobs="$detected_jobs"
 if (( default_jobs > 32 )); then default_jobs=32; fi
 JOBS="${JOBS:-$default_jobs}"
-TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-zcx-pairec-image:v1.1}"
+TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-}"
 GATEWAY_BUILD_IMAGE="${GATEWAY_BUILD_IMAGE:-}"
 SHOW_HISTORY="${SHOW_HISTORY:-1}"
 APPLY_PATCH="${APPLY_PATCH:-1}"
@@ -52,11 +52,39 @@ if [[ "$SHOW_HISTORY" = 1 ]]; then
   fi
 fi
 
-docker image inspect "$TRT_BUILD_IMAGE" >/dev/null 2>&1 \
-  || die "TRT build image is not present in Docker: $TRT_BUILD_IMAGE"
+trt_image_has_toolchain() {
+  local image="$1"
+  docker image inspect "$image" >/dev/null 2>&1 || return 1
+  [[ "$(docker image inspect "$image" --format '{{.Architecture}}')" = arm64 ]] || return 1
+  docker run --rm --entrypoint /bin/bash "$image" -lc '
+    set -e
+    command -v cmake >/dev/null
+    command -v c++ >/dev/null
+    cuda_static_dir="$(dirname "$(find /usr/local/cuda -type f -name libcudadevrt.a -print -quit)")"
+    test -f "$cuda_static_dir/libcudadevrt.a"
+    test -f "$cuda_static_dir/libcudart_static.a"
+    { test ! -e /TensorRT-LLM || test -d /TensorRT-LLM; }
+  ' >/dev/null 2>&1
+}
+
+if [[ -n "$TRT_BUILD_IMAGE" ]]; then
+  trt_image_has_toolchain "$TRT_BUILD_IMAGE" \
+    || die "TRT build image lacks CUDA static runtime or compiler toolchain: $TRT_BUILD_IMAGE"
+else
+  trt_candidates=(
+    "zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1"
+    "zcx-pairec-image:v1.1"
+  )
+  for candidate in "${trt_candidates[@]}"; do
+    if trt_image_has_toolchain "$candidate"; then
+      TRT_BUILD_IMAGE="$candidate"
+      break
+    fi
+  done
+fi
+[[ -n "$TRT_BUILD_IMAGE" ]] || die \
+  "no local arm64 TRT image contains compiler, libcudadevrt.a and libcudart_static.a; set TRT_BUILD_IMAGE"
 trt_image_arch="$(docker image inspect "$TRT_BUILD_IMAGE" --format '{{.Architecture}}')"
-[[ "$trt_image_arch" = arm64 ]] \
-  || die "TRT build image architecture must be arm64, got $trt_image_arch"
 
 gateway_image_has_sdk() {
   local image="$1"

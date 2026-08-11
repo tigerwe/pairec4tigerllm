@@ -50,15 +50,17 @@ The build script idempotently reapplies the current repository patch by default,
 an already-patched V1/V2 tree also receives managed-source updates such as the V2
 ready marker. Set `APPLY_PATCH=0` only for a deliberate compile-only rerun.
 
-The recovered worker1 command used `zcx-pairec-image:v1.1`, mounted the host source
-at `/TensorRT-LLM`, and mounted `/lib64` at `/host-driver`. That image has the CUDA,
-TensorRT-LLM and DataSystem toolchain needed for `libtensorrt_llm.so`, but it does
-not contain `protoc` and therefore cannot rebuild the BRPC gateway from source.
+The recovered worker1 history contains both `zcx-pairec-image:v1.1` exploration and
+the successful `zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1` build container.
+Only the latter was followed by successful checks for `libcudadevrt.a` and
+`libcudart_static.a`; it is therefore the first candidate for the native build.
 
 The script consequently uses two isolated build stages:
 
-1. `TRT_BUILD_IMAGE` defaults to `zcx-pairec-image:v1.1` and builds only
-   `libtensorrt_llm.so`.
+1. `TRT_BUILD_IMAGE` is selected only after an executable preflight confirms the
+   ARM64 compiler and both CUDA static runtime libraries. The historical
+   `zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1` image is tried first. The
+   selected image builds only `libtensorrt_llm.so`.
 2. `GATEWAY_BUILD_IMAGE` first tries the recovered historical SDK image
    `zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1`, then local BRPC inference
    images. Every candidate must pass an executable preflight for protobuf headers
@@ -77,7 +79,7 @@ gateway `ldd` validation pass. Override either stage only with a locally verifie
 ARM64 image:
 
 ```bash
-TRT_BUILD_IMAGE=zcx-pairec-image:v1.1 \
+TRT_BUILD_IMAGE=zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1 \
 GATEWAY_BUILD_IMAGE=pairec-brpc-inference:<local-brpc-sdk-tag> \
 TRTLLM_DIR=/home/zcx/TensorRT-LLM \
   bash scripts/build_f19_attribution_runtime_worker1.sh
