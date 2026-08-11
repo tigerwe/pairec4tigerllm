@@ -168,7 +168,7 @@ public:
     {
         if (dataSystemRequestAttributionEnabled())
         {
-            TLLM_LOG_INFO("{\"event\":\"datasystem_attribution_ready\",\"version\":1}");
+            TLLM_LOG_INFO("{\"event\":\"datasystem_attribution_ready\",\"version\":2}");
         }
     }
 

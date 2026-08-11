@@ -41,14 +41,37 @@ git pull gitcode pairec-brpc-observability
 TRTLLM_DIR=/home/zcx/TensorRT-LLM \
   bash scripts/apply_trtllm_datasystem_request_attribution_patch.sh
 
-cmake --build /home/zcx/TensorRT-LLM/cpp/build -j"$(nproc)"
+TRTLLM_DIR=/home/zcx/TensorRT-LLM \
+  bash scripts/build_f19_attribution_runtime_worker1.sh \
+  | tee /tmp/f19-v2-runtime-build.log
 ```
 
 The source tree must already contain the project DataSystem KVC modifications. The
 F19 patch is idempotent, but it is not a replacement for those earlier modifications.
 
-Rebuild the TRT-LLM/brpc SDK or runtime image that contains the newly built headers
-and `libtensorrt_llm.so`, then rebuild the inference gateway image against that base:
+The build script runs on worker1 and writes both overlay artifacts to
+`/home/zcx/pairec-f19-runtime/{bin,lib}` only after all build checks pass. It prefers the locally observed
+`pairec-brpc-inference:k8s-arm64-trtllm-multisequence-kvc-ctx224-v1` image because
+that image matches the current DataSystem/KVC runtime. The exact temporary container
+name used by the earlier manual build was not persisted in the project handoff. Override the selected image
+only when another local image is known to contain the BRPC, TensorRT-LLM, CUDA and
+DataSystem development files:
+
+```bash
+BUILD_IMAGE=pairec-brpc-inference:<local-build-capable-tag> \
+TRTLLM_DIR=/home/zcx/TensorRT-LLM \
+  bash scripts/build_f19_attribution_runtime_worker1.sh
+```
+
+The script reproduces the two requirements discovered during the manual build: it
+mounts the worker1 NVIDIA driver as `/host-driver/libcuda.so.1`, and adds the CUDA
+directory containing `libcudadevrt.a` and `libcudart_static.a` to `LIBRARY_PATH`.
+It rejects unresolved gateway libraries, missing V2 attribution markers and missing
+output-token trace fields before replacing the overlay. Success ends with
+`F19_ATTRIBUTION_RUNTIME_BUILD_OK`.
+
+The full image rebuild remains available as a slower fallback when a hostPath overlay
+is not acceptable:
 
 ```bash
 BASE_IMAGE=zcx-pairec-trtllm-brpc-sdk:v1 \
