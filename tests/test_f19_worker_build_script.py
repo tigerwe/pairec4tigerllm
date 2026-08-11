@@ -1,9 +1,14 @@
 import pathlib
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "build_f19_attribution_runtime_worker1.sh"
+CMAKE = ROOT / "cpp" / "brpc_gateway" / "CMakeLists.txt"
+GENERATED = ROOT / "cpp" / "brpc_gateway" / "generated"
 
 
 class F19WorkerBuildScriptTest(unittest.TestCase):
@@ -27,10 +32,15 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
     def test_gateway_image_is_preflighted_for_full_sdk(self):
         text = SCRIPT.read_text()
         self.assertIn("gateway_image_has_sdk()", text)
-        self.assertIn("command -v protoc", text)
         self.assertIn("/usr/local/include/brpc/server.h", text)
+        self.assertIn("/usr/include/brpc/server.h", text)
         self.assertIn("/usr/local/include/google/protobuf/message.h", text)
-        self.assertIn("no local arm64 gateway image contains protoc", text)
+        self.assertIn("/usr/include/google/protobuf/message.h", text)
+        self.assertIn("no local arm64 gateway image contains protobuf", text)
+        self.assertNotIn("command -v protoc", text)
+        self.assertIn("-DPAIREC_USE_PREGENERATED_PROTO=ON", text)
+        self.assertIn('-DBRPC_INCLUDE_DIR="$brpc_include"', text)
+        self.assertIn('-DBRPC_LIBRARY="$brpc_library"', text)
 
     def test_host_paths_use_known_container_mount_points(self):
         text = SCRIPT.read_text()
@@ -78,6 +88,35 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
         self.assertIn('\\"version\\":2', text)
         self.assertIn("output_token_count", text)
         self.assertIn("runner_ms_per_output_token", text)
+
+    def test_pregenerated_proto_mode_is_explicit_and_complete(self):
+        cmake = CMAKE.read_text()
+        self.assertIn("option(PAIREC_USE_PREGENERATED_PROTO", cmake)
+        self.assertIn("if(PAIREC_USE_PREGENERATED_PROTO)", cmake)
+        for name in (
+                "recommend.pb.cc", "recommend.pb.h",
+                "pipeline_service.pb.cc", "pipeline_service.pb.h"):
+            self.assertTrue((GENERATED / name).is_file(), name)
+
+    def test_pregenerated_sources_match_current_proto(self):
+        protoc = shutil.which("protoc")
+        if protoc is None:
+            self.skipTest("protoc is unavailable for generated-source audit")
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run([
+                protoc,
+                f"--proto_path={ROOT / 'proto'}",
+                f"--cpp_out={directory}",
+                str(ROOT / "proto" / "recommend.proto"),
+                str(ROOT / "proto" / "pipeline_service.proto"),
+            ], check=True)
+            for name in (
+                    "recommend.pb.cc", "recommend.pb.h",
+                    "pipeline_service.pb.cc", "pipeline_service.pb.h"):
+                self.assertEqual(
+                    (GENERATED / name).read_bytes(),
+                    (pathlib.Path(directory) / name).read_bytes(),
+                    name)
 
 
 if __name__ == "__main__":

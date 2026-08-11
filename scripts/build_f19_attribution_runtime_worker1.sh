@@ -66,19 +66,27 @@ gateway_image_has_sdk() {
     set -e
     command -v cmake >/dev/null
     command -v c++ >/dev/null
-    command -v protoc >/dev/null
-    test -f /usr/local/include/brpc/server.h
-    test -f /usr/local/include/google/protobuf/message.h
+    { test -f /usr/local/include/brpc/server.h || test -f /usr/include/brpc/server.h; }
+    { test -f /usr/local/include/google/protobuf/message.h \
+      || test -f /usr/include/google/protobuf/message.h; }
     { test ! -e /TensorRT-LLM || test -d /TensorRT-LLM; }
-    find /usr/local/lib /usr/local/lib64 -maxdepth 1 -type f \
-      \( -name "libbrpc.so*" -o -name "libbrpc.a" \) -print -quit 2>/dev/null \
-      | grep -q .
+    brpc_library_found=0
+    for root in /usr/local/lib /usr/local/lib64 /usr/lib64 /usr/lib; do
+      test -d "$root" || continue
+      if find "$root" -maxdepth 1 \( -type f -o -type l \) \
+          \( -name "libbrpc.so*" -o -name "libbrpc.a" \) -print -quit \
+          | grep -q .; then
+        brpc_library_found=1
+        break
+      fi
+    done
+    test "$brpc_library_found" = 1
   ' >/dev/null 2>&1
 }
 
 if [[ -n "$GATEWAY_BUILD_IMAGE" ]]; then
   gateway_image_has_sdk "$GATEWAY_BUILD_IMAGE" \
-    || die "gateway build image lacks protoc/protobuf/brpc SDK: $GATEWAY_BUILD_IMAGE"
+    || die "gateway build image lacks protobuf/brpc C++ SDK: $GATEWAY_BUILD_IMAGE"
 else
   gateway_candidates=(
     "zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1"
@@ -95,7 +103,7 @@ else
   done
 fi
 [[ -n "$GATEWAY_BUILD_IMAGE" ]] || die \
-  "no local arm64 gateway image contains protoc, protobuf and brpc SDK; set GATEWAY_BUILD_IMAGE"
+  "no local arm64 gateway image contains protobuf and brpc C++ SDK; set GATEWAY_BUILD_IMAGE"
 gateway_image_arch="$(docker image inspect "$GATEWAY_BUILD_IMAGE" --format '{{.Architecture}}')"
 
 cuda_driver_dir="${CUDA_DRIVER_DIR:-}"
@@ -196,14 +204,30 @@ docker run --rm \
     set -euo pipefail
     unset LD_PRELOAD
 
-    for command in cmake c++ protoc install find strings ldd; do
+    for command in cmake c++ install find strings ldd; do
       command -v "$command" >/dev/null || {
         echo "ERROR: gateway build image missing command: $command" >&2
         exit 1
       }
     done
-    [[ -f /usr/local/include/brpc/server.h ]] || {
+    brpc_header=""
+    for candidate in /usr/local/include/brpc/server.h /usr/include/brpc/server.h; do
+      if [[ -f "$candidate" ]]; then brpc_header="$candidate"; break; fi
+    done
+    [[ -n "$brpc_header" ]] || {
       echo "ERROR: gateway build image missing brpc headers" >&2
+      exit 1
+    }
+    brpc_include="${brpc_header%/brpc/server.h}"
+    brpc_library=""
+    for root in /usr/local/lib /usr/local/lib64 /usr/lib64 /usr/lib; do
+      [[ -d "$root" ]] || continue
+      candidate="$(find "$root" -maxdepth 1 \( -type f -o -type l \) \
+        \( -name "libbrpc.so*" -o -name "libbrpc.a" \) -print -quit)"
+      if [[ -n "$candidate" ]]; then brpc_library="$candidate"; break; fi
+    done
+    [[ -n "$brpc_library" ]] || {
+      echo "ERROR: gateway build image missing brpc library" >&2
       exit 1
     }
 
@@ -229,6 +253,9 @@ docker run --rm \
     cmake -E remove_directory "$gateway_build"
     cmake -S "$REPO_DIR/cpp/brpc_gateway" -B "$gateway_build" \
       -DCMAKE_BUILD_TYPE=Release \
+      -DPAIREC_USE_PREGENERATED_PROTO=ON \
+      -DBRPC_INCLUDE_DIR="$brpc_include" \
+      -DBRPC_LIBRARY="$brpc_library" \
       -DPAIREC_ENABLE_TRTLLM_CPP=ON \
       -DPAIREC_ENABLE_DATASYSTEM_KV_PROBE=ON \
       -DTRTLLM_INCLUDE_DIR="$TRTLLM_DIR/cpp/include" \

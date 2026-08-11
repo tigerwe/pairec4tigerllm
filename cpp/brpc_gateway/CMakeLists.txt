@@ -8,6 +8,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(PAIREC_ENABLE_TRTLLM_CPP "Build brpc_inference_server with TensorRT-LLM C++ Executor backend" OFF)
 option(PAIREC_ENABLE_DATASYSTEM_KV_PROBE "Build brpc_inference_server with DataSystem MSet/MGet probe backend" OFF)
+option(PAIREC_USE_PREGENERATED_PROTO "Build with checked-in protoc 3.12.4 C++ sources" OFF)
 
 find_package(Protobuf REQUIRED)
 find_package(Threads REQUIRED)
@@ -291,17 +292,32 @@ if(PAIREC_ENABLE_DATASYSTEM_KV_PROBE)
   message(STATUS "  DATASYSTEM_LIBRARY=${DATASYSTEM_LIBRARY}")
 endif()
 
-set(PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/../../proto/recommend.proto)
-protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILE})
+if(PAIREC_USE_PREGENERATED_PROTO)
+  set(PAIREC_PROTO_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/generated)
+  set(PROTO_SRCS ${PAIREC_PROTO_INCLUDE_DIR}/recommend.pb.cc)
+  set(PROTO_HDRS ${PAIREC_PROTO_INCLUDE_DIR}/recommend.pb.h)
+  set(PIPELINE_PROTO_SRCS ${PAIREC_PROTO_INCLUDE_DIR}/pipeline_service.pb.cc)
+  set(PIPELINE_PROTO_HDRS ${PAIREC_PROTO_INCLUDE_DIR}/pipeline_service.pb.h)
+  foreach(GENERATED_PROTO_FILE IN LISTS PROTO_SRCS PROTO_HDRS PIPELINE_PROTO_SRCS PIPELINE_PROTO_HDRS)
+    if(NOT EXISTS "${GENERATED_PROTO_FILE}")
+      message(FATAL_ERROR "Missing pre-generated protobuf source: ${GENERATED_PROTO_FILE}")
+    endif()
+  endforeach()
+  message(STATUS "Using pre-generated protoc 3.12.4 C++ sources")
+else()
+  set(PAIREC_PROTO_INCLUDE_DIR ${CMAKE_CURRENT_BINARY_DIR})
+  set(PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/../../proto/recommend.proto)
+  protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILE})
 
-set(PIPELINE_PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/../../proto/pipeline_service.proto)
-protobuf_generate_cpp(PIPELINE_PROTO_SRCS PIPELINE_PROTO_HDRS ${PIPELINE_PROTO_FILE})
+  set(PIPELINE_PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/../../proto/pipeline_service.proto)
+  protobuf_generate_cpp(PIPELINE_PROTO_SRCS PIPELINE_PROTO_HDRS ${PIPELINE_PROTO_FILE})
+endif()
 
 add_library(pairec_recommend_proto ${PROTO_SRCS} ${PROTO_HDRS})
 target_include_directories(
   pairec_recommend_proto
   PUBLIC
-    ${CMAKE_CURRENT_BINARY_DIR}
+    ${PAIREC_PROTO_INCLUDE_DIR}
     ${Protobuf_INCLUDE_DIRS}
 )
 target_link_libraries(pairec_recommend_proto PUBLIC protobuf::libprotobuf)
@@ -310,7 +326,7 @@ add_library(pairec_pipeline_proto ${PIPELINE_PROTO_SRCS} ${PIPELINE_PROTO_HDRS})
 target_include_directories(
   pairec_pipeline_proto
   PUBLIC
-    ${CMAKE_CURRENT_BINARY_DIR}
+    ${PAIREC_PROTO_INCLUDE_DIR}
     ${Protobuf_INCLUDE_DIRS}
 )
 target_link_libraries(pairec_pipeline_proto PUBLIC protobuf::libprotobuf)
