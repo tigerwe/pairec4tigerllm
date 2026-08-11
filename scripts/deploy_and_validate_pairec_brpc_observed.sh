@@ -283,57 +283,88 @@ PY
   done
 }
 
-echo "== Warm up PaiRec =="
-if (( WARMUP_REQUESTS > 0 )); then
-  run_requests "$PAIREC_URL" "$WARMUP_REQUESTS" "$OUTPUT_DIR/warmup" 1
-fi
+wait_for_native_completions() {
+  local requests_tsv="$1" since_time="$2" output_log="$3" phase="$4"
+  local deadline="$((SECONDS + 35))"
+  while true; do
+    kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference \
+      --since-time="$since_time" >"$output_log"
+    if python3 - "$requests_tsv" "$output_log" <<'PY'
+import csv
+import json
+import pathlib
+import sys
 
-echo "== Run pure BRPC observed workload: $REQUESTS requests =="
-mkdir -p "$OUTPUT_DIR/brpc"
-INFERENCE_POD="$(ready_pod_for_app "$INFERENCE_SERVICE")"
-if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
-  kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference \
-    >"$OUTPUT_DIR/brpc/inference-startup.log"
-  if ! grep -q '"event":"datasystem_attribution_ready"' \
-      "$OUTPUT_DIR/brpc/inference-startup.log"; then
-    kubectl -n "$NAMESPACE" get pod -l "app=$INFERENCE_SERVICE" -o wide || true
-    tail -200 "$OUTPUT_DIR/brpc/inference-startup.log" >&2 || true
-    die "native DataSystem attribution capability marker is missing from ready pod $INFERENCE_POD"
-  fi
-fi
-since="$(date --iso-8601=seconds)"
-run_requests "$PAIREC_URL" "$REQUESTS" "$OUTPUT_DIR/brpc" 1
-kubectl -n "$NAMESPACE" logs "$PAIREC_POD" --since-time="$since" >"$OUTPUT_DIR/brpc/pairec.log"
-
-attribution_deadline="$((SECONDS + 35))"
-while true; do
-  kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference \
-    --since-time="$since" >"$OUTPUT_DIR/brpc/inference.log"
-  if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" != 1 ]]; then
-    break
-  fi
-  if python3 - "$OUTPUT_DIR/brpc/requests.tsv" "$OUTPUT_DIR/brpc/inference.log" <<'PY'
-import csv, json, pathlib, sys
-expected = {row["request_id"] for row in csv.DictReader(open(sys.argv[1]), delimiter="\t")}
-observed = set()
-for line in pathlib.Path(sys.argv[2]).read_text(errors="replace").splitlines():
+requests_path, log_path = sys.argv[1:]
+expected = {
+    row["request_id"]
+    for row in csv.DictReader(open(requests_path, encoding="utf-8"), delimiter="\t")
+}
+observed = {request_id: [] for request_id in expected}
+for line in pathlib.Path(log_path).read_text(errors="replace").splitlines():
     if '"event":"datasystem_request_complete"' not in line:
         continue
     try:
         event = json.loads(line[line.index("{"):])
     except (ValueError, json.JSONDecodeError):
         continue
-    if event.get("request_id"):
-        observed.add(event["request_id"])
-raise SystemExit(0 if expected <= observed else 1)
+    request_id = event.get("request_id")
+    if request_id in observed:
+        observed[request_id].append(event)
+
+valid = bool(expected)
+for events in observed.values():
+    if len(events) != 1:
+        valid = False
+        continue
+    event = events[0]
+    if event.get("attribution_complete") is not True:
+        valid = False
+    for field in (
+        "get_failed_count", "set_failed_count", "pending_count", "unknown_count"
+    ):
+        if int(event.get(field, 0)) != 0:
+            valid = False
+raise SystemExit(0 if valid else 1)
 PY
-  then
-    break
+    then
+      echo "NATIVE_DATASYSTEM_COMPLETIONS_OK phase=$phase"
+      return
+    fi
+    if (( SECONDS >= deadline )); then
+      tail -200 "$output_log" >&2 || true
+      die "invalid or missing native DataSystem completion events for phase=$phase pod=$INFERENCE_POD"
+    fi
+    sleep 1
+  done
+}
+
+INFERENCE_POD="$(ready_pod_for_app "$INFERENCE_SERVICE")"
+echo "== Warm up PaiRec =="
+if (( WARMUP_REQUESTS > 0 )); then
+  warmup_since="$(date --iso-8601=seconds)"
+  run_requests "$PAIREC_URL" "$WARMUP_REQUESTS" "$OUTPUT_DIR/warmup" 1
+  if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
+    wait_for_native_completions \
+      "$OUTPUT_DIR/warmup/requests.tsv" "$warmup_since" \
+      "$OUTPUT_DIR/warmup/inference.log" warmup
   fi
-  (( SECONDS < attribution_deadline )) \
-    || die "timed out waiting for native DataSystem completion events"
-  sleep 1
-done
+fi
+
+echo "== Run pure BRPC observed workload: $REQUESTS requests =="
+mkdir -p "$OUTPUT_DIR/brpc"
+since="$(date --iso-8601=seconds)"
+run_requests "$PAIREC_URL" "$REQUESTS" "$OUTPUT_DIR/brpc" 1
+kubectl -n "$NAMESPACE" logs "$PAIREC_POD" --since-time="$since" >"$OUTPUT_DIR/brpc/pairec.log"
+
+if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
+  wait_for_native_completions \
+    "$OUTPUT_DIR/brpc/requests.tsv" "$since" \
+    "$OUTPUT_DIR/brpc/inference.log" workload
+else
+  kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference \
+    --since-time="$since" >"$OUTPUT_DIR/brpc/inference.log"
+fi
 
 summary_args=(
   --log "$OUTPUT_DIR/brpc/pairec.log"
