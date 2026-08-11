@@ -110,6 +110,7 @@ echo "== Configure native DataSystem request attribution =="
 kubectl -n "$NAMESPACE" set env "deployment/$INFERENCE_SERVICE" \
     "TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION=$REQUIRE_DATASYSTEM_ATTRIBUTION" \
     TRTLLM_DATASYSTEM_ATTRIBUTION_TTL_SECONDS=30 \
+    TLLM_LOG_LEVEL=INFO \
     "PAIREC_REQUIRE_NATIVE_DATASYSTEM_ATTRIBUTION=$REQUIRE_DATASYSTEM_ATTRIBUTION"
 kubectl -n "$NAMESPACE" rollout status "deployment/$INFERENCE_SERVICE" --timeout=10m
 
@@ -369,6 +370,11 @@ if (( WARMUP_REQUESTS > 0 )); then
     wait_for_native_completions \
       "$OUTPUT_DIR/warmup/requests.tsv" "$warmup_since" \
       "$OUTPUT_DIR/warmup/inference.log" warmup
+    if grep -Fq '[TensorRT-LLM][DEBUG]' "$OUTPUT_DIR/warmup/inference.log"; then
+      tail -200 "$OUTPUT_DIR/warmup/inference.log" >&2 || true
+      die "TLLM_LOG_LEVEL=INFO is not effective; refusing a rotation-prone workload"
+    fi
+    echo "TLLM_INFO_LOG_LEVEL_OK"
   fi
 fi
 

@@ -88,6 +88,14 @@ class PaiRecBrpcObservedDeployScriptTest(unittest.TestCase):
         self.assertLess(warmup, gate)
         self.assertLess(gate, workload)
 
+    def test_formal_workload_requires_effective_info_log_level(self):
+        text = SCRIPT.read_text()
+        self.assertIn("TLLM_LOG_LEVEL=INFO", text)
+        debug_gate = text.index("TLLM_LOG_LEVEL=INFO is not effective")
+        workload = text.index('echo "== Run pure BRPC observed workload', debug_gate)
+        self.assertIn("'[TensorRT-LLM][DEBUG]'", text)
+        self.assertLess(debug_gate, workload)
+
     def test_workload_logs_are_streamed_before_requests(self):
         text = SCRIPT.read_text()
         workload = text.index('echo "== Run pure BRPC observed workload')
