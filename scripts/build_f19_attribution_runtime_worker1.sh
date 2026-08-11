@@ -11,13 +11,14 @@ detected_jobs="$(nproc)"
 default_jobs="$detected_jobs"
 if (( default_jobs > 32 )); then default_jobs=32; fi
 JOBS="${JOBS:-$default_jobs}"
-BUILD_IMAGE="${BUILD_IMAGE:-}"
+TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-zcx-pairec-image:v1.1}"
+GATEWAY_BUILD_IMAGE="${GATEWAY_BUILD_IMAGE:-}"
 SHOW_HISTORY="${SHOW_HISTORY:-1}"
 APPLY_PATCH="${APPLY_PATCH:-1}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-for command in docker find grep install sha256sum strings; do
+for command in docker find grep install mktemp sha256sum strings; do
   command -v "$command" >/dev/null || die "missing command: $command"
 done
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
@@ -51,27 +52,50 @@ if [[ "$SHOW_HISTORY" = 1 ]]; then
   fi
 fi
 
-if [[ -z "$BUILD_IMAGE" ]]; then
-  candidates=(
-    "zcx-pairec-image:v1.1"
+docker image inspect "$TRT_BUILD_IMAGE" >/dev/null 2>&1 \
+  || die "TRT build image is not present in Docker: $TRT_BUILD_IMAGE"
+trt_image_arch="$(docker image inspect "$TRT_BUILD_IMAGE" --format '{{.Architecture}}')"
+[[ "$trt_image_arch" = arm64 ]] \
+  || die "TRT build image architecture must be arm64, got $trt_image_arch"
+
+gateway_image_has_sdk() {
+  local image="$1"
+  docker image inspect "$image" >/dev/null 2>&1 || return 1
+  [[ "$(docker image inspect "$image" --format '{{.Architecture}}')" = arm64 ]] || return 1
+  docker run --rm --entrypoint /bin/bash "$image" -lc '
+    set -e
+    command -v cmake >/dev/null
+    command -v c++ >/dev/null
+    command -v protoc >/dev/null
+    test -f /usr/local/include/brpc/server.h
+    test -f /usr/local/include/google/protobuf/message.h
+    { test ! -e /TensorRT-LLM || test -d /TensorRT-LLM; }
+    find /usr/local/lib /usr/local/lib64 -maxdepth 1 -type f \
+      \( -name "libbrpc.so*" -o -name "libbrpc.a" \) -print -quit 2>/dev/null \
+      | grep -q .
+  ' >/dev/null 2>&1
+}
+
+if [[ -n "$GATEWAY_BUILD_IMAGE" ]]; then
+  gateway_image_has_sdk "$GATEWAY_BUILD_IMAGE" \
+    || die "gateway build image lacks protoc/protobuf/brpc SDK: $GATEWAY_BUILD_IMAGE"
+else
+  gateway_candidates=(
     "pairec-brpc-inference:k8s-arm64-trtllm-multisequence-kvc-ctx224-v1"
     "pairec-brpc-inference:k8s-arm64-trtllm-parallel-get-ctx224-v1"
     "pairec-brpc-inference:k8s-arm64-trtllm-multisequence-ctx224-v3"
     "pairec-brpc-inference:k8s-arm64-trtllm-native-batch-ctx224-align32-v1"
   )
-  for candidate in "${candidates[@]}"; do
-    if docker image inspect "$candidate" >/dev/null 2>&1; then
-      BUILD_IMAGE="$candidate"
+  for candidate in "${gateway_candidates[@]}"; do
+    if gateway_image_has_sdk "$candidate"; then
+      GATEWAY_BUILD_IMAGE="$candidate"
       break
     fi
   done
 fi
-[[ -n "$BUILD_IMAGE" ]] || die "no supported local TRT-LLM build image found; set BUILD_IMAGE explicitly"
-docker image inspect "$BUILD_IMAGE" >/dev/null 2>&1 \
-  || die "build image is not present in Docker: $BUILD_IMAGE"
-
-image_arch="$(docker image inspect "$BUILD_IMAGE" --format '{{.Architecture}}')"
-[[ "$image_arch" = arm64 ]] || die "build image architecture must be arm64, got $image_arch"
+[[ -n "$GATEWAY_BUILD_IMAGE" ]] || die \
+  "no local arm64 gateway image contains protoc, protobuf and brpc SDK; set GATEWAY_BUILD_IMAGE"
+gateway_image_arch="$(docker image inspect "$GATEWAY_BUILD_IMAGE" --format '{{.Architecture}}')"
 
 cuda_driver_dir="${CUDA_DRIVER_DIR:-}"
 if [[ -z "$cuda_driver_dir" ]]; then
@@ -86,20 +110,74 @@ fi
     && -f "$cuda_driver_dir/libcuda.so.1" ]] \
   || die "host driver directory containing libcuda.so.1 was not found; set CUDA_DRIVER_DIR"
 
-mkdir -p "$RUNTIME_DIR/bin" "$RUNTIME_DIR/lib"
+runtime_parent="$(dirname "$RUNTIME_DIR")"
+mkdir -p "$runtime_parent"
+staging_dir="$(mktemp -d "${RUNTIME_DIR}.staging.XXXXXX")"
+cleanup() { rm -rf -- "$staging_dir"; }
+trap cleanup EXIT
+mkdir -p "$staging_dir/bin" "$staging_dir/lib"
 
-echo "== F19 V2 worker1 build configuration =="
+echo "== F19 V2 worker1 dual-container build configuration =="
 echo "repo_dir=$REPO_DIR"
 echo "trtllm_dir=$TRTLLM_DIR"
 echo "runtime_dir=$RUNTIME_DIR"
+echo "staging_dir=$staging_dir"
 echo "container_repo_dir=$CONTAINER_REPO_DIR"
 echo "container_trtllm_dir=$CONTAINER_TRTLLM_DIR"
-echo "build_image=$BUILD_IMAGE"
-echo "image_arch=$image_arch"
+echo "trt_build_image=$TRT_BUILD_IMAGE"
+echo "trt_image_arch=$trt_image_arch"
+echo "gateway_build_image=$GATEWAY_BUILD_IMAGE"
+echo "gateway_image_arch=$gateway_image_arch"
 echo "cuda_driver_dir=$cuda_driver_dir"
 echo "jobs=$JOBS detected_jobs=$detected_jobs"
 echo "apply_patch=$APPLY_PATCH"
 
+echo "== Stage 1/2: build TensorRT-LLM shared library =="
+docker run --rm \
+  --gpus all \
+  --network host \
+  --ipc host \
+  --entrypoint /bin/bash \
+  -e JOBS="$JOBS" \
+  -e TRTLLM_DIR="$CONTAINER_TRTLLM_DIR" \
+  -v "$TRTLLM_DIR:$CONTAINER_TRTLLM_DIR" \
+  -v "$staging_dir:/out" \
+  -v "$cuda_driver_dir:/host-driver:ro" \
+  "$TRT_BUILD_IMAGE" \
+  -lc '
+    set -euo pipefail
+    unset LD_PRELOAD
+
+    for command in cmake c++ install find strings; do
+      command -v "$command" >/dev/null || {
+        echo "ERROR: TRT build image missing command: $command" >&2
+        exit 1
+      }
+    done
+
+    cuda_static_dir="$(dirname "$(find /usr/local/cuda -type f -name libcudadevrt.a -print -quit)")"
+    [[ -f "$cuda_static_dir/libcudadevrt.a" ]] || {
+      echo "ERROR: libcudadevrt.a not found in TRT build image" >&2
+      exit 1
+    }
+    [[ -f "$cuda_static_dir/libcudart_static.a" ]] || {
+      echo "ERROR: libcudart_static.a not found beside libcudadevrt.a" >&2
+      exit 1
+    }
+    export LIBRARY_PATH="$cuda_static_dir:${LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="/host-driver:$TRTLLM_DIR/cpp/build/tensorrt_llm:$TRTLLM_DIR/cpp/build/tensorrt_llm/plugins:${LD_LIBRARY_PATH:-}"
+
+    cmake --build "$TRTLLM_DIR/cpp/build" --target tensorrt_llm -j"$JOBS"
+    trt_library="$TRTLLM_DIR/cpp/build/tensorrt_llm/libtensorrt_llm.so"
+    plugin_library="$TRTLLM_DIR/cpp/build/tensorrt_llm/plugins/libnvinfer_plugin_tensorrt_llm.so"
+    [[ -f "$trt_library" ]] || { echo "ERROR: missing $trt_library" >&2; exit 1; }
+    [[ -f "$plugin_library" ]] || { echo "ERROR: missing $plugin_library" >&2; exit 1; }
+    grep -Fq datasystem_request_complete < <(strings "$trt_library")
+    grep -Fq "\"version\":2" < <(strings "$trt_library")
+    install -m 0755 "$trt_library" /out/lib/libtensorrt_llm.so
+  '
+
+echo "== Stage 2/2: build BRPC inference gateway =="
 docker run --rm \
   --gpus all \
   --network host \
@@ -110,54 +188,42 @@ docker run --rm \
   -e TRTLLM_DIR="$CONTAINER_TRTLLM_DIR" \
   -v "$REPO_DIR:$CONTAINER_REPO_DIR:ro" \
   -v "$TRTLLM_DIR:$CONTAINER_TRTLLM_DIR" \
-  -v "$RUNTIME_DIR:/out" \
+  -v "$staging_dir:/out" \
   -v "$cuda_driver_dir:/host-driver:ro" \
-  "$BUILD_IMAGE" \
+  "$GATEWAY_BUILD_IMAGE" \
   -lc '
     set -euo pipefail
     unset LD_PRELOAD
 
     for command in cmake c++ protoc install find strings ldd; do
       command -v "$command" >/dev/null || {
-        echo "ERROR: build image missing command: $command" >&2
+        echo "ERROR: gateway build image missing command: $command" >&2
         exit 1
       }
     done
+    [[ -f /usr/local/include/brpc/server.h ]] || {
+      echo "ERROR: gateway build image missing brpc headers" >&2
+      exit 1
+    }
 
-    cuda_static_dir="$(dirname "$(find /usr/local/cuda -type f -name libcudadevrt.a -print -quit)")"
-    [[ -f "$cuda_static_dir/libcudadevrt.a" ]] || {
-      echo "ERROR: libcudadevrt.a not found in build image" >&2
-      exit 1
-    }
-    [[ -f "$cuda_static_dir/libcudart_static.a" ]] || {
-      echo "ERROR: libcudart_static.a not found beside libcudadevrt.a" >&2
-      exit 1
-    }
-    export LIBRARY_PATH="$cuda_static_dir:${LIBRARY_PATH:-}"
     export LD_LIBRARY_PATH="/host-driver:$TRTLLM_DIR/cpp/build/tensorrt_llm:$TRTLLM_DIR/cpp/build/tensorrt_llm/plugins:${LD_LIBRARY_PATH:-}"
-
-    ds_include="$(dirname "$(find /usr/local -type f -path "*/datasystem/include/datasystem/kv_client.h" -print -quit)")"
-    ds_include="${ds_include%/datasystem}"
+    ds_header="$(find /usr/local -type f -path "*/datasystem/include/datasystem/kv_client.h" -print -quit)"
+    ds_include="$(dirname "$(dirname "$ds_header")")"
     ds_library="$(find /usr/local -type f -path "*/datasystem/lib/libdatasystem.so" -print -quit)"
     [[ -f "$ds_include/datasystem/kv_client.h" ]] || {
-      echo "ERROR: DataSystem C++ headers not found in build image" >&2
+      echo "ERROR: DataSystem C++ headers not found in gateway build image" >&2
       exit 1
     }
     [[ -f "$ds_library" ]] || {
-      echo "ERROR: libdatasystem.so not found in build image" >&2
+      echo "ERROR: libdatasystem.so not found in gateway build image" >&2
       exit 1
     }
 
-    echo "== Build TensorRT-LLM shared library =="
-    cmake --build "$TRTLLM_DIR/cpp/build" --target tensorrt_llm -j"$JOBS"
     trt_library="$TRTLLM_DIR/cpp/build/tensorrt_llm/libtensorrt_llm.so"
     plugin_library="$TRTLLM_DIR/cpp/build/tensorrt_llm/plugins/libnvinfer_plugin_tensorrt_llm.so"
     [[ -f "$trt_library" ]] || { echo "ERROR: missing $trt_library" >&2; exit 1; }
     [[ -f "$plugin_library" ]] || { echo "ERROR: missing $plugin_library" >&2; exit 1; }
-    grep -Fq datasystem_request_complete < <(strings "$trt_library")
-    grep -Fq '"version":2' < <(strings "$trt_library")
 
-    echo "== Build BRPC inference gateway =="
     gateway_build=/tmp/f19-gateway-build-v2
     cmake -E remove_directory "$gateway_build"
     cmake -S "$REPO_DIR/cpp/brpc_gateway" -B "$gateway_build" \
@@ -180,12 +246,24 @@ docker run --rm \
       echo "ERROR: gateway has unresolved runtime dependencies" >&2
       exit 1
     fi
-
     install -m 0755 "$gateway" /out/bin/brpc_inference_server
-    install -m 0755 "$trt_library" /out/lib/libtensorrt_llm.so
   '
 
-echo "== Installed F19 V2 runtime =="
+echo "== Publish verified F19 V2 runtime =="
+test -x "$staging_dir/bin/brpc_inference_server" \
+  || die "staged gateway is missing"
+test -f "$staging_dir/lib/libtensorrt_llm.so" \
+  || die "staged TensorRT-LLM library is missing"
+grep -Fq output_token_count < <(strings "$staging_dir/bin/brpc_inference_server")
+grep -Fq runner_ms_per_output_token < <(strings "$staging_dir/bin/brpc_inference_server")
+grep -Fq datasystem_attribution_ready < <(strings "$staging_dir/lib/libtensorrt_llm.so")
+
+mkdir -p "$RUNTIME_DIR/bin" "$RUNTIME_DIR/lib"
+install -m 0755 "$staging_dir/bin/brpc_inference_server" \
+  "$RUNTIME_DIR/bin/brpc_inference_server"
+install -m 0755 "$staging_dir/lib/libtensorrt_llm.so" \
+  "$RUNTIME_DIR/lib/libtensorrt_llm.so"
+
 ls -lh \
   "$RUNTIME_DIR/bin/brpc_inference_server" \
   "$RUNTIME_DIR/lib/libtensorrt_llm.so"
@@ -194,5 +272,5 @@ sha256sum \
   "$RUNTIME_DIR/lib/libtensorrt_llm.so"
 grep -F -m1 output_token_count < <(strings "$RUNTIME_DIR/bin/brpc_inference_server")
 grep -F -m1 datasystem_attribution_ready < <(strings "$RUNTIME_DIR/lib/libtensorrt_llm.so")
-echo "F19_ATTRIBUTION_RUNTIME_BUILD_OK image=$BUILD_IMAGE runtime_dir=$RUNTIME_DIR"
+echo "F19_ATTRIBUTION_RUNTIME_BUILD_OK trt_image=$TRT_BUILD_IMAGE gateway_image=$GATEWAY_BUILD_IMAGE runtime_dir=$RUNTIME_DIR"
 echo "next=run on master: bash scripts/deploy_f19_datasystem_attribution_overlay.sh apply"

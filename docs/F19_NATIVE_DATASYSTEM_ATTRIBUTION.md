@@ -51,27 +51,37 @@ an already-patched V1/V2 tree also receives managed-source updates such as the V
 ready marker. Set `APPLY_PATCH=0` only for a deliberate compile-only rerun.
 
 The recovered worker1 command used `zcx-pairec-image:v1.1`, mounted the host source
-at `/TensorRT-LLM`, and mounted `/lib64` at `/host-driver`. The script preserves
-those container paths while keeping the host paths configurable; this avoids trying
-to mount a host directory over a non-directory image path. Its default build
-parallelism is capped at 32 even when worker1 reports hundreds of CPUs. Set `JOBS`
-explicitly only when a different memory/CPU tradeoff has been validated.
+at `/TensorRT-LLM`, and mounted `/lib64` at `/host-driver`. That image has the CUDA,
+TensorRT-LLM and DataSystem toolchain needed for `libtensorrt_llm.so`, but it does
+not contain `protoc` and therefore cannot rebuild the BRPC gateway from source.
 
-The build script runs on worker1 and writes both overlay artifacts to
-`/home/zcx/pairec-f19-runtime/{bin,lib}` only after all build checks pass. It prefers
-the recovered `zcx-pairec-image:v1.1` build image, then falls back to locally
-observed TRT-LLM inference images. Override the selected image
-only when another local image is known to contain the BRPC, TensorRT-LLM, CUDA and
-DataSystem development files:
+The script consequently uses two isolated build stages:
+
+1. `TRT_BUILD_IMAGE` defaults to `zcx-pairec-image:v1.1` and builds only
+   `libtensorrt_llm.so`.
+2. `GATEWAY_BUILD_IMAGE` is selected from the local BRPC inference images only after
+   an executable preflight confirms `protoc`, protobuf headers and the brpc SDK. It
+   builds only `brpc_inference_server` against the stage-one native library.
+
+Both containers mount the host TensorRT-LLM tree at `/TensorRT-LLM`; the gateway
+container mounts this repository at `/mnt/pairec-src`. The default build parallelism
+is capped at 32 even when worker1 reports hundreds of CPUs. Set `JOBS` explicitly
+only when a different memory/CPU tradeoff has been validated.
+
+The build script writes both artifacts to a staging directory. It publishes them to
+`/home/zcx/pairec-f19-runtime/{bin,lib}` only after both stages, marker checks and
+gateway `ldd` validation pass. Override either stage only with a locally verified
+ARM64 image:
 
 ```bash
-BUILD_IMAGE=pairec-brpc-inference:<local-build-capable-tag> \
+TRT_BUILD_IMAGE=zcx-pairec-image:v1.1 \
+GATEWAY_BUILD_IMAGE=pairec-brpc-inference:<local-brpc-sdk-tag> \
 TRTLLM_DIR=/home/zcx/TensorRT-LLM \
   bash scripts/build_f19_attribution_runtime_worker1.sh
 ```
 
-The script reproduces the two requirements discovered during the manual build: it
-mounts the worker1 NVIDIA driver as `/host-driver/libcuda.so.1`, and adds the CUDA
+The script reproduces the two requirements discovered during the manual native
+build: it mounts the worker1 driver directory at `/host-driver`, and adds the CUDA
 directory containing `libcudadevrt.a` and `libcudart_static.a` to `LIBRARY_PATH`.
 It rejects unresolved gateway libraries, missing V2 attribution markers and missing
 output-token trace fields before replacing the overlay. Success ends with
