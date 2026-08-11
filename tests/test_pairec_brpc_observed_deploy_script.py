@@ -96,6 +96,15 @@ class PaiRecBrpcObservedDeployScriptTest(unittest.TestCase):
         self.assertIn("'[TensorRT-LLM][DEBUG]'", text)
         self.assertLess(debug_gate, workload)
 
+    def test_optional_inference_restart_happens_after_env_update(self):
+        text = SCRIPT.read_text()
+        env_update = text.index('kubectl -n "$NAMESPACE" set env')
+        restart = text.index('kubectl -n "$NAMESPACE" rollout restart', env_update)
+        rollout = text.index('kubectl -n "$NAMESPACE" rollout status', restart)
+        self.assertIn('FORCE_INFERENCE_RESTART="${FORCE_INFERENCE_RESTART:-0}"', text)
+        self.assertLess(env_update, restart)
+        self.assertLess(restart, rollout)
+
     def test_workload_logs_are_streamed_before_requests(self):
         text = SCRIPT.read_text()
         workload = text.index('echo "== Run pure BRPC observed workload')
@@ -114,6 +123,19 @@ class PaiRecBrpcObservedDeployScriptTest(unittest.TestCase):
         self.assertLess(pairec_follow, requests)
         self.assertLess(inference_follow, requests)
         self.assertLess(requests, completion_gate)
+
+    def test_workload_throughput_excludes_completion_wait(self):
+        text = SCRIPT.read_text()
+        start = text.index('workload_start_ns="$(date +%s%N)"')
+        requests = text.index(
+            'run_requests "$PAIREC_URL" "$REQUESTS" "$OUTPUT_DIR/brpc" 1', start
+        )
+        end = text.index('workload_end_ns="$(date +%s%N)"', requests)
+        completion = text.index('wait_for_native_completions', end)
+        self.assertIn('"$OUTPUT_DIR/brpc/workload.json"', text[end:completion])
+        self.assertLess(start, requests)
+        self.assertLess(requests, end)
+        self.assertLess(end, completion)
 
     def test_log_collectors_are_cleaned_on_exit(self):
         text = SCRIPT.read_text()

@@ -146,3 +146,32 @@ Use at least three pairs and compare pair medians. The accepted overhead budget 
 Both modes must use the same image, workload, CPU limits, DataSystem endpoint, and
 cache preparation. Changing only `TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION` requires an
 inference rollout because the native process reads the flag once at startup.
+
+Run the formal paired benchmark from the master repository that controls the K8s
+Deployment:
+
+```bash
+PAIRS=3 \
+REQUESTS=1000 \
+WARMUP_REQUESTS=1 \
+  bash scripts/benchmark_f19_attribution_ab.sh \
+  | tee /tmp/f19-attribution-ab.log
+```
+
+Each pair runs `disabled` followed by `enabled`. Every round forces an inference
+rollout after setting the mode, which resets the native cache before the identical
+warmup. Images are neither rebuilt nor imported. The inner validator still checks
+business responses, trace closure, BRPC-only protocols, rerank, resource limits and
+Pod health; enabled rounds additionally require one exact native completion per
+request. Workload throughput is measured from immediately before the first request
+until the last response, excluding rollout and completion-wait time.
+
+The final result is written to the printed `summary_json` path. A passing run ends
+with both markers:
+
+```text
+classification=F19_ATTRIBUTION_AB_PASS
+F19_ATTRIBUTION_AB_BENCHMARK_COMPLETE
+```
+
+The final enabled round intentionally leaves strict attribution enabled.

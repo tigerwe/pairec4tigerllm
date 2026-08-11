@@ -18,6 +18,7 @@ RUN_HTTP_AB="${RUN_HTTP_AB:-1}"
 HTTP_BASELINE_SERVICE="${HTTP_BASELINE_SERVICE:-pairec-multi-recall-rank}"
 HTTP_BASELINE_REQUESTS="${HTTP_BASELINE_REQUESTS:-100}"
 REQUIRE_DATASYSTEM_ATTRIBUTION="${REQUIRE_DATASYSTEM_ATTRIBUTION:-0}"
+FORCE_INFERENCE_RESTART="${FORCE_INFERENCE_RESTART:-0}"
 RERANK_MAX_P99_MS="${RERANK_MAX_P99_MS:-1.0}"
 CLIENT_MAX_P99_MS="${CLIENT_MAX_P99_MS:-122.622}"
 PAIREC_IMAGE="${PAIREC_IMAGE:-docker.io/library/pairec-server:k8s-arm64-brpc-v1}"
@@ -82,7 +83,8 @@ done
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
 [[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
   || die "SERVICE_READY_TIMEOUT_SECONDS must be a positive integer"
-for value in "$BUILD_IMAGES" "$IMPORT_IMAGES" "$RUN_HTTP_AB" "$REQUIRE_DATASYSTEM_ATTRIBUTION"; do
+for value in "$BUILD_IMAGES" "$IMPORT_IMAGES" "$RUN_HTTP_AB" \
+  "$REQUIRE_DATASYSTEM_ATTRIBUTION" "$FORCE_INFERENCE_RESTART"; do
   [[ "$value" = 0 || "$value" = 1 ]] || die "boolean flags must be 0 or 1"
 done
 for command in kubectl python3 curl; do
@@ -112,6 +114,9 @@ kubectl -n "$NAMESPACE" set env "deployment/$INFERENCE_SERVICE" \
     TRTLLM_DATASYSTEM_ATTRIBUTION_TTL_SECONDS=30 \
     TLLM_LOG_LEVEL=INFO \
     "PAIREC_REQUIRE_NATIVE_DATASYSTEM_ATTRIBUTION=$REQUIRE_DATASYSTEM_ATTRIBUTION"
+if [[ "$FORCE_INFERENCE_RESTART" = 1 ]]; then
+  kubectl -n "$NAMESPACE" rollout restart "deployment/$INFERENCE_SERVICE"
+fi
 kubectl -n "$NAMESPACE" rollout status "deployment/$INFERENCE_SERVICE" --timeout=10m
 
 echo "== Build and import code images =="
@@ -395,7 +400,28 @@ kill -0 "$PAIREC_LOG_PID" >/dev/null 2>&1 \
 kill -0 "$INFERENCE_LOG_PID" >/dev/null 2>&1 \
   || die "inference log collector exited before workload"
 
+workload_start_ns="$(date +%s%N)"
 run_requests "$PAIREC_URL" "$REQUESTS" "$OUTPUT_DIR/brpc" 1
+workload_end_ns="$(date +%s%N)"
+python3 - "$workload_start_ns" "$workload_end_ns" "$REQUESTS" \
+  "$OUTPUT_DIR/brpc/workload.json" <<'PY'
+import json
+import sys
+
+start_ns, end_ns, requests, output = sys.argv[1:]
+elapsed_seconds = (int(end_ns) - int(start_ns)) / 1_000_000_000
+requests = int(requests)
+result = {
+    "requests": requests,
+    "elapsed_seconds": elapsed_seconds,
+    "throughput_rps": requests / elapsed_seconds,
+}
+open(output, "w").write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+print(
+    f'workload elapsed_seconds={elapsed_seconds:.6f} '
+    f'throughput_rps={result["throughput_rps"]:.6f}'
+)
+PY
 
 if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
   wait_for_native_completions \
