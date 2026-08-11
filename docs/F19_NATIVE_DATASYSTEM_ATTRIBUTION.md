@@ -120,6 +120,20 @@ REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION=1 \
   bash scripts/trace_single_brpc_datasystem_request.sh
 ```
 
+That fresh-cache smoke may correctly report `Get=0/Set=0`; it proves identity and
+lifecycle closure, but not real DataSystem I/O. To reproduce the previously stable
+cache shape and require the same UUID to own exactly three Sets and two Gets, run:
+
+```bash
+bash scripts/validate_f19_datasystem_real_io.sh \
+  | tee /tmp/f19-datasystem-real-io.log
+```
+
+The command verifies the strict runtime, restarts inference before every round,
+primes 195 requests, and performs three replay requests. A round passes only when
+the legacy offload/onboard trace and the unique native completion both report
+`3 Set + 2 Get`, with no failed, pending, or unattributed operation.
+
 ## Performance Check
 
 Measure disabled and enabled modes with alternating 1000-request runs after warmup.

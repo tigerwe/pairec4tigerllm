@@ -299,6 +299,7 @@ trt_set_get_probe_events = [parse_kv_fields(line) for line in trt_set_get_probe_
 
 ds_events = []
 datasystem_completion = None
+datasystem_completions = []
 for line in trt_log.splitlines():
     if '"event":"datasystem_request_complete"' in line:
         try:
@@ -306,6 +307,7 @@ for line in trt_log.splitlines():
         except (ValueError, json.JSONDecodeError):
             candidate = None
         if candidate and candidate.get("request_id") == request_id:
+            datasystem_completions.append(candidate)
             datasystem_completion = candidate
     if "[Datasystem][TRACE]" not in line:
         continue
@@ -337,6 +339,7 @@ summary = {
     "pairec_generative_trace": generative_trace,
     "pairec_recommend_trace": recommend_trace,
     "datasystem_request_complete": datasystem_completion,
+    "datasystem_request_completion_count": len(datasystem_completions),
 }
 
 with open(summary_json, "w", encoding="utf-8") as handle:
@@ -404,6 +407,7 @@ else:
 print("KVC/DataSystem access:")
 if datasystem_completion:
     print("  exact_request_attribution=true")
+    print(f"  completion_count={len(datasystem_completions)}")
     for key in ("get_count", "get_us", "set_count", "set_us",
                 "get_failed_count", "set_failed_count", "pending_count",
                 "unknown_count", "attribution_complete", "reason"):

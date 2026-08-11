@@ -6,6 +6,7 @@ REPEATS="${REPEATS:-3}"
 STRICT_COUNTS="${STRICT_COUNTS:-1}"
 EXPECTED_OFFLOADS="${EXPECTED_OFFLOADS:-3}"
 EXPECTED_ONBOARDS="${EXPECTED_ONBOARDS:-2}"
+REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION="${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION:-0}"
 
 BRPC_ENDPOINT="${BRPC_ENDPOINT:-192.168.100.11:18100}"
 BRPC_LOAD_ENDPOINT="${BRPC_LOAD_ENDPOINT:-$BRPC_ENDPOINT}"
@@ -148,6 +149,10 @@ validate() {
   case "$RESET_INFERENCE_BEFORE_ROUND" in
     0|1) ;;
     *) die "RESET_INFERENCE_BEFORE_ROUND must be 0 or 1" ;;
+  esac
+  case "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" in
+    0|1) ;;
+    *) die "REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION must be 0 or 1" ;;
   esac
   case "$KVC_DSBENCH_SUSTAINED" in
     0|1) ;;
@@ -468,6 +473,7 @@ run_replay() {
   USER_ID="$REPLAY_USER_ID" \
   SIZE="$REPLAY_SIZE" \
   TIMEOUT="$REPLAY_TIMEOUT" \
+  REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION="$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" \
   OUT_DIR="${round_dir}/replay" \
     bash scripts/trace_single_brpc_datasystem_request.sh \
     >"${round_dir}/replay.console.log" 2>&1
@@ -476,7 +482,7 @@ run_replay() {
 summarize() {
   python3 - "$OUT_DIR" "$MODE" "$REPEATS" "$EXPECTED_OFFLOADS" "$EXPECTED_ONBOARDS" \
     "$STRICT_COUNTS" "$RESULT_JSON" "$KVC_PRESSURE_ENGINE" "$KVC_GET_CLIENTS" "$KVC_SET_CLIENTS" \
-    "$KVC_DSBENCH_SUSTAINED" "$BRPC_LOAD_CONCURRENCY" \
+    "$KVC_DSBENCH_SUSTAINED" "$BRPC_LOAD_CONCURRENCY" "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" \
     <<'PY' | tee "$SUMMARY_TXT"
 import glob
 import json
@@ -488,7 +494,8 @@ import sys
 (
     out_dir, mode, repeats, expected_offloads, expected_onboards, strict_counts, result_path,
     pressure_engine, get_clients, set_clients, dsbench_sustained, brpc_load_concurrency,
-) = sys.argv[1:13]
+    require_exact_attribution,
+) = sys.argv[1:14]
 repeats = int(repeats)
 expected_offloads = int(expected_offloads)
 expected_onboards = int(expected_onboards)
@@ -497,6 +504,7 @@ get_clients = int(get_clients)
 set_clients = int(set_clients)
 brpc_load_concurrency = int(brpc_load_concurrency)
 dsbench_sustained = dsbench_sustained == "1"
+require_exact_attribution = require_exact_attribution == "1"
 kvc_pressure_required = (
     mode in {"kvc-get", "kvc-set", "kvc-mixed", "combined"}
     and (pressure_engine == "persistent" or dsbench_sustained)
@@ -620,6 +628,8 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
     client = raw.get("client") or {}
     trace = raw.get("pairec_generative_trace") or {}
     access = raw.get("kvc_access") or {}
+    exact = raw.get("datasystem_request_complete") or {}
+    exact_completion_count = int(number(raw.get("datasystem_request_completion_count")))
     brpc_events = raw.get("brpc_events") or []
     offloads = access.get("offload_events") or []
     onboards = access.get("onboard_events") or []
@@ -675,6 +685,18 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
         and crash_markers == 0
     )
     count_ok = len(offloads) == expected_offloads and len(onboards) == expected_onboards
+    exact_count_ok = (
+        exact_completion_count == 1
+        and exact.get("request_id") == raw.get("request_id")
+        and exact.get("attribution_complete") is True
+        and int(number(exact.get("set_count"))) == expected_offloads
+        and int(number(exact.get("get_count"))) == expected_onboards
+        and int(number(exact.get("get_failed_count"))) == 0
+        and int(number(exact.get("set_failed_count"))) == 0
+        and int(number(exact.get("pending_count"))) == 0
+        and int(number(exact.get("unknown_count"))) == 0
+    )
+    exact_attribution_ok = exact_count_ok or not require_exact_attribution
     response_ok = client.get("ok") is True and raw.get("response_code") == 200 and len(brpc_events) == 1
     kvc_get_calls = int(number(kvc_get_pressure.get("calls")))
     kvc_set_calls = int(number(kvc_set_pressure.get("calls")))
@@ -758,9 +780,22 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
     pressure_ok = kvc_pressure_ok and brpc_pressure_ok
     rows.append({
         "round": os.path.basename(os.path.dirname(os.path.dirname(path))).split("-")[-1],
-        "valid": response_ok and (count_ok or not strict_counts) and pressure_ok and runtime_ok,
+        "valid": response_ok and (count_ok or not strict_counts) and exact_attribution_ok and pressure_ok and runtime_ok,
         "response_ok": response_ok,
         "count_ok": count_ok,
+        "exact_attribution_ok": exact_attribution_ok,
+        "exact_count_ok": exact_count_ok,
+        "exact_completion_count": exact_completion_count,
+        "exact_request_id": exact.get("request_id", ""),
+        "exact_get_count": int(number(exact.get("get_count"))),
+        "exact_get_us": int(number(exact.get("get_us"))),
+        "exact_set_count": int(number(exact.get("set_count"))),
+        "exact_set_us": int(number(exact.get("set_us"))),
+        "exact_get_failed_count": int(number(exact.get("get_failed_count"))),
+        "exact_set_failed_count": int(number(exact.get("set_failed_count"))),
+        "exact_pending_count": int(number(exact.get("pending_count"))),
+        "exact_unknown_count": int(number(exact.get("unknown_count"))),
+        "exact_attribution_complete": exact.get("attribution_complete") is True,
         "pressure_ok": pressure_ok,
         "runtime_ok": runtime_ok,
         "e2e_ms": e2e_ms,
@@ -844,6 +879,7 @@ result = {
     "valid_repeats": len(valid),
     "expected_counts": {"offload": expected_offloads, "onboard": expected_onboards},
     "strict_counts": strict_counts,
+    "require_exact_datasystem_attribution": require_exact_attribution,
     "pressure_engine": pressure_engine,
     "dsbench_sustained": dsbench_sustained,
     "pressure_required": pressure_required,
@@ -870,12 +906,13 @@ if pressure_required:
         f"expected_set_inflight={set_clients if mode in {'kvc-set', 'kvc-mixed', 'combined'} else 0} "
         f"expected_brpc_active={brpc_load_concurrency if brpc_pressure_required else 0}"
     )
-print("  round valid e2e_ms server_ms brpc_ms kvc_ms offloads onboards server_other_ms outer_ms brpc_qps brpc_gbps brpc_active cpu_thr_pct get_qps get_inflight set_qps set_inflight restarts crashes")
+print("  round valid e2e_ms server_ms brpc_ms kvc_ms offloads onboards exact_set exact_get exact_ok server_other_ms outer_ms brpc_qps brpc_gbps brpc_active cpu_thr_pct get_qps get_inflight set_qps set_inflight restarts crashes")
 for row in rows:
     print(
         f"  {row['round']:>5} {str(row['valid']):>5} {row['e2e_ms']:>7.3f} {row['server_ms']:>9.3f} "
         f"{row['brpc_ms']:>7.3f} {row['kvc_ms']:>6.3f} {row['offload_count']:>8} "
-        f"{row['onboard_count']:>8} {row['server_other_ms']:>15.3f} {row['outer_ms']:>8.3f} "
+        f"{row['onboard_count']:>8} {row['exact_set_count']:>9} {row['exact_get_count']:>9} "
+        f"{str(row['exact_attribution_ok']):>8} {row['server_other_ms']:>15.3f} {row['outer_ms']:>8.3f} "
         f"{row['brpc_pressure_qps']:>9.3f} {row['brpc_pressure_gbps']:>10.3f} "
         f"{row['brpc_pressure_max_active']:>11} {row['brpc_pressure_cpu_throttled_period_pct']:>11.3f} "
         f"{row['kvc_get_qps']:>7.3f} {row['kvc_get_max_inflight']:>12} "
@@ -937,6 +974,7 @@ kvc_dsbench_sustained=${KVC_DSBENCH_SUSTAINED}
 expected_offloads=${EXPECTED_OFFLOADS}
 expected_onboards=${EXPECTED_ONBOARDS}
 strict_counts=${STRICT_COUNTS}
+require_exact_datasystem_attribution=${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION}
 reset_inference_before_round=${RESET_INFERENCE_BEFORE_ROUND}
 inference_rollout_timeout_seconds=${INFERENCE_ROLLOUT_TIMEOUT_SECONDS}
 EOF
