@@ -264,6 +264,7 @@ if (( WARMUP_REQUESTS > 0 )); then
 fi
 
 echo "== Run pure BRPC observed workload: $REQUESTS requests =="
+mkdir -p "$OUTPUT_DIR/brpc"
 INFERENCE_POD="$(kubectl -n "$NAMESPACE" get pod -l "app=$INFERENCE_SERVICE" \
   -o jsonpath='{.items[0].metadata.name}')"
 if [[ "$REQUIRE_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
