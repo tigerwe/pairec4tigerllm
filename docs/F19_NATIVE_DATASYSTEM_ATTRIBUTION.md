@@ -175,3 +175,24 @@ F19_ATTRIBUTION_AB_BENCHMARK_COMPLETE
 ```
 
 The final enabled round intentionally leaves strict attribution enabled.
+Disabled rows report zero DataSystem counts because request attribution is disabled;
+the underlying DataSystem KVC path remains configured and is not disabled by this
+benchmark.
+
+## Formal Result
+
+The 2026-08-11 ARM64/Kubernetes run completed three 1000-request pairs. Every round
+passed the business, trace, BRPC-only, rerank, resource and Pod-health gates. All
+enabled rounds joined 1000/1000 exact native completion events and each observed 54
+Gets plus 1995 Sets. Pair-median attribution overhead was:
+
+- client E2E average: -0.672 ms
+- client E2E p99: -1.947 ms
+- closed-loop throughput loss: 0.076 percent
+- runner average: -0.188 ms
+- runner p99: -1.000 ms
+
+The result was `F19_ATTRIBUTION_AB_PASS`. Both disabled and enabled runner latency
+remained around 181-192 ms, so the roughly 85 ms increase relative to the historical
+F20 runtime is common to the current TRT/KVC runtime and is not caused by request
+attribution.

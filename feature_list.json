@@ -245,7 +245,7 @@
     {
       "id": "F19",
       "name": "Native TRT KVC 请求级 DataSystem 归因",
-      "status": "in_progress",
+      "status": "done",
       "description": "在 native TensorRT-LLM KVC offload/onboard 路径传播 PaiRec request identity，并将同一请求的 DataSystem Get/Set 次数与整数微秒耗时准确回传到 pipeline trace。",
       "branch": "pairec-brpc-observability",
       "files": [
@@ -267,8 +267,9 @@
         "tests/test_pairec_brpc_observed_deploy_script.py"
       ],
       "validation_method": "在真实 native TRT KVC 工作负载中打开 REQUIRE_DATASYSTEM_ATTRIBUTION=1；1000 请求均必须 attribution_complete=true，Get/Set 只能来自相同 request_id 的原生事件，不允许从时间窗口或聚合日志推断；业务、trace闭合、资源和无fallback门禁继续通过。",
-      "validation_evidence": "本地：补丁对全新TensorRT-LLM源码副本连续应用两次成功；独立C++17 tracker smoke确认两个native lifecycle聚合同一UUID的Get/Set并在pending超时时输出incomplete；pipeline/patcher/overlay/真实I/O/Pod选择/A-B汇总/验收脚本专项30项单测通过，动态正反夹具确认旧窗口3/2不能掩盖native completion 0/0，且多Pod并存时只选择最新Running/Ready Pod。正式验收强制TLLM INFO级别并在warmup后拒绝任何DEBUG行；请求前流式采集PaiRec与inference日志并自动清理collector。远端worker1：K8s Pod以F19 gateway作为PID1，loader实际路径SHA256匹配F19 native library，ldd无缺库，严格Health通过。首个新鲜缓存UUID得到唯一0/0 completion并正确闭合。随后连续3轮reset + prime195 + PaiRec replay全部PASS：旧trace和唯一同UUID native completion每轮均为3 Set + 2 Get，complete=true，失败/pending/unknown为0，Pod无重启/crash；E2E均值256.487ms、BRPC差值4ms、KVC均值33.714ms。INFO门禁下正式1000请求严格验收通过：warmup/workload均确认native completion完整，workload valid=1000/1000、missing=0、invalid=0、datasystem_complete=1000；E2E avg/p99=195.395/207.795ms，generative avg=184.332ms、inference avg=179.852ms，vector与DeepFM avg=8.883/9.249ms。原生事件共1995 Set和66 Get；每请求Set累计avg/p99=11.496/14.201ms，Get累计avg/p99=0.414/7.096ms，不能解释约85ms生成时延增量。之前缺失事件确认为DEBUG日志采集背压，不是Set挂死。",
-      "next_step": "在master执行scripts/benchmark_f19_attribution_ab.sh完成至少三组disabled/enabled配对；脚本每轮强制inference rollout并统一warmup，禁止重建镜像，按配对中位数验证平均开销<=0.1ms、p99<=0.5ms、闭环吞吐损失<=1%，同时输出runner_generate与DataSystem分布以定位当前约85ms生成时延增量。"
+      "validation_evidence": "本地：补丁对全新TensorRT-LLM源码副本连续应用两次成功；独立C++17 tracker smoke确认两个native lifecycle聚合同一UUID的Get/Set并在pending超时时输出incomplete；pipeline/patcher/overlay/真实I/O/Pod选择/A-B汇总/验收脚本专项30项单测通过，动态正反夹具确认旧窗口3/2不能掩盖native completion 0/0，且多Pod并存时只选择最新Running/Ready Pod。正式验收强制TLLM INFO级别并在warmup后拒绝任何DEBUG行；请求前流式采集PaiRec与inference日志并自动清理collector。远端worker1：K8s Pod以F19 gateway作为PID1，loader实际路径SHA256匹配F19 native library，ldd无缺库，严格Health通过。首个新鲜缓存UUID得到唯一0/0 completion并正确闭合。随后连续3轮reset + prime195 + PaiRec replay全部PASS：旧trace和唯一同UUID native completion每轮均为3 Set + 2 Get，complete=true，失败/pending/unknown为0，Pod无重启/crash；E2E均值256.487ms、BRPC差值4ms、KVC均值33.714ms。INFO门禁下正式1000请求严格验收通过：warmup/workload均确认native completion完整，workload valid=1000/1000、missing=0、invalid=0、datasystem_complete=1000；E2E avg/p99=195.395/207.795ms，generative avg=184.332ms、inference avg=179.852ms，vector与DeepFM avg=8.883/9.249ms。原生事件共1995 Set和66 Get；每请求Set累计avg/p99=11.496/14.201ms，Get累计avg/p99=0.414/7.096ms。正式三组disabled/enabled配对A/B中，enabled每轮1000/1000 completion完整且各记录54 Get/1995 Set；配对中位数client avg=-0.672ms、p99=-1.947ms、吞吐损失=0.076%，runner avg/p99=-0.188/-1.000ms，全部通过预算并分类F19_ATTRIBUTION_AB_PASS，证明约85ms共同生成时延增量不是归因tracker造成。",
+      "next_step": "F19已完成。将当前TRT/KVC overlay与F20历史runtime做独立受控A/B，比较engine、scheduler、host cache、DataSystem KVC开关和runner token步数，定位disabled/enabled共同存在的约85ms生成时延回归。",
+      "done_date": "2026-08-11"
     },
     {
       "id": "F20",
