@@ -99,6 +99,8 @@ type traceInfoPB struct {
 	DataSystemAsyncCount     *int32   `protobuf:"varint,37,opt,name=datasystem_async_count,json=datasystemAsyncCount" json:"datasystem_async_count,omitempty"`
 	DataSystemAsyncUS        *int64   `protobuf:"varint,38,opt,name=datasystem_async_us,json=datasystemAsyncUs" json:"datasystem_async_us,omitempty"`
 	DataSystemReason         *string  `protobuf:"bytes,39,opt,name=datasystem_attribution_reason,json=datasystemAttributionReason" json:"datasystem_attribution_reason,omitempty"`
+	OutputTokenCount         *int32   `protobuf:"varint,40,opt,name=output_token_count,json=outputTokenCount" json:"output_token_count,omitempty"`
+	RunnerMsPerOutputToken   *float64 `protobuf:"fixed64,41,opt,name=runner_ms_per_output_token,json=runnerMsPerOutputToken" json:"runner_ms_per_output_token,omitempty"`
 }
 
 func (m *traceInfoPB) Reset()         { *m = traceInfoPB{} }
@@ -221,6 +223,11 @@ func traceInfoFromProto(pb *traceInfoPB) *TraceInfo {
 		GenerateMs:               float64Value(pb.GenerateMs),
 		PromptMs:                 float64Value(pb.PromptMs),
 		RunnerGenerateMs:         float64Value(pb.RunnerGenerateMs),
+		RunnerCalls:              int(int32Value(pb.RunnerCalls)),
+		RunnerAvgMs:              float64Value(pb.RunnerAvgMs),
+		RunnerMaxMs:              float64Value(pb.RunnerMaxMs),
+		OutputTokenCount:         int(int32Value(pb.OutputTokenCount)),
+		RunnerMsPerOutputToken:   float64Value(pb.RunnerMsPerOutputToken),
 		ParseComboMs:             float64Value(pb.ParseComboMs),
 		OutputPadMs:              float64Value(pb.OutputPadMs),
 		BackendTotalMs:           float64Value(pb.BackendTotalMs),

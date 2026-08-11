@@ -34,6 +34,16 @@ def load_run(root: Path, pair: int, mode: str, expected: int) -> dict:
     runner = summary.get("service_phases", {}).get(
         "generative_recall.runner_generate_us", {}
     )
+    runner_per_token = summary.get("service_phases", {}).get(
+        "generative_recall.runner_per_output_token_us", {}
+    )
+    output_tokens = summary.get("service_counts", {}).get(
+        "generative_recall.output_token_count", {}
+    )
+    if int(runner_per_token.get("count", 0)) != expected:
+        raise ValueError(f"{run_dir}: runner per-token trace count is incomplete")
+    if int(output_tokens.get("count", 0)) != expected:
+        raise ValueError(f"{run_dir}: output token trace count is incomplete")
     datasystem = summary.get("datasystem", {})
     if int(workload.get("requests", -1)) != expected:
         raise ValueError(f"{run_dir}: workload request count does not match expected")
@@ -49,6 +59,10 @@ def load_run(root: Path, pair: int, mode: str, expected: int) -> dict:
         "throughput_rps": expected / elapsed_seconds,
         "runner_avg_ms": float(runner.get("avg_ms", 0.0)),
         "runner_p99_ms": float(runner.get("p99_ms", 0.0)),
+        "runner_per_token_avg_ms": float(runner_per_token.get("avg_ms", 0.0)),
+        "runner_per_token_p99_ms": float(runner_per_token.get("p99_ms", 0.0)),
+        "output_token_avg": float(output_tokens.get("avg", 0.0)),
+        "output_token_p99": float(output_tokens.get("p99", 0.0)),
         "datasystem_get_count": int(datasystem.get("get_count", 0)),
         "datasystem_set_count": int(datasystem.get("set_count", 0)),
         "datasystem_get_avg_ms": float(datasystem.get("get", {}).get("avg_ms", 0.0)),
@@ -77,6 +91,10 @@ def summarize(args: argparse.Namespace) -> dict:
                 - disabled["runner_avg_ms"],
                 "runner_p99_overhead_ms": enabled["runner_p99_ms"]
                 - disabled["runner_p99_ms"],
+                "runner_per_token_avg_overhead_ms": enabled["runner_per_token_avg_ms"]
+                - disabled["runner_per_token_avg_ms"],
+                "output_token_avg_delta": enabled["output_token_avg"]
+                - disabled["output_token_avg"],
             }
         )
 
@@ -88,12 +106,19 @@ def summarize(args: argparse.Namespace) -> dict:
             "throughput_loss_pct",
             "runner_avg_overhead_ms",
             "runner_p99_overhead_ms",
+            "runner_per_token_avg_overhead_ms",
+            "output_token_avg_delta",
         )
     }
     gates = {
         "avg_overhead": medians["avg_overhead_ms"] <= args.max_avg_overhead_ms,
         "p99_overhead": medians["p99_overhead_ms"] <= args.max_p99_overhead_ms,
         "throughput_loss": medians["throughput_loss_pct"] <= args.max_throughput_loss_pct,
+        "output_token_semantics": all(
+            abs(item["output_token_avg_delta"]) <= args.max_output_token_avg_delta
+            for item in comparisons),
+        "absolute_runner_latency": all(
+            run["runner_avg_ms"] <= args.max_runner_avg_ms for run in runs),
     }
     return {
         "classification": (
@@ -105,6 +130,8 @@ def summarize(args: argparse.Namespace) -> dict:
             "max_avg_overhead_ms": args.max_avg_overhead_ms,
             "max_p99_overhead_ms": args.max_p99_overhead_ms,
             "max_throughput_loss_pct": args.max_throughput_loss_pct,
+            "max_output_token_avg_delta": args.max_output_token_avg_delta,
+            "max_runner_avg_ms": args.max_runner_avg_ms,
         },
         "runs": runs,
         "comparisons": comparisons,
@@ -114,22 +141,25 @@ def summarize(args: argparse.Namespace) -> dict:
 
 
 def print_summary(result: dict) -> None:
-    print("pair mode client_avg_ms client_p99_ms throughput_rps runner_avg_ms runner_p99_ms ds_get ds_set")
+    print("pair mode client_avg_ms client_p99_ms throughput_rps runner_avg_ms runner_p99_ms runner_token_ms output_tokens ds_get ds_set")
     for run in result["runs"]:
         print(
             f'{run["pair"]:>4} {run["mode"]:>8} '
             f'{run["client_avg_ms"]:>13.3f} {run["client_p99_ms"]:>13.3f} '
             f'{run["throughput_rps"]:>14.3f} {run["runner_avg_ms"]:>13.3f} '
-            f'{run["runner_p99_ms"]:>13.3f} {run["datasystem_get_count"]:>6} '
+            f'{run["runner_p99_ms"]:>13.3f} {run["runner_per_token_avg_ms"]:>15.3f} '
+            f'{run["output_token_avg"]:>13.3f} {run["datasystem_get_count"]:>6} '
             f'{run["datasystem_set_count"]:>6}'
         )
-    print("pair avg_delta_ms p99_delta_ms throughput_loss_pct runner_avg_delta_ms runner_p99_delta_ms")
+    print("pair avg_delta_ms p99_delta_ms throughput_loss_pct runner_avg_delta_ms runner_p99_delta_ms runner_token_delta_ms output_token_delta")
     for item in result["comparisons"]:
         print(
             f'{item["pair"]:>4} {item["avg_overhead_ms"]:>12.3f} '
             f'{item["p99_overhead_ms"]:>12.3f} {item["throughput_loss_pct"]:>19.3f} '
             f'{item["runner_avg_overhead_ms"]:>19.3f} '
-            f'{item["runner_p99_overhead_ms"]:>19.3f}'
+            f'{item["runner_p99_overhead_ms"]:>19.3f} '
+            f'{item["runner_per_token_avg_overhead_ms"]:>21.3f} '
+            f'{item["output_token_avg_delta"]:>18.3f}'
         )
     medians = result["pair_medians"]
     print(
@@ -138,7 +168,9 @@ def print_summary(result: dict) -> None:
         f'p99_delta_ms={medians["p99_overhead_ms"]:.3f} '
         f'throughput_loss_pct={medians["throughput_loss_pct"]:.3f} '
         f'runner_avg_delta_ms={medians["runner_avg_overhead_ms"]:.3f} '
-        f'runner_p99_delta_ms={medians["runner_p99_overhead_ms"]:.3f}'
+        f'runner_p99_delta_ms={medians["runner_p99_overhead_ms"]:.3f} '
+        f'runner_token_delta_ms={medians["runner_per_token_avg_overhead_ms"]:.3f} '
+        f'output_token_delta={medians["output_token_avg_delta"]:.3f}'
     )
     print(f'classification={result["classification"]}')
 
@@ -151,6 +183,8 @@ def main() -> None:
     parser.add_argument("--max-avg-overhead-ms", type=float, default=0.1)
     parser.add_argument("--max-p99-overhead-ms", type=float, default=0.5)
     parser.add_argument("--max-throughput-loss-pct", type=float, default=1.0)
+    parser.add_argument("--max-output-token-avg-delta", type=float, default=0.0)
+    parser.add_argument("--max-runner-avg-ms", type=float, default=110.0)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     if args.pairs < 3:

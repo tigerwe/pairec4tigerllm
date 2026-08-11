@@ -1005,14 +1005,19 @@ class TrtllmCppBackend final : public InferenceBackend {
   void Recommend(
       const pairec::inference::RecommendRequest& request,
       pairec::inference::RecommendResponse* response) override {
-    const uint64_t datasystem_correlation_id =
-        datasystem_correlation_id_.fetch_add(1, std::memory_order_relaxed);
-    const uint64_t native_lifecycle_count = static_cast<uint64_t>(
-        std::max(config_.trt_num_samples, 1));
-    NativeDataSystemRequestLifecycle datasystem_lifecycle(
-        datasystem_correlation_id,
-        request.request_id(),
-        native_lifecycle_count);
+    std::optional<uint64_t> datasystem_correlation_id;
+    std::unique_ptr<NativeDataSystemRequestLifecycle> datasystem_lifecycle;
+    if (tensorrt_llm::batch_manager::kv_cache_manager::
+            dataSystemRequestAttributionEnabled()) {
+      datasystem_correlation_id =
+          datasystem_correlation_id_.fetch_add(1, std::memory_order_relaxed);
+      const uint64_t native_lifecycle_count = static_cast<uint64_t>(
+          std::max(config_.trt_num_samples, 1));
+      datasystem_lifecycle = std::make_unique<NativeDataSystemRequestLifecycle>(
+          *datasystem_correlation_id,
+          request.request_id(),
+          native_lifecycle_count);
+    }
     auto* trace = response->mutable_trace();
     butil::Timer prompt_timer;
     prompt_timer.start();
@@ -1044,15 +1049,19 @@ class TrtllmCppBackend final : public InferenceBackend {
               &runner_ms,
               &executor_enqueued,
               &error)) {
-        if (executor_enqueued) {
-          datasystem_lifecycle.HandOffOne();
-        } else {
-          datasystem_lifecycle.FinishOne();
+        if (datasystem_lifecycle) {
+          if (executor_enqueued) {
+            datasystem_lifecycle->HandOffOne();
+          } else {
+            datasystem_lifecycle->FinishOne();
+          }
         }
         response->set_error(error);
         return;
       }
-      datasystem_lifecycle.HandOffOne();
+      if (datasystem_lifecycle) {
+        datasystem_lifecycle->HandOffOne();
+      }
       runner_total_ms += runner_ms;
       runner_max_ms = std::max(runner_max_ms, runner_ms);
       ++runner_calls;
@@ -1064,6 +1073,11 @@ class TrtllmCppBackend final : public InferenceBackend {
       trace->set_runner_avg_ms(runner_total_ms / runner_calls);
     }
     trace->set_runner_max_ms(runner_max_ms);
+    trace->set_output_token_count(static_cast<int32_t>(sampled_tokens.size()));
+    if (!sampled_tokens.empty()) {
+      trace->set_runner_ms_per_output_token(
+          runner_total_ms / static_cast<double>(sampled_tokens.size()));
+    }
 
     butil::Timer parse_timer;
     parse_timer.start();
@@ -1198,7 +1212,7 @@ class TrtllmCppBackend final : public InferenceBackend {
   bool RunExecutor(
       const std::vector<int>& prompt_tokens,
       uint64_t seed,
-      uint64_t datasystem_correlation_id,
+      std::optional<uint64_t> datasystem_correlation_id,
       std::vector<int>* output_tokens,
       double* elapsed_ms,
       bool* executor_enqueued,
@@ -1233,7 +1247,9 @@ class TrtllmCppBackend final : public InferenceBackend {
               static_cast<texec::SizeType32>(tokenizer_.eos_id)),
           std::optional<texec::SizeType32>(
               static_cast<texec::SizeType32>(tokenizer_.pad_id)));
-      executor_request.setClientId(datasystem_correlation_id);
+      if (datasystem_correlation_id) {
+        executor_request.setClientId(*datasystem_correlation_id);
+      }
       const auto request_id = executor_->enqueueRequest(executor_request);
       *executor_enqueued = true;
       const auto deadline = std::chrono::steady_clock::now() +

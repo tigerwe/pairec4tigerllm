@@ -58,6 +58,8 @@ message TraceInfo {
   optional int32 datasystem_async_count = 37;
   optional int64 datasystem_async_us = 38;
   optional string datasystem_attribution_reason = 39;
+  optional int32 output_token_count = 40;
+  optional double runner_ms_per_output_token = 41;
 }
 
 message Recommendation {

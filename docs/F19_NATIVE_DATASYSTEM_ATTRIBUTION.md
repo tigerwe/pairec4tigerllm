@@ -142,6 +142,8 @@ Use at least three pairs and compare pair medians. The accepted overhead budget 
 - client E2E average increase: at most 0.1 ms
 - client E2E p99 increase: at most 0.5 ms
 - throughput loss: at most 1 percent
+- every disabled and enabled run runner average: at most 110 ms
+- paired output-token average difference: exactly zero
 
 Both modes must use the same image, workload, CPU limits, DataSystem endpoint, and
 cache preparation. Changing only `TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION` requires an
@@ -192,7 +194,17 @@ Gets plus 1995 Sets. Pair-median attribution overhead was:
 - runner average: -0.188 ms
 - runner p99: -1.000 ms
 
-The result was `F19_ATTRIBUTION_AB_PASS`. Both disabled and enabled runner latency
-remained around 181-192 ms, so the roughly 85 ms increase relative to the historical
-F20 runtime is common to the current TRT/KVC runtime and is not caused by request
-attribution.
+That result is retained as evidence for the tracker statistics and logging path, but
+it is no longer accepted as proof for the complete attribution patch. The disabled
+mode still set Executor `clientId` and performed the request-map lookup under
+`mSequencesMtx` for every generated token. Both modes therefore shared the most
+intrusive code path.
+
+The V2 patch makes disabled mode a real no-identity baseline: it does not allocate a
+correlation ID, set Executor `clientId`, or access the native request map. Enabled
+mode keeps exact attribution but moves the request map to a dedicated mutex so token
+accounting cannot contend with the scheduler's sequence critical section. Trace
+fields 40 and 41 report output-token count and runner milliseconds per output token.
+The benchmark now fails if token counts differ or if either mode remains above 110
+ms average runner latency. F19 remains in progress until this stricter benchmark
+passes remotely.

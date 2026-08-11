@@ -10,6 +10,8 @@ COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-5}"
 MAX_AVG_OVERHEAD_MS="${MAX_AVG_OVERHEAD_MS:-0.1}"
 MAX_P99_OVERHEAD_MS="${MAX_P99_OVERHEAD_MS:-0.5}"
 MAX_THROUGHPUT_LOSS_PCT="${MAX_THROUGHPUT_LOSS_PCT:-1.0}"
+MAX_OUTPUT_TOKEN_AVG_DELTA="${MAX_OUTPUT_TOKEN_AVG_DELTA:-0.0}"
+MAX_RUNNER_AVG_MS="${MAX_RUNNER_AVG_MS:-110.0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/f19-attribution-ab/$(date +%Y%m%d-%H%M%S)-$$}"
 OBSERVED_SCRIPT="${OBSERVED_SCRIPT:-$SCRIPT_DIR/deploy_and_validate_pairec_brpc_observed.sh}"
 SUMMARY_SCRIPT="${SUMMARY_SCRIPT:-$SCRIPT_DIR/summarize_f19_attribution_ab.py}"
@@ -37,6 +39,8 @@ echo "cache_preparation=inference rollout + identical warmup"
 echo "max_avg_overhead_ms=$MAX_AVG_OVERHEAD_MS"
 echo "max_p99_overhead_ms=$MAX_P99_OVERHEAD_MS"
 echo "max_throughput_loss_pct=$MAX_THROUGHPUT_LOSS_PCT"
+echo "max_output_token_avg_delta=$MAX_OUTPUT_TOKEN_AVG_DELTA"
+echo "max_runner_avg_ms=$MAX_RUNNER_AVG_MS"
 echo "output_root=$OUTPUT_ROOT"
 
 cd "$REPO_DIR"
@@ -84,6 +88,8 @@ python3 "$SUMMARY_SCRIPT" \
   --max-avg-overhead-ms "$MAX_AVG_OVERHEAD_MS" \
   --max-p99-overhead-ms "$MAX_P99_OVERHEAD_MS" \
   --max-throughput-loss-pct "$MAX_THROUGHPUT_LOSS_PCT" \
+  --max-output-token-avg-delta "$MAX_OUTPUT_TOKEN_AVG_DELTA" \
+  --max-runner-avg-ms "$MAX_RUNNER_AVG_MS" \
   --output "$OUTPUT_ROOT/summary.json"
 echo "summary_json=$OUTPUT_ROOT/summary.json"
 echo "F19_ATTRIBUTION_AB_BENCHMARK_COMPLETE"

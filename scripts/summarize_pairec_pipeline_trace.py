@@ -16,7 +16,10 @@ REQUIRED_SPANS = {
     "generative_recall", "vector_recall", "deepfm_rank", "rerank",
 }
 REQUIRED_SERVICE_FIELDS = {
-    "generative_recall": {"rpc_us", "inference_total_us", "runner_generate_us"},
+    "generative_recall": {
+        "rpc_us", "inference_total_us", "runner_generate_us",
+        "runner_per_output_token_us", "output_token_count",
+    },
     "vector_recall": {"service_total_us", "feature_us", "compute_us"},
     "deepfm_rank": {"service_total_us", "feature_us", "compute_us", "backend_rpc_us"},
 }
@@ -42,6 +45,17 @@ def metric(values):
         "p95_ms": round(percentile(values, 0.95) / 1000, 3),
         "p99_ms": round(percentile(values, 0.99) / 1000, 3),
         "max_ms": round(max(values) / 1000, 3) if values else 0.0,
+    }
+
+
+def count_metric(values):
+    return {
+        "count": len(values),
+        "avg": round(sum(values) / len(values), 3) if values else 0.0,
+        "p50": round(percentile(values, 0.50), 3),
+        "p95": round(percentile(values, 0.95), 3),
+        "p99": round(percentile(values, 0.99), 3),
+        "max": max(values) if values else 0,
     }
 
 
@@ -170,6 +184,12 @@ def validate(trace, require_datasystem, require_source_rerank=False):
         attributes = (spans_by_name.get(name) or {}).get("attributes") or {}
         for field in sorted(required_fields - set(attributes)):
             reasons.append(f"missing_service_field:{name}:{field}")
+    generative_attributes = (spans_by_name.get("generative_recall") or {}).get(
+        "attributes") or {}
+    if int(generative_attributes.get("output_token_count", 0)) <= 0:
+        reasons.append("invalid_service_field:generative_recall:output_token_count")
+    if int(generative_attributes.get("runner_per_output_token_us", 0)) <= 0:
+        reasons.append("invalid_service_field:generative_recall:runner_per_output_token_us")
     total_us = int(trace.get("pairec_total_us", -1))
     accounted_us = int(trace.get("accounted_us", -1))
     closure_error_us = abs(total_us - accounted_us)
@@ -243,6 +263,7 @@ def main():
 
     span_values = {}
     service_values = {}
+    service_counts = {}
     for trace in valid:
         for span in trace["spans"]:
             if span.get("enabled"):
@@ -250,6 +271,8 @@ def main():
                 for name, value in (span.get("attributes") or {}).items():
                     if name.endswith("_us") and isinstance(value, (int, float)):
                         service_values.setdefault(f'{span["name"]}.{name}', []).append(int(value))
+                    elif name.endswith("_count") and isinstance(value, (int, float)):
+                        service_counts.setdefault(f'{span["name"]}.{name}', []).append(int(value))
     summary = {
         "classification": "PAIREC_BRPC_PIPELINE_TRACE_OK",
         "expected": args.expected or len(expected_ids),
@@ -266,6 +289,8 @@ def main():
         "spans": {name: metric(values) for name, values in sorted(span_values.items())},
         "service_phases": {
             name: metric(values) for name, values in sorted(service_values.items())},
+        "service_counts": {
+            name: count_metric(values) for name, values in sorted(service_counts.items())},
         "datasystem_completion_event_count": len(datasystem_completions),
         "datasystem_duplicate_count": len(datasystem_duplicates),
         "datasystem_complete_count": sum(bool(
@@ -310,6 +335,11 @@ def main():
     for name, values in summary["service_phases"].items():
         print(name, values["count"], values["avg_ms"], values["p50_ms"],
               values["p95_ms"], values["p99_ms"], values["max_ms"])
+    if summary["service_counts"]:
+        print("count_metric count avg p50 p95 p99 max")
+        for name, values in summary["service_counts"].items():
+            print(name, values["count"], values["avg"], values["p50"],
+                  values["p95"], values["p99"], values["max"])
     print("valid={}/{} missing={} invalid={} datasystem_complete={}".format(
         len(valid), len(expected_ids), len(missing), len(invalid),
         summary["datasystem_complete_count"]))

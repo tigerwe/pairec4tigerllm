@@ -29,13 +29,18 @@ type RecommendRequest struct {
 
 // TraceInfo 推理服务回传的性能追踪信息.
 type TraceInfo struct {
-	TotalMs                  float64 `json:"total_ms"`                       // 推理服务总耗时
-	PrepareInputMs           float64 `json:"prepare_input_ms"`               // 输入准备耗时
-	InferMs                  float64 `json:"infer_ms"`                       // 推理分支总耗时
-	ModelForwardMs           float64 `json:"model_forward_ms"`               // 模型前向耗时
-	GenerateMs               float64 `json:"generate_ms"`                    // 生成总耗时
-	PromptMs                 float64 `json:"prompt_ms"`                      // TRT prompt 构造和 tokenize 耗时
-	RunnerGenerateMs         float64 `json:"runner_generate_ms"`             // TRT runner.generate 累计耗时
+	TotalMs                  float64 `json:"total_ms"`           // 推理服务总耗时
+	PrepareInputMs           float64 `json:"prepare_input_ms"`   // 输入准备耗时
+	InferMs                  float64 `json:"infer_ms"`           // 推理分支总耗时
+	ModelForwardMs           float64 `json:"model_forward_ms"`   // 模型前向耗时
+	GenerateMs               float64 `json:"generate_ms"`        // 生成总耗时
+	PromptMs                 float64 `json:"prompt_ms"`          // TRT prompt 构造和 tokenize 耗时
+	RunnerGenerateMs         float64 `json:"runner_generate_ms"` // TRT runner.generate 累计耗时
+	RunnerCalls              int     `json:"runner_calls"`
+	RunnerAvgMs              float64 `json:"runner_avg_ms"`
+	RunnerMaxMs              float64 `json:"runner_max_ms"`
+	OutputTokenCount         int     `json:"output_token_count"`
+	RunnerMsPerOutputToken   float64 `json:"runner_ms_per_output_token"`
 	ParseComboMs             float64 `json:"parse_combo_ms"`                 // TRT token 组合解析耗时
 	OutputPadMs              float64 `json:"output_pad_ms"`                  // TRT 输出补齐耗时
 	BackendTotalMs           float64 `json:"backend_total_ms"`               // TRT 后端 generate 总耗时

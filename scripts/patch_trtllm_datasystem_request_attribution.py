@@ -36,6 +36,7 @@ public:
     DataSystemRequestScope& operator=(DataSystemRequestScope const&) = delete;
 
 private:
+    bool mActive{false};
     std::optional<std::uint64_t> mPrevious;
 };
 
@@ -358,14 +359,21 @@ bool dataSystemRequestAttributionEnabled()
 }
 
 DataSystemRequestScope::DataSystemRequestScope(std::optional<std::uint64_t> correlationId)
-    : mPrevious(gCorrelationId)
 {
-    gCorrelationId = correlationId;
+    mActive = dataSystemRequestAttributionEnabled();
+    if (mActive)
+    {
+        mPrevious = gCorrelationId;
+        gCorrelationId = correlationId;
+    }
 }
 
 DataSystemRequestScope::~DataSystemRequestScope()
 {
-    gCorrelationId = mPrevious;
+    if (mActive)
+    {
+        gCorrelationId = mPrevious;
+    }
 }
 
 void registerDataSystemRequest(
@@ -427,6 +435,21 @@ def write_managed(path: Path, content: str) -> None:
     path.write_text(content)
 
 
+def replace_supported(path: Path, alternatives: tuple[str, ...], new: str) -> None:
+    text = path.read_text()
+    if new in text:
+        return
+    matches = [old for old in alternatives if text.count(old) == 1]
+    if matches:
+        longest = max(matches, key=len)
+        matches = [old for old in matches if len(old) == len(longest)]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected one supported anchor in {path}, found {len(matches)}: "
+            f"{tuple(old[:80] for old in alternatives)!r}")
+    path.write_text(text.replace(matches[0], new, 1))
+
+
 def patch_parallel_get(transfer: Path) -> None:
     transfer_text = transfer.read_text()
     if ("TRTLLM_DATASYSTEM_PARALLEL_GET" not in transfer_text
@@ -478,20 +501,28 @@ def patch_tree(root: Path) -> None:
     replace_once(cmake, "    dataTransceiverImpl.cpp\n", "    dataTransceiverImpl.cpp\n    datasystemRequestTracker.cpp\n")
 
     manager_h = include_dir / "kvCacheManager.h"
-    replace_once(manager_h,
-        "    std::unordered_map<LlmRequest::RequestIdType, GenerationRequest> mSequences;\n",
+    old_client_id_map = (
         "    std::unordered_map<LlmRequest::RequestIdType, GenerationRequest> mSequences;\n"
         "    // Exact Executor clientId used only for DataSystem request attribution.\n"
         "    std::unordered_map<LlmRequest::RequestIdType, std::optional<LlmRequest::RequestIdType>>\n"
         "        mDataSystemClientIds;\n")
+    new_client_id_map = (
+        "    std::unordered_map<LlmRequest::RequestIdType, GenerationRequest> mSequences;\n"
+        "    // Keep attribution lookups out of the scheduler's sequence critical section.\n"
+        "    std::mutex mDataSystemClientIdsMtx;\n"
+        "    std::unordered_map<LlmRequest::RequestIdType, std::optional<LlmRequest::RequestIdType>>\n"
+        "        mDataSystemClientIds;\n")
+    replace_supported(manager_h, (
+        "    std::unordered_map<LlmRequest::RequestIdType, GenerationRequest> mSequences;\n",
+        old_client_id_map,
+    ), new_client_id_map)
 
     manager = source_dir / "kvCacheManager.cpp"
     replace_once(manager,
         '#include "tensorrt_llm/batch_manager/kvCacheManager.h"\n',
         '#include "tensorrt_llm/batch_manager/kvCacheManager.h"\n'
         '#include "tensorrt_llm/batch_manager/datasystemRequestTracker.h"\n')
-    replace_once(manager,
-        "void KVCacheManager::addToken(RequestIdType requestId)\n{\n    auto& sequence = getSequence(requestId);\n",
+    old_add_token = (
         "void KVCacheManager::addToken(RequestIdType requestId)\n{\n"
         "    std::optional<RequestIdType> clientId;\n"
         "    {\n"
@@ -501,22 +532,62 @@ def patch_tree(root: Path) -> None:
         "    }\n"
         "    DataSystemRequestScope attributionScope(clientId);\n"
         "    auto& sequence = getSequence(requestId);\n")
-    replace_once(manager,
-        "{\n    // Need to add the bubble after the sink tokens to use even block size\n",
+    new_add_token = (
+        "void KVCacheManager::addToken(RequestIdType requestId)\n{\n"
+        "    // PAIREC_DATASYSTEM_REQUEST_ATTRIBUTION_ZERO_INTRUSION_DISABLED_V2\n"
+        "    std::optional<RequestIdType> clientId;\n"
+        "    if (dataSystemRequestAttributionEnabled())\n"
+        "    {\n"
+        "        std::scoped_lock lock(mDataSystemClientIdsMtx);\n"
+        "        auto const it = mDataSystemClientIds.find(requestId);\n"
+        "        if (it != mDataSystemClientIds.end()) clientId = it->second;\n"
+        "    }\n"
+        "    DataSystemRequestScope attributionScope(clientId);\n"
+        "    auto& sequence = getSequence(requestId);\n")
+    replace_supported(manager, (
+        "void KVCacheManager::addToken(RequestIdType requestId)\n{\n    auto& sequence = getSequence(requestId);\n",
+        old_add_token,
+    ), new_add_token)
+
+    old_add_sequence = (
         "{\n"
         "    auto const clientId = llmRequest ? llmRequest->mClientId : std::optional<RequestIdType>{};\n"
         "    DataSystemRequestScope attributionScope(clientId);\n"
         "    // Need to add the bubble after the sink tokens to use even block size\n")
-    replace_once(manager,
-        "    TLLM_CHECK(emplaceDone);\n    auto& sequence = seqIt->second;\n",
+    new_add_sequence = (
+        "{\n"
+        "    auto const attributionEnabled = dataSystemRequestAttributionEnabled();\n"
+        "    auto const clientId = attributionEnabled && llmRequest\n"
+        "        ? llmRequest->mClientId\n"
+        "        : std::optional<RequestIdType>{};\n"
+        "    DataSystemRequestScope attributionScope(clientId);\n"
+        "    // Need to add the bubble after the sink tokens to use even block size\n")
+    replace_supported(manager, (
+        "{\n    // Need to add the bubble after the sink tokens to use even block size\n",
+        old_add_sequence,
+    ), new_add_sequence)
+
+    old_add_sequence_store = (
         "    TLLM_CHECK(emplaceDone);\n"
         "    {\n"
         "        std::scoped_lock lock(mSequencesMtx);\n"
         "        mDataSystemClientIds[requestId] = clientId;\n"
         "    }\n"
         "    auto& sequence = seqIt->second;\n")
-    replace_once(manager,
-        "void KVCacheManager::removeSequence(RequestIdType requestId, OptionalRef<LlmRequest const> llmRequest)\n{\n",
+    new_add_sequence_store = (
+        "    TLLM_CHECK(emplaceDone);\n"
+        "    if (attributionEnabled)\n"
+        "    {\n"
+        "        std::scoped_lock lock(mDataSystemClientIdsMtx);\n"
+        "        mDataSystemClientIds[requestId] = clientId;\n"
+        "    }\n"
+        "    auto& sequence = seqIt->second;\n")
+    replace_supported(manager, (
+        "    TLLM_CHECK(emplaceDone);\n    auto& sequence = seqIt->second;\n",
+        old_add_sequence_store,
+    ), new_add_sequence_store)
+
+    old_remove_sequence = (
         "void KVCacheManager::removeSequence(RequestIdType requestId, OptionalRef<LlmRequest const> llmRequest)\n{\n"
         "    std::optional<RequestIdType> clientId = llmRequest ? llmRequest->mClientId : std::nullopt;\n"
         "    {\n"
@@ -525,14 +596,44 @@ def patch_tree(root: Path) -> None:
         "        if (!clientId && it != mDataSystemClientIds.end()) clientId = it->second;\n"
         "    }\n"
         "    DataSystemRequestScope attributionScope(clientId);\n")
-    replace_once(manager,
-        "    TLLM_LOG_TRACE(\"[%s]::%s stop\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n}\n\nvoid KVCacheManager::schedulingRemoveSequence",
+    new_remove_sequence = (
+        "void KVCacheManager::removeSequence(RequestIdType requestId, OptionalRef<LlmRequest const> llmRequest)\n{\n"
+        "    auto const attributionEnabled = dataSystemRequestAttributionEnabled();\n"
+        "    std::optional<RequestIdType> clientId;\n"
+        "    if (attributionEnabled)\n"
+        "    {\n"
+        "        clientId = llmRequest ? llmRequest->mClientId : std::nullopt;\n"
+        "        std::scoped_lock lock(mDataSystemClientIdsMtx);\n"
+        "        auto const it = mDataSystemClientIds.find(requestId);\n"
+        "        if (!clientId && it != mDataSystemClientIds.end()) clientId = it->second;\n"
+        "    }\n"
+        "    DataSystemRequestScope attributionScope(clientId);\n")
+    replace_supported(manager, (
+        "void KVCacheManager::removeSequence(RequestIdType requestId, OptionalRef<LlmRequest const> llmRequest)\n{\n",
+        old_remove_sequence,
+    ), new_remove_sequence)
+
+    old_remove_sequence_end = (
         "    {\n"
         "        std::scoped_lock lock(mSequencesMtx);\n"
         "        mDataSystemClientIds.erase(requestId);\n"
         "    }\n"
         "    if (clientId) finishDataSystemRequest(*clientId);\n"
-        "    TLLM_LOG_TRACE(\"[%s]::%s stop\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n}\n\nvoid KVCacheManager::schedulingRemoveSequence")
+        "    TLLM_LOG_TRACE(\"[%s]::%s stop\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n"
+        "}\n\nvoid KVCacheManager::schedulingRemoveSequence")
+    new_remove_sequence_end = (
+        "    if (attributionEnabled)\n"
+        "    {\n"
+        "        std::scoped_lock lock(mDataSystemClientIdsMtx);\n"
+        "        mDataSystemClientIds.erase(requestId);\n"
+        "    }\n"
+        "    if (clientId) finishDataSystemRequest(*clientId);\n"
+        "    TLLM_LOG_TRACE(\"[%s]::%s stop\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n"
+        "}\n\nvoid KVCacheManager::schedulingRemoveSequence")
+    replace_supported(manager, (
+        "    TLLM_LOG_TRACE(\"[%s]::%s stop\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n}\n\nvoid KVCacheManager::schedulingRemoveSequence",
+        old_remove_sequence_end,
+    ), new_remove_sequence_end)
 
     transfer = source_dir / "kvCacheTransferManager.cpp"
     replace_once(transfer,

@@ -25,6 +25,8 @@ grep -q datasystemRequestTracker.cpp \
   "$TRTLLM_DIR/cpp/tensorrt_llm/batch_manager/CMakeLists.txt"
 grep -q beginDataSystemOperation \
   "$TRTLLM_DIR/cpp/tensorrt_llm/batch_manager/kvCacheTransferManager.cpp"
+grep -q PAIREC_DATASYSTEM_REQUEST_ATTRIBUTION_ZERO_INTRUSION_DISABLED_V2 \
+  "$TRTLLM_DIR/cpp/tensorrt_llm/batch_manager/kvCacheManager.cpp"
 
 echo "TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION_APPLY_OK dir=$TRTLLM_DIR"
 echo "next=cmake --build $TRTLLM_DIR/cpp/build -j\$(nproc)"

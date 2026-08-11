@@ -20,7 +20,9 @@ class PipelineTraceSummaryTest(unittest.TestCase):
             attributes = {}
             if name == "generative_recall":
                 attributes = {"rpc_us": 90, "inference_total_us": 80,
-                              "runner_generate_us": 70}
+                              "runner_generate_us": 70,
+                              "runner_per_output_token_us": 7,
+                              "output_token_count": 10}
             elif name == "vector_recall":
                 attributes = {"service_total_us": 50, "feature_us": 10, "compute_us": 30}
             elif name == "deepfm_rank":
@@ -49,7 +51,11 @@ class PipelineTraceSummaryTest(unittest.TestCase):
                 "python3", "scripts/summarize_pairec_pipeline_trace.py",
                 "--log", str(log), "--expected", "1", "--output", str(out),
             ], check=True, capture_output=True, text=True)
-            self.assertEqual(json.loads(out.read_text())["valid_count"], 1)
+            summary = json.loads(out.read_text())
+            self.assertEqual(summary["valid_count"], 1)
+            self.assertEqual(
+                summary["service_counts"]["generative_recall.output_token_count"]["avg"],
+                10.0)
 
     def test_missing_quota_selection_is_rejected(self):
         module = __import__(

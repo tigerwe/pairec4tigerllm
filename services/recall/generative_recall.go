@@ -424,6 +424,8 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 		if response.Trace != nil {
 			attributes["inference_total_us"] = int64(response.Trace.TotalMs * 1000)
 			attributes["runner_generate_us"] = int64(response.Trace.RunnerGenerateMs * 1000)
+			attributes["output_token_count"] = response.Trace.OutputTokenCount
+			attributes["runner_per_output_token_us"] = int64(response.Trace.RunnerMsPerOutputToken * 1000)
 			if strings.EqualFold(r.client.config.Protocol, "brpc") && response.Trace.RequestID != traceID {
 				recorder.Invalidate("generative_trace_request_id_mismatch")
 			}
@@ -465,7 +467,8 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 			"requestId=%s\tmodule=GenerativeRecall\tname=%s\tcount=%d\tcost=%d"+
 				"\tcache_ms=%d\thistory_ms=%d\tconvert_ms=%d\thttp_ms=%d\titems_ms=%d"+
 				"\ttr_backend=%s\ttr_total_ms=%.1f\ttr_prepare_ms=%.1f\ttr_infer_ms=%.1f\ttr_forward_ms=%.1f\ttr_generate_ms=%.1f"+
-				"\ttr_prompt_ms=%.1f\ttr_runner_ms=%.1f\ttr_parse_ms=%.1f\ttr_pad_ms=%.1f\ttr_backend_total_ms=%.1f\ttr_map_ms=%.1f"+
+				"\ttr_prompt_ms=%.1f\ttr_runner_ms=%.1f\ttr_runner_calls=%d\ttr_output_tokens=%d\ttr_runner_per_token_ms=%.3f"+
+				"\ttr_parse_ms=%.1f\ttr_pad_ms=%.1f\ttr_backend_total_ms=%.1f\ttr_map_ms=%.1f"+
 				"\ttr_kv_source=%s\ttr_kv_lookup_ms=%.1f\ttr_kv_write_ms=%.1f"+
 				"\ttr_result_cache_source=%s\ttr_result_cache_lookup_ms=%.1f\ttr_result_cache_ds_lookup_ms=%.1f"+
 				"\ttr_result_cache_write_submit_ms=%.1f\thttp_overhead_ms=%d",
@@ -475,7 +478,8 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 			response.Trace.Backend, response.Trace.TotalMs,
 			response.Trace.PrepareInputMs, response.Trace.InferMs,
 			response.Trace.ModelForwardMs, response.Trace.GenerateMs,
-			response.Trace.PromptMs, response.Trace.RunnerGenerateMs,
+			response.Trace.PromptMs, response.Trace.RunnerGenerateMs, response.Trace.RunnerCalls,
+			response.Trace.OutputTokenCount, response.Trace.RunnerMsPerOutputToken,
 			response.Trace.ParseComboMs, response.Trace.OutputPadMs,
 			response.Trace.BackendTotalMs, response.Trace.MapItemMs,
 			response.Trace.KvSource, response.Trace.KvLookupMs, response.Trace.KvWriteMs,
@@ -487,7 +491,8 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 			"requestId=%s request_id=%s module=GenerativeRecall from=inference name=%s user=%s protocol=%s count=%d cost=%d"+
 				" brpc_payload_bytes=%d cache_ms=%d history_ms=%d convert_ms=%d rpc_ms=%d http_ms=%d brpc_ms=%d items_ms=%d"+
 				" tr_backend=%s tr_total_ms=%.1f tr_prepare_ms=%.1f tr_infer_ms=%.1f tr_forward_ms=%.1f tr_generate_ms=%.1f"+
-				" tr_prompt_ms=%.1f tr_runner_ms=%.1f tr_parse_ms=%.1f tr_pad_ms=%.1f tr_backend_total_ms=%.1f tr_map_ms=%.1f"+
+				" tr_prompt_ms=%.1f tr_runner_ms=%.1f tr_runner_calls=%d tr_output_tokens=%d tr_runner_per_token_ms=%.3f"+
+				" tr_parse_ms=%.1f tr_pad_ms=%.1f tr_backend_total_ms=%.1f tr_map_ms=%.1f"+
 				" tr_kv_source=%s tr_kv_lookup_ms=%.1f tr_kv_write_ms=%.1f"+
 				" tr_result_cache_source=%s tr_result_cache_lookup_ms=%.1f tr_result_cache_ds_lookup_ms=%.1f"+
 				" tr_result_cache_write_submit_ms=%.1f http_overhead_ms=%d",
@@ -497,7 +502,8 @@ func (r *GenerativeRecall) GetCandidateItems(user *module.User, ctx *context.Rec
 			response.Trace.Backend, response.Trace.TotalMs,
 			response.Trace.PrepareInputMs, response.Trace.InferMs,
 			response.Trace.ModelForwardMs, response.Trace.GenerateMs,
-			response.Trace.PromptMs, response.Trace.RunnerGenerateMs,
+			response.Trace.PromptMs, response.Trace.RunnerGenerateMs, response.Trace.RunnerCalls,
+			response.Trace.OutputTokenCount, response.Trace.RunnerMsPerOutputToken,
 			response.Trace.ParseComboMs, response.Trace.OutputPadMs,
 			response.Trace.BackendTotalMs, response.Trace.MapItemMs,
 			response.Trace.KvSource, response.Trace.KvLookupMs, response.Trace.KvWriteMs,
