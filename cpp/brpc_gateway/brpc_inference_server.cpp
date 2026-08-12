@@ -122,6 +122,7 @@ struct Candidate {
 };
 
 struct ExecutorPhaseTiming {
+  int64_t total_us = 0;
   int64_t request_setup_us = 0;
   int64_t enqueue_call_us = 0;
   int64_t await_final_us = 0;
@@ -1100,8 +1101,7 @@ class TrtllmCppBackend final : public InferenceBackend {
         return;
       }
       if (executor_timing_ptr) {
-        const int64_t runner_us =
-            static_cast<int64_t>(std::llround(runner_ms * 1000.0));
+        const int64_t runner_us = executor_timing.total_us;
         const int64_t gateway_accounted_us = executor_timing.request_setup_us +
             executor_timing.enqueue_call_us + executor_timing.await_final_us +
             executor_timing.response_extract_us;
@@ -1286,8 +1286,7 @@ class TrtllmCppBackend final : public InferenceBackend {
       bool* executor_enqueued,
       std::string* error) {
     namespace texec = tensorrt_llm::executor;
-    butil::Timer timer;
-    timer.start();
+    const auto executor_started = std::chrono::steady_clock::now();
     const auto request_setup_started = phase_timing
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
@@ -1383,8 +1382,14 @@ class TrtllmCppBackend final : public InferenceBackend {
                       std::chrono::steady_clock::now() - response_extract_started)
                       .count();
             }
-            timer.stop();
-            *elapsed_ms = timer.m_elapsed();
+            const int64_t total_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - executor_started)
+                    .count();
+            if (phase_timing) {
+              phase_timing->total_us = total_us;
+            }
+            *elapsed_ms = static_cast<double>(total_us) / 1000.0;
             return true;
           }
         }

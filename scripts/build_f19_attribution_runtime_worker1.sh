@@ -15,6 +15,7 @@ TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-}"
 GATEWAY_BUILD_IMAGE="${GATEWAY_BUILD_IMAGE:-}"
 SHOW_HISTORY="${SHOW_HISTORY:-1}"
 APPLY_PATCH="${APPLY_PATCH:-1}"
+BUILD_TRTLLM="${BUILD_TRTLLM:-1}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -24,6 +25,7 @@ done
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
 [[ "$SHOW_HISTORY" = 0 || "$SHOW_HISTORY" = 1 ]] || die "SHOW_HISTORY must be 0 or 1"
 [[ "$APPLY_PATCH" = 0 || "$APPLY_PATCH" = 1 ]] || die "APPLY_PATCH must be 0 or 1"
+[[ "$BUILD_TRTLLM" = 0 || "$BUILD_TRTLLM" = 1 ]] || die "BUILD_TRTLLM must be 0 or 1"
 test -d "$REPO_DIR/cpp/brpc_gateway" || die "invalid REPO_DIR: $REPO_DIR"
 test -d "$TRTLLM_DIR/cpp/build" || die "TensorRT-LLM build tree is missing: $TRTLLM_DIR"
 
@@ -90,24 +92,31 @@ trt_image_has_toolchain() {
   fi
 }
 
-if [[ -n "$TRT_BUILD_IMAGE" ]]; then
-  trt_image_has_toolchain "$TRT_BUILD_IMAGE" \
-    || die "TRT build image lacks CUDA static runtime or compiler toolchain: $TRT_BUILD_IMAGE"
+if [[ "$BUILD_TRTLLM" = 0 ]]; then
+  test -f "$RUNTIME_DIR/lib/libtensorrt_llm.so" \
+    || die "BUILD_TRTLLM=0 requires $RUNTIME_DIR/lib/libtensorrt_llm.so"
+  TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-reused-runtime}"
+  trt_image_arch="reused"
 else
-  trt_candidates=(
-    "zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1"
-    "zcx-pairec-image:v1.1"
-  )
-  for candidate in "${trt_candidates[@]}"; do
-    if trt_image_has_toolchain "$candidate"; then
-      TRT_BUILD_IMAGE="$candidate"
-      break
-    fi
-  done
+  if [[ -n "$TRT_BUILD_IMAGE" ]]; then
+    trt_image_has_toolchain "$TRT_BUILD_IMAGE" \
+      || die "TRT build image lacks CUDA static runtime or compiler toolchain: $TRT_BUILD_IMAGE"
+  else
+    trt_candidates=(
+      "zcx-pairec-trtllm-brpc-sdk:parallel-get-ctx224-v1"
+      "zcx-pairec-image:v1.1"
+    )
+    for candidate in "${trt_candidates[@]}"; do
+      if trt_image_has_toolchain "$candidate"; then
+        TRT_BUILD_IMAGE="$candidate"
+        break
+      fi
+    done
+  fi
+  [[ -n "$TRT_BUILD_IMAGE" ]] || die \
+    "no local arm64 TRT image contains compiler, libcudadevrt.a and libcudart_static.a; set TRT_BUILD_IMAGE"
+  trt_image_arch="$(docker image inspect "$TRT_BUILD_IMAGE" --format '{{.Architecture}}')"
 fi
-[[ -n "$TRT_BUILD_IMAGE" ]] || die \
-  "no local arm64 TRT image contains compiler, libcudadevrt.a and libcudart_static.a; set TRT_BUILD_IMAGE"
-trt_image_arch="$(docker image inspect "$TRT_BUILD_IMAGE" --format '{{.Architecture}}')"
 
 gateway_image_has_sdk() {
   local image="$1"
@@ -202,8 +211,10 @@ echo "gateway_image_arch=$gateway_image_arch"
 echo "cuda_driver_dir=$cuda_driver_dir"
 echo "jobs=$JOBS detected_jobs=$detected_jobs"
 echo "apply_patch=$APPLY_PATCH"
+echo "build_trtllm=$BUILD_TRTLLM"
 
-echo "== Stage 1/2: build TensorRT-LLM shared library =="
+if [[ "$BUILD_TRTLLM" = 1 ]]; then
+  echo "== Stage 1/2: build TensorRT-LLM shared library =="
 docker run --rm \
   --gpus all \
   --network host \
@@ -256,6 +267,15 @@ docker run --rm \
     grep -Fq phase_timing_complete < <(strings "$trt_library")
     install -m 0755 "$trt_library" /out/lib/libtensorrt_llm.so
   '
+else
+  echo "== Stage 1/2: reuse verified TensorRT-LLM shared library =="
+  install -m 0755 "$RUNTIME_DIR/lib/libtensorrt_llm.so" \
+    "$staging_dir/lib/libtensorrt_llm.so"
+  grep -Fq datasystem_request_complete \
+    < <(strings "$staging_dir/lib/libtensorrt_llm.so")
+  grep -Fq phase_timing_complete \
+    < <(strings "$staging_dir/lib/libtensorrt_llm.so")
+fi
 
 echo "== Stage 2/2: build BRPC inference gateway =="
 docker run --rm \

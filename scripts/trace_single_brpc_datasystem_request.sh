@@ -360,11 +360,17 @@ if datasystem_completion:
     prefill_gap_us = int(datasystem_completion.get("prefill_gap_us", 0))
     native_lifecycle_us = int(datasystem_completion.get("native_lifecycle_us", 0))
     model_execution_us = prefill_gap_us + decode_gap_us
+    runner_us = sum(int(event.get("runner_us", 0)) for event in executor_completions)
+    output_token_count = int(generative_trace.get(
+        "tr_output_tokens", add_token_count))
+    runner_per_output_token_ms = numeric(
+        generative_trace, "tr_runner_per_token_ms")
+    if runner_per_output_token_ms <= 0 and output_token_count > 0:
+        runner_per_output_token_ms = round(
+            runner_us / output_token_count / 1000.0, 6)
     summary["trt_latency_diagnosis"] = {
-        "output_token_count": int(generative_trace.get(
-            "tr_output_tokens", add_token_count)),
-        "runner_per_output_token_ms": numeric(
-            generative_trace, "tr_runner_per_token_ms"),
+        "output_token_count": output_token_count,
+        "runner_per_output_token_ms": runner_per_output_token_ms,
         "prefill_gap_us": prefill_gap_us,
         "decode_gap_us": decode_gap_us,
         "decode_interval_count": decode_interval_count,

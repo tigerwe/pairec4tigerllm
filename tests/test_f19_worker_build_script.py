@@ -9,9 +9,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "build_f19_attribution_runtime_worker1.sh"
 CMAKE = ROOT / "cpp" / "brpc_gateway" / "CMakeLists.txt"
 GENERATED = ROOT / "cpp" / "brpc_gateway" / "generated"
+GATEWAY_SOURCE = ROOT / "cpp" / "brpc_gateway" / "brpc_inference_server.cpp"
 
 
 class F19WorkerBuildScriptTest(unittest.TestCase):
+    def test_build_script_has_valid_shell_syntax(self):
+        subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
+
     def test_build_uses_separate_trt_and_gateway_images(self):
         text = SCRIPT.read_text()
         self.assertIn('TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-}"', text)
@@ -103,6 +107,16 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
         self.assertIn("trt_executor_request_complete", text)
         self.assertIn("output_token_count", text)
         self.assertIn("runner_ms_per_output_token", text)
+        gateway = GATEWAY_SOURCE.read_text()
+        self.assertIn("const int64_t runner_us = executor_timing.total_us", gateway)
+        self.assertIn("*elapsed_ms = static_cast<double>(total_us) / 1000.0", gateway)
+
+    def test_gateway_only_rebuild_can_reuse_verified_trt_library(self):
+        text = SCRIPT.read_text()
+        self.assertIn('BUILD_TRTLLM="${BUILD_TRTLLM:-1}"', text)
+        self.assertIn('if [[ "$BUILD_TRTLLM" = 1 ]]', text)
+        self.assertIn("reuse verified TensorRT-LLM shared library", text)
+        self.assertIn('$RUNTIME_DIR/lib/libtensorrt_llm.so', text)
 
     def test_pregenerated_proto_mode_is_explicit_and_complete(self):
         cmake = CMAKE.read_text()
