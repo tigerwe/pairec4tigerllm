@@ -96,6 +96,17 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertRegex(text, re.compile(r"datasystem_completions\.append\(candidate\)"))
         self.assertIn('"datasystem_request_completion_count": len(datasystem_completions)', text)
 
+    def test_trace_summary_reports_output_token_and_decode_cost(self):
+        text = TRACE.read_text()
+        for field in (
+            '"tr_output_tokens"',
+            '"tr_runner_per_token_ms"',
+            '"decode_gap_per_interval_us"',
+            '"model_execution_lifecycle_pct"',
+            '"datasystem_io_count"',
+        ):
+            self.assertIn(field, text)
+
     def test_exact_three_set_two_get_fixture_passes(self):
         code, result = self.run_summary()
         self.assertEqual(0, code)

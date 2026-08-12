@@ -353,6 +353,35 @@ summary = {
     "trt_executor_request_completions": executor_completions,
 }
 
+if datasystem_completion:
+    add_token_count = int(datasystem_completion.get("add_token_count", 0))
+    decode_interval_count = max(add_token_count - 1, 0)
+    decode_gap_us = int(datasystem_completion.get("decode_gap_us", 0))
+    prefill_gap_us = int(datasystem_completion.get("prefill_gap_us", 0))
+    native_lifecycle_us = int(datasystem_completion.get("native_lifecycle_us", 0))
+    model_execution_us = prefill_gap_us + decode_gap_us
+    summary["trt_latency_diagnosis"] = {
+        "output_token_count": int(generative_trace.get(
+            "tr_output_tokens", add_token_count)),
+        "runner_per_output_token_ms": numeric(
+            generative_trace, "tr_runner_per_token_ms"),
+        "prefill_gap_us": prefill_gap_us,
+        "decode_gap_us": decode_gap_us,
+        "decode_interval_count": decode_interval_count,
+        "decode_gap_per_interval_us": (
+            round(decode_gap_us / decode_interval_count, 3)
+            if decode_interval_count else 0.0),
+        "model_execution_us": model_execution_us,
+        "model_execution_lifecycle_pct": (
+            round(model_execution_us * 100.0 / native_lifecycle_us, 3)
+            if native_lifecycle_us else 0.0),
+        "attribution_lookup_us": int(
+            datasystem_completion.get("attribution_lookup_us", 0)),
+        "phase_record_us": int(datasystem_completion.get("phase_record_us", 0)),
+        "datasystem_io_count": int(datasystem_completion.get("get_count", 0))
+        + int(datasystem_completion.get("set_count", 0)),
+    }
+
 with open(summary_json, "w", encoding="utf-8") as handle:
     json.dump(summary, handle, ensure_ascii=False, indent=2)
 
@@ -393,7 +422,8 @@ if generative_trace:
         "from", "protocol", "brpc_payload_bytes", "cost", "cache_ms", "history_ms", "convert_ms",
         "rpc_ms", "brpc_ms", "http_ms", "items_ms", "http_overhead_ms",
         "inference_svc_ms", "tr_total_ms", "tr_infer_ms", "tr_prompt_ms",
-        "tr_runner_ms", "tr_parse_ms", "tr_pad_ms", "tr_backend_total_ms",
+        "tr_runner_ms", "tr_runner_calls", "tr_output_tokens",
+        "tr_runner_per_token_ms", "tr_parse_ms", "tr_pad_ms", "tr_backend_total_ms",
         "tr_map_ms", "tr_kv_lookup_ms", "tr_kv_write_ms",
         "tr_result_cache_lookup_ms", "tr_result_cache_ds_lookup_ms",
         "tr_result_cache_write_submit_ms",
@@ -449,6 +479,15 @@ if datasystem_completion:
             "  runner_minus_native_us="
             f"{runner_us - int(datasystem_completion['native_lifecycle_us'])}"
         )
+    diagnosis = summary.get("trt_latency_diagnosis", {})
+    print("TRT latency diagnosis:")
+    for key in (
+        "output_token_count", "runner_per_output_token_ms", "prefill_gap_us",
+        "decode_gap_us", "decode_interval_count", "decode_gap_per_interval_us",
+        "model_execution_us", "model_execution_lifecycle_pct",
+        "attribution_lookup_us", "phase_record_us", "datasystem_io_count",
+    ):
+        print(f"  {key}={diagnosis.get(key)}")
 else:
     print("  exact_request_attribution=false")
 print(f"  offload_count={len(offloads)}")
