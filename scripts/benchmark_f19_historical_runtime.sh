@@ -19,6 +19,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-/tmp/f19-historical-runtime-ab/$RUN_ID}"
 ORIGINAL_JSON="$OUTPUT_DIR/deployment-original.json"
 RESTORE_PATCH="$OUTPUT_DIR/restore-patch.json"
 HISTORICAL_PATCH="$OUTPUT_DIR/historical-patch.json"
+HYBRID_PATCH="$OUTPUT_DIR/historical-gateway-current-trt-patch.json"
 DEPLOYMENT_CHANGED=0
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -88,7 +89,8 @@ def number(fields, key):
     except (TypeError, ValueError):
         return 0.0
 
-for mode in ("historical", "current"):
+modes = ("historical", "historical_gateway_current_trt", "current")
+for mode in modes:
     rows = []
     for path in sorted((root / mode).glob("sample-*/summary.json")):
         payload = json.loads(path.read_text())
@@ -129,19 +131,29 @@ for mode in ("historical", "current"):
     }
 
 historical = result["modes"]["historical"]["warm_avg"]
+hybrid = result["modes"]["historical_gateway_current_trt"]["warm_avg"]
 current = result["modes"]["current"]["warm_avg"]
 result["warm_current_minus_historical"] = {
-    key: round(current[key] - historical[key], 6)
-    for key in historical
+    key: round(current[key] - historical[key], 6) for key in historical
+}
+result["warm_hybrid_minus_historical"] = {
+    key: round(hybrid[key] - historical[key], 6) for key in historical
+}
+result["warm_current_minus_hybrid"] = {
+    key: round(current[key] - hybrid[key], 6) for key in historical
 }
 (root / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
 
 print("mode warm_runner_ms warm_output_tokens warm_runner_per_token_ms warm_prefill_ms warm_decode_ms")
-for mode in ("historical", "current"):
+for mode in modes:
     row = result["modes"][mode]["warm_avg"]
     print(mode, row["runner_ms"], row["output_tokens"],
           row["runner_per_token_ms"], row["prefill_ms"], row["decode_ms"])
 print("delta", json.dumps(result["warm_current_minus_historical"], sort_keys=True))
+print("hybrid_minus_historical", json.dumps(
+    result["warm_hybrid_minus_historical"], sort_keys=True))
+print("current_minus_hybrid", json.dumps(
+    result["warm_current_minus_hybrid"], sort_keys=True))
 print(f"summary_json={root / 'summary.json'}")
 PY
 }
@@ -154,19 +166,21 @@ done
 mkdir -p "$OUTPUT_DIR"
 kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o json >"$ORIGINAL_JSON"
 
-python3 - "$ORIGINAL_JSON" "$RESTORE_PATCH" "$HISTORICAL_PATCH" \
+python3 - "$ORIGINAL_JSON" "$RESTORE_PATCH" "$HISTORICAL_PATCH" "$HYBRID_PATCH" \
     "$CONTAINER" "$HISTORICAL_RUNTIME_DIR" "$HISTORICAL_POD_DIR" \
     "$TRTLLM_RUNTIME_PATH" <<'PY'
+import copy
 import json
 import sys
 from pathlib import Path
 
-source, restore_out, historical_out, container_name, host_dir, pod_dir, trt_path = sys.argv[1:]
+source, restore_out, historical_out, hybrid_out, container_name, host_dir, pod_dir, trt_path = sys.argv[1:]
 deployment = json.loads(Path(source).read_text())
 template = deployment["spec"]["template"]
 Path(restore_out).write_text(json.dumps({"spec": {"template": template}}, indent=2) + "\n")
 
-container = next(c for c in template["spec"]["containers"] if c["name"] == container_name)
+historical_template = copy.deepcopy(template)
+container = next(c for c in historical_template["spec"]["containers"] if c["name"] == container_name)
 env = {item["name"]: item for item in container.get("env", [])}
 env["TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION"] = {
     "name": "TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION", "value": "0"}
@@ -185,8 +199,8 @@ container["volumeMounts"] = [
     {"name": "f19-historical-bin", "mountPath": f"{pod_dir}/bin", "readOnly": True},
     {"name": "f19-historical-trt", "mountPath": trt_path, "readOnly": True},
 ]
-template["spec"]["volumes"] = [
-    volume for volume in template["spec"].get("volumes", [])
+historical_template["spec"]["volumes"] = [
+    volume for volume in historical_template["spec"].get("volumes", [])
     if volume["name"] not in f19_names
 ] + [
     {"name": "f19-historical-bin", "hostPath": {
@@ -194,8 +208,38 @@ template["spec"]["volumes"] = [
     {"name": "f19-historical-trt", "hostPath": {
         "path": f"{host_dir}/lib/libtensorrt_llm.so", "type": "File"}},
 ]
-patch = {"spec": {"template": template}}
+patch = {"spec": {"template": historical_template}}
 Path(historical_out).write_text(json.dumps(patch, indent=2) + "\n")
+
+# Cross-pair the historical gateway with the current TRT shared library. The
+# reverse pair cannot start because the current gateway directly links F19-only
+# attribution symbols that the historical library does not export.
+hybrid_template = copy.deepcopy(template)
+container = next(c for c in hybrid_template["spec"]["containers"] if c["name"] == container_name)
+env = {item["name"]: item for item in container.get("env", [])}
+env["TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION"] = {
+    "name": "TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION", "value": "0"}
+env["PAIREC_REQUIRE_NATIVE_DATASYSTEM_ATTRIBUTION"] = {
+    "name": "PAIREC_REQUIRE_NATIVE_DATASYSTEM_ATTRIBUTION", "value": "0"}
+env["TLLM_LOG_LEVEL"] = {"name": "TLLM_LOG_LEVEL", "value": "DEBUG"}
+container["env"] = list(env.values())
+current_gateway_volume_names = {
+    mount["name"] for mount in container.get("volumeMounts", [])
+    if mount.get("mountPath") != trt_path
+    and mount["name"] in f19_names
+}
+container["command"] = [f"{pod_dir}/bin/brpc_inference_server"]
+container["volumeMounts"] = [
+    mount for mount in container.get("volumeMounts", [])
+    if mount["name"] not in current_gateway_volume_names
+] + [{"name": "f19-historical-bin", "mountPath": f"{pod_dir}/bin", "readOnly": True}]
+hybrid_template["spec"]["volumes"] = [
+    volume for volume in hybrid_template["spec"].get("volumes", [])
+    if volume["name"] not in current_gateway_volume_names
+] + [{"name": "f19-historical-bin", "hostPath": {
+    "path": f"{host_dir}/bin", "type": "Directory"}}]
+Path(hybrid_out).write_text(json.dumps(
+    {"spec": {"template": hybrid_template}}, indent=2) + "\n")
 PY
 
 echo "== Historical runtime files on worker1 hostPath =="
@@ -210,6 +254,12 @@ kubectl -n "$NAMESPACE" patch deployment "$DEPLOYMENT" \
 DEPLOYMENT_CHANGED=1
 wait_for_rollout
 run_samples historical 0
+
+echo "== Deploy historical gateway with current TRT library =="
+kubectl -n "$NAMESPACE" patch deployment "$DEPLOYMENT" \
+  --type=merge --patch "$(cat "$HYBRID_PATCH")"
+wait_for_rollout
+run_samples historical_gateway_current_trt 0
 
 restore_current_runtime
 run_samples current 1
