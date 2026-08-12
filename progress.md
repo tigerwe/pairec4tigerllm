@@ -1,3 +1,5 @@
+> 2026-08-12 F19 历史镜像确认存在，TRT库路径自适应修复：worker1已成功只读mount历史containerd镜像，但旧镜像中不存在脚本假定的`/TensorRT-LLM/cpp/build/.../libtensorrt_llm.so`普通文件，说明镜像布局使用其他前缀或绝对符号链接。提取脚本现限制在rootfs最大10层查找所有同名普通文件/符号链接，绝对链接按容器rootfs重新解析，逐一打印SHA并只接受现场已记录的`e0452812...`精确匹配；不会因`/home/TensorRT-LLM`与`/TensorRT-LLM`多副本取错。下一步worker1拉取后重跑提取。F19保持in_progress。
+>
 > 2026-08-12 F19 历史runtime提取兼容worker1旧版ctr：首次执行返回`No help topic for inspect`，是该ctr不支持`images inspect`，脚本将其误判为镜像不存在；不是历史镜像证据已经丢失。现改用已在集群验证的`images list -q`精确检查tag，已有镜像直接只读mount；确实缺失时才从现存`/home/zcx/pairec-brpc-inference-k8s-arm64-trtllm-v1.tar`导入并复查tag。SHA发布锁保持不变。下一步worker1拉取后重跑提取。F19保持in_progress。
 >
 > 2026-08-12 F19 历史94ms证据恢复工具完成：Git历史确认C++ TRT backend自2026-06-18首次实现以来`trt_max_new_tokens`始终为32，所有相关manifest也始终显式传32，因此“历史因配置16而更快”已排除；原`/tmp/pairec-brpc-observed/20260808-183127`聚合已丢失，无法从报告确认实际output token。新增worker1 containerd只读提取脚本，默认锁定现场曾记录的旧gateway/TRT SHA `acba014e.../e0452812...`；新增master受控对照脚本，旧gateway+旧TRT成对切换，采1冷+N-1暖请求，随后恢复原Deployment template并采当前F19同组样本，EXIT trap保证失败也恢复。汇总直接比较warm runner、实际output token和per-token；禁止混搭新旧native ABI。下一步worker1提取历史runtime，master执行5样本对照，以确认94ms来自较短实际输出还是旧TRT每token更快。F19保持in_progress。

@@ -19,7 +19,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for command in sudo "$CTR" install sha256sum strings mktemp grep awk; do
+for command in sudo "$CTR" install sha256sum strings mktemp grep awk find readlink; do
   command -v "$command" >/dev/null || die "missing command: $command"
 done
 
@@ -46,9 +46,46 @@ echo "mount_dir=$MOUNT_DIR"
 sudo "$CTR" -n k8s.io images mount "$IMAGE" "$MOUNT_DIR" >/dev/null
 
 gateway="$MOUNT_DIR/opt/pairec-brpc/bin/brpc_inference_server"
-trt_library="$MOUNT_DIR/TensorRT-LLM/cpp/build/tensorrt_llm/libtensorrt_llm.so"
 [[ -x "$gateway" ]] || die "historical gateway is missing: $gateway"
-[[ -f "$trt_library" ]] || die "historical TRT library is missing: $trt_library"
+
+echo "== Locate historical TensorRT-LLM library by SHA =="
+mapfile -t trt_candidates < <(
+  find "$MOUNT_DIR" -xdev -maxdepth 10 \
+    \( -type f -o -type l \) -name libtensorrt_llm.so -print
+)
+resolved_candidates=()
+for candidate in "${trt_candidates[@]}"; do
+  resolved="$candidate"
+  if [[ -L "$candidate" ]]; then
+    target="$(readlink "$candidate")"
+    if [[ "$target" == /* ]]; then
+      resolved="$MOUNT_DIR$target"
+    else
+      resolved="$(readlink -f "$(dirname "$candidate")/$target" 2>/dev/null || true)"
+    fi
+  fi
+  [[ -f "$resolved" ]] || continue
+  duplicate=0
+  for existing in "${resolved_candidates[@]}"; do
+    if [[ "$existing" == "$resolved" ]]; then duplicate=1; break; fi
+  done
+  (( duplicate == 1 )) || resolved_candidates+=("$resolved")
+done
+
+trt_library=""
+for candidate in "${resolved_candidates[@]}"; do
+  candidate_hash="$(sha256sum "$candidate" | awk '{print $1}')"
+  echo "candidate=${candidate#"$MOUNT_DIR"} sha256=$candidate_hash"
+  if [[ -n "$EXPECTED_TRTLLM_SHA256" && "$candidate_hash" == "$EXPECTED_TRTLLM_SHA256" ]]; then
+    trt_library="$candidate"
+  fi
+done
+if [[ -z "$trt_library" && -z "$EXPECTED_TRTLLM_SHA256" \
+    && "${#resolved_candidates[@]}" -eq 1 ]]; then
+  trt_library="${resolved_candidates[0]}"
+fi
+[[ -n "$trt_library" ]] || die \
+  "no unique historical TRT library matched expected SHA under image rootfs"
 
 mkdir -p "$OUTPUT_DIR/bin" "$OUTPUT_DIR/lib"
 install -m 0755 "$gateway" "$OUTPUT_DIR/bin/brpc_inference_server"

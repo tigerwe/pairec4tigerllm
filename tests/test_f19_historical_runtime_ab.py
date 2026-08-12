@@ -22,7 +22,9 @@ class F19HistoricalRuntimeABTest(unittest.TestCase):
         self.assertIn('images mount "$IMAGE" "$MOUNT_DIR"', text)
         self.assertIn('images unmount "$MOUNT_DIR"', text)
         self.assertIn("/opt/pairec-brpc/bin/brpc_inference_server", text)
-        self.assertIn("/TensorRT-LLM/cpp/build/tensorrt_llm/libtensorrt_llm.so", text)
+        self.assertIn("-name libtensorrt_llm.so", text)
+        self.assertIn('candidate_hash="$(sha256sum "$candidate"', text)
+        self.assertIn('"$candidate_hash" == "$EXPECTED_TRTLLM_SHA256"', text)
         self.assertIn("acba014e342030a57e1fba51fd691b1fbb7ffd3735488f03b28e08365b00dc43", text)
         self.assertIn("e0452812c00a56ae9a0b5817a5c0ca6b1a2e1b8e33dc63fe22c31e2e834010c4", text)
 
