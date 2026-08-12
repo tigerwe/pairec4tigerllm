@@ -6,6 +6,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXTRACT = ROOT / "scripts" / "extract_f19_historical_runtime_worker1.sh"
 BENCHMARK = ROOT / "scripts" / "benchmark_f19_historical_runtime.sh"
+TRACE = ROOT / "scripts" / "trace_single_brpc_datasystem_request.sh"
 
 
 class F19HistoricalRuntimeABTest(unittest.TestCase):
@@ -39,6 +40,15 @@ class F19HistoricalRuntimeABTest(unittest.TestCase):
         self.assertIn('if mount["name"] not in f19_names', text)
         self.assertIn("--type=merge", text)
         self.assertIn("warm_current_minus_historical", text)
+        self.assertIn('env["TLLM_LOG_LEVEL"] = {"name": "TLLM_LOG_LEVEL", "value": "DEBUG"}', text)
+        self.assertIn('legacy_native_output_token_count', text)
+        self.assertIn('output token count missing for requests', text)
+
+    def test_legacy_token_count_uses_one_native_new_token_line_per_step(self):
+        text = TRACE.read_text()
+        self.assertIn('legacy_native_output_token_count = sum(', text)
+        self.assertIn('"request ID " in line and " newToken " in line', text)
+        self.assertIn('"legacy_native_output_token_count": legacy_native_output_token_count', text)
 
 
 if __name__ == "__main__":

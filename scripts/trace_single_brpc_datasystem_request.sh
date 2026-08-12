@@ -299,6 +299,13 @@ trt_set_get_probe_lines = [
 ]
 trt_set_get_probe_events = [parse_kv_fields(line) for line in trt_set_get_probe_lines]
 
+# Historical gateways predate the protobuf output-token field. In a serialized
+# single-request trace, the native DEBUG line is emitted once per generated token.
+legacy_native_output_token_count = sum(
+    1 for line in trt_log.splitlines()
+    if "request ID " in line and " newToken " in line
+)
+
 ds_events = []
 datasystem_completion = None
 datasystem_completions = []
@@ -351,6 +358,7 @@ summary = {
     "datasystem_request_complete": datasystem_completion,
     "datasystem_request_completion_count": len(datasystem_completions),
     "trt_executor_request_completions": executor_completions,
+    "legacy_native_output_token_count": legacy_native_output_token_count,
 }
 
 if datasystem_completion:
@@ -402,6 +410,7 @@ for index, event in enumerate(brpc_events, start=1):
     )
 
 print(f"trt_datasystem_mset_mget_probe_events={len(trt_set_get_probe_events)}")
+print(f"legacy_native_output_token_count={legacy_native_output_token_count}")
 for index, event in enumerate(trt_set_get_probe_events, start=1):
     create_ms = event.get("create_ms", event.get("mcreate_ms", ""))
     set_ms = event.get("set_ms", event.get("mset_ms", ""))

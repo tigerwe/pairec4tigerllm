@@ -1,3 +1,5 @@
+> 2026-08-12 F19 历史runtime同机对照确认89.6ms真实回归：历史gateway/TRT SHA精确恢复为`acba014e.../e0452812...`，同Deployment参数、同用户、各1冷+4暖的受控对照中，历史暖态runner=`91.5ms`，当前F19暖态runner=`181.1ms`，差`89.6ms`；当前实际31 token、per-token=`5.842ms`，归因bookkeeping仍为百微秒级。旧gateway不含protobuf output-token字段，但无需回编：旧TRT DEBUG每生成一步输出唯一`request ID ... newToken`，历史阶段严格串行且每请求collector从tail=0开始。对照脚本现仅在历史临时template启用DEBUG，单请求摘要计数legacy native token并由runner/token派生per-token；恢复当前template后仍用原INFO配置。下一步重跑5样本对照，直接判定历史91.5ms对应多少实际token。F19保持in_progress。
+>
 > 2026-08-12 F19 历史镜像确认存在，TRT库路径自适应修复：worker1已成功只读mount历史containerd镜像，但旧镜像中不存在脚本假定的`/TensorRT-LLM/cpp/build/.../libtensorrt_llm.so`普通文件，说明镜像布局使用其他前缀或绝对符号链接。提取脚本现限制在rootfs最大10层查找所有同名普通文件/符号链接，绝对链接按容器rootfs重新解析，逐一打印SHA并只接受现场已记录的`e0452812...`精确匹配；不会因`/home/TensorRT-LLM`与`/TensorRT-LLM`多副本取错。下一步worker1拉取后重跑提取。F19保持in_progress。
 >
 > 2026-08-12 F19 历史runtime提取兼容worker1旧版ctr：首次执行返回`No help topic for inspect`，是该ctr不支持`images inspect`，脚本将其误判为镜像不存在；不是历史镜像证据已经丢失。现改用已在集群验证的`images list -q`精确检查tag，已有镜像直接只读mount；确实缺失时才从现存`/home/zcx/pairec-brpc-inference-k8s-arm64-trtllm-v1.tar`导入并复查tag。SHA发布锁保持不变。下一步worker1拉取后重跑提取。F19保持in_progress。

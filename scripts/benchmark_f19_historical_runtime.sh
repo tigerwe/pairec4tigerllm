@@ -99,14 +99,24 @@ for mode in ("historical", "current"):
             "client_ms": number(payload.get("client") or {}, "client_e2e_ms"),
             "runner_ms": number(trace, "tr_runner_ms"),
             "output_tokens": number(trace, "tr_output_tokens")
-                or number(diagnosis, "output_token_count"),
+                or number(diagnosis, "output_token_count")
+                or number(payload, "legacy_native_output_token_count"),
             "runner_per_token_ms": number(trace, "tr_runner_per_token_ms")
                 or number(diagnosis, "runner_per_output_token_ms"),
             "prefill_ms": number(diagnosis, "prefill_gap_us") / 1000.0,
             "decode_ms": number(diagnosis, "decode_gap_us") / 1000.0,
         })
+        if rows[-1]["runner_per_token_ms"] <= 0 and rows[-1]["output_tokens"] > 0:
+            rows[-1]["runner_per_token_ms"] = round(
+                rows[-1]["runner_ms"] / rows[-1]["output_tokens"], 6)
     if len(rows) != samples:
         raise SystemExit(f"{mode}: expected {samples} summaries, got {len(rows)}")
+    missing_tokens = [row["request_id"] for row in rows if row["output_tokens"] <= 0]
+    if missing_tokens:
+        raise SystemExit(
+            f"{mode}: output token count missing for requests: "
+            + ",".join(str(value) for value in missing_tokens)
+        )
     warm = rows[1:] if len(rows) > 1 else rows
     result["modes"][mode] = {
         "rows": rows,
@@ -162,6 +172,7 @@ env["TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION"] = {
     "name": "TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION", "value": "0"}
 env["PAIREC_REQUIRE_NATIVE_DATASYSTEM_ATTRIBUTION"] = {
     "name": "PAIREC_REQUIRE_NATIVE_DATASYSTEM_ATTRIBUTION", "value": "0"}
+env["TLLM_LOG_LEVEL"] = {"name": "TLLM_LOG_LEVEL", "value": "DEBUG"}
 
 f19_names = {"f19-runtime-bin", "f19-runtime-lib", "f19-trtllm-file",
              "f19-historical-bin", "f19-historical-trt"}
