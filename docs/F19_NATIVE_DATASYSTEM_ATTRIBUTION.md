@@ -339,3 +339,36 @@ fields 40 and 41 report output-token count and runner milliseconds per output to
 The benchmark now fails if token counts differ or if either mode remains above 110
 ms average runner latency. F19 remains in progress until this stricter benchmark
 passes remotely.
+
+## Bounded Business Failure Handling
+
+The strict workload validates successful end-to-end recommendation requests. A
+generation can occasionally finish normally but map to no catalog item; the gateway
+then returns `code=299` (`items size not enough`) and the F20 source-quota reranker
+correctly fails closed with payload `code=500,msg=rerank failed`.
+
+Do not disable that production behavior for F19. Instead, the workload driver can
+explicitly skip a bounded number of exactly those responses and continue until it
+has collected the requested number of successful samples:
+
+```bash
+MAX_EXPECTED_RERANK_FAILURES=20 \
+REQUESTS=1000 \
+WARMUP_REQUESTS=1 \
+REQUIRE_DATASYSTEM_ATTRIBUTION=1 \
+BUILD_IMAGES=0 \
+IMPORT_IMAGES=0 \
+FORCE_INFERENCE_RESTART=0 \
+FORCE_PAIREC_RESTART=0 \
+  bash scripts/deploy_and_validate_pairec_brpc_observed.sh \
+  | tee /tmp/f19-release-1000-validation.log
+```
+
+The default limit is zero. The exception applies only when source rerank validation
+is enabled and only to the exact `500/rerank failed` contract. Transport failures,
+other application errors, malformed responses and an exceeded limit still stop the
+run immediately. Skipped attempts are written to
+`expected-rerank-failures.tsv`; `request-attempts.json` records accepted, attempted
+and skipped counts. They are excluded from the 1000 successful request IDs used for
+latency and exact DataSystem joins, while their request time remains part of the
+closed-loop workload wall clock.

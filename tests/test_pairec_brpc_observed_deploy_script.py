@@ -154,6 +154,37 @@ class PaiRecBrpcObservedDeployScriptTest(unittest.TestCase):
         self.assertLess(requests, end)
         self.assertLess(end, completion)
 
+    def test_expected_rerank_failures_are_bounded_and_opt_in(self):
+        text = SCRIPT.read_text()
+        self.assertIn(
+            'MAX_EXPECTED_RERANK_FAILURES="${MAX_EXPECTED_RERANK_FAILURES:-0}"',
+            text,
+        )
+        self.assertIn(
+            'allow_expected_rerank_failure = require_rerank and int(sys.argv[4]) > 0',
+            text,
+        )
+        self.assertIn('data.get("code") == 500', text)
+        self.assertIn('data.get("msg") == "rerank failed"', text)
+        self.assertIn('EXPECTED_RERANK_FAILURES_TOTAL=0', text)
+        self.assertIn(
+            '(( EXPECTED_RERANK_FAILURES_TOTAL <= MAX_EXPECTED_RERANK_FAILURES ))',
+            text,
+        )
+        self.assertIn('while (( accepted < count ))', text)
+        self.assertIn('expected-rerank-failures.tsv', text)
+        self.assertIn('request-attempts.json', text)
+
+    def test_expected_rerank_failures_do_not_enter_success_sample_ids(self):
+        text = SCRIPT.read_text()
+        failure = text.index('if [[ "$disposition" = expected_rerank_failure ]]')
+        continuation = text.index('continue', failure)
+        accepted = text.index('accepted=$((accepted + 1))', continuation)
+        request_row = text.index('>>"$directory/requests.tsv"', accepted)
+        self.assertLess(failure, continuation)
+        self.assertLess(continuation, accepted)
+        self.assertLess(accepted, request_row)
+
     def test_log_collectors_are_cleaned_on_exit(self):
         text = SCRIPT.read_text()
         self.assertIn('trap cleanup EXIT', text)

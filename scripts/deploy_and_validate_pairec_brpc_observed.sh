@@ -17,6 +17,7 @@ IMPORT_IMAGES="${IMPORT_IMAGES:-1}"
 RUN_HTTP_AB="${RUN_HTTP_AB:-1}"
 HTTP_BASELINE_SERVICE="${HTTP_BASELINE_SERVICE:-pairec-multi-recall-rank}"
 HTTP_BASELINE_REQUESTS="${HTTP_BASELINE_REQUESTS:-100}"
+MAX_EXPECTED_RERANK_FAILURES="${MAX_EXPECTED_RERANK_FAILURES:-0}"
 REQUIRE_DATASYSTEM_ATTRIBUTION="${REQUIRE_DATASYSTEM_ATTRIBUTION:-0}"
 FORCE_INFERENCE_RESTART="${FORCE_INFERENCE_RESTART:-0}"
 FORCE_PAIREC_RESTART="${FORCE_PAIREC_RESTART:-1}"
@@ -62,6 +63,7 @@ print(max(candidates)[1])
 
 PAIREC_LOG_PID=""
 INFERENCE_LOG_PID=""
+EXPECTED_RERANK_FAILURES_TOTAL=0
 
 stop_log_collector() {
   local pid="${1:-}"
@@ -82,6 +84,8 @@ for value in "$REQUESTS" "$HTTP_BASELINE_REQUESTS"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "request counts must be positive integers"
 done
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
+[[ "$MAX_EXPECTED_RERANK_FAILURES" =~ ^[0-9]+$ ]] \
+  || die "MAX_EXPECTED_RERANK_FAILURES must be non-negative"
 [[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
   || die "SERVICE_READY_TIMEOUT_SECONDS must be a positive integer"
 for value in "$BUILD_IMAGES" "$IMPORT_IMAGES" "$RUN_HTTP_AB" \
@@ -279,19 +283,30 @@ done
 
 run_requests() {
   local url="$1" count="$2" directory="$3" require_rerank="${4:-0}"
+  local accepted=0 attempt=0 skipped=0
   mkdir -p "$directory"
   printf 'index\te2e_ms\trequest_id\n' >"$directory/requests.tsv"
-  for index in $(seq 1 "$count"); do
-    response="$directory/response-${index}.json"
+  printf 'attempt\te2e_ms\trequest_id\tcode\tmsg\n' \
+    >"$directory/expected-rerank-failures.tsv"
+  while (( accepted < count )); do
+    attempt=$((attempt + 1))
+    response="$directory/response-attempt-${attempt}.json"
     seconds="$(curl --noproxy '*' -sS --connect-timeout 2 --max-time 10 \
       "$url" -H 'Content-Type: application/json' \
       -d "{\"scene_id\":\"$SCENE_ID\",\"uid\":\"$USER_ID\",\"size\":$SIZE}" \
       -o "$response" -w '%{time_total}')"
-    read -r request_id item_count < <(python3 - "$response" "$SIZE" "$require_rerank" <<'PY'
+    read -r disposition request_id item_count < <(python3 - \
+      "$response" "$SIZE" "$require_rerank" \
+      "$MAX_EXPECTED_RERANK_FAILURES" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 size = int(sys.argv[2])
 require_rerank = sys.argv[3] == "1"
+allow_expected_rerank_failure = require_rerank and int(sys.argv[4]) > 0
+if (allow_expected_rerank_failure and data.get("code") == 500 and
+        data.get("msg") == "rerank failed"):
+    print("expected_rerank_failure", data.get("request_id", "missing"), 0)
+    raise SystemExit(0)
 assert data.get("code") == 200, data
 items = data.get("items", [])
 assert len(items) == size and len({item["item_id"] for item in items}) == size, data
@@ -303,12 +318,32 @@ if require_rerank:
     assert 1 <= generative <= min(2, size), data
     assert sources == (["milvus_recall"] * (size - generative) +
                        ["generative_recall"] * generative), data
-print(data["request_id"], len(items))
+print("accepted", data["request_id"], len(items))
 PY
 )
     e2e_ms="$(python3 -c 'import sys; print(round(float(sys.argv[1])*1000, 3))' "$seconds")"
-    printf '%s\t%s\t%s\n' "$index" "$e2e_ms" "$request_id" >>"$directory/requests.tsv"
+    if [[ "$disposition" = expected_rerank_failure ]]; then
+      skipped=$((skipped + 1))
+      EXPECTED_RERANK_FAILURES_TOTAL=$((EXPECTED_RERANK_FAILURES_TOTAL + 1))
+      printf '%s\t%s\t%s\t500\trerank failed\n' \
+        "$attempt" "$e2e_ms" "$request_id" \
+        >>"$directory/expected-rerank-failures.tsv"
+      echo "expected rerank fail-closed response skipped" \
+        "attempt=$attempt request_id=$request_id" \
+        "total_skipped=$EXPECTED_RERANK_FAILURES_TOTAL/$MAX_EXPECTED_RERANK_FAILURES"
+      (( EXPECTED_RERANK_FAILURES_TOTAL <= MAX_EXPECTED_RERANK_FAILURES )) \
+        || die "expected rerank failure limit exceeded: $EXPECTED_RERANK_FAILURES_TOTAL > $MAX_EXPECTED_RERANK_FAILURES"
+      continue
+    fi
+    [[ "$disposition" = accepted ]] || die "unknown request disposition: $disposition"
+    accepted=$((accepted + 1))
+    printf '%s\t%s\t%s\n' "$accepted" "$e2e_ms" "$request_id" \
+      >>"$directory/requests.tsv"
   done
+  printf '{"target_successes":%d,"attempts":%d,"accepted":%d,"expected_rerank_failures":%d}\n' \
+    "$count" "$attempt" "$accepted" "$skipped" >"$directory/request-attempts.json"
+  echo "request collection complete accepted=$accepted attempts=$attempt" \
+    "expected_rerank_failures=$skipped total_expected_rerank_failures=$EXPECTED_RERANK_FAILURES_TOTAL"
 }
 
 wait_for_native_completions() {
