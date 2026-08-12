@@ -78,6 +78,10 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
 
     def test_build_rebuilds_and_installs_both_overlay_artifacts(self):
         text = SCRIPT.read_text()
+        self.assertIn('TRT_CMAKE_BUILD_TYPE="${TRT_CMAKE_BUILD_TYPE:-Release}"', text)
+        self.assertIn('-DCMAKE_BUILD_TYPE="$TRT_CMAKE_BUILD_TYPE"', text)
+        self.assertIn('CMAKE_BUILD_TYPE:STRING=$TRT_CMAKE_BUILD_TYPE', text)
+        self.assertIn('CMAKE_(CXX|CUDA)_FLAGS_RELEASE:STRING=.*-O3.*-DNDEBUG', text)
         self.assertIn(
             'cmake --build "$TRTLLM_DIR/cpp/build" --target tensorrt_llm', text)
         self.assertIn(

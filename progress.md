@@ -1,4 +1,4 @@
-> 2026-08-12 F19 历史token计数完成并排除生成长度：历史runtime暖态`32 token/91.0ms=2.844ms/token`，当前F19暖态`31 token/186.05ms=6.001ms/token`，回归`95.05ms`且单token成本翻倍；当前decode=`163.308ms`，归因lookup+record约百微秒，DataSystem Set约14ms，均无法解释剩余约81ms，回归位于当前TRT runtime模型执行路径。对照脚本新增第三种交叉配对`historical_gateway_current_trt`，保持历史gateway不变、仅切当前`libtensorrt_llm.so`，用于区分gateway变化与TRT库/构建变化；不能使用反向配对，因为当前gateway直接链接F19新增符号而历史TRT库不提供。异常退出仍自动恢复原Deployment。F19保持in_progress。
+> 2026-08-12 F19 回归根因锁定到当前TRT库及其非Release构建：三模式对照为历史pair=`32 token/94.75ms`、历史gateway+当前TRT=`32 token/188.75ms`、当前pair=`31 token/176ms`，只替换当前`libtensorrt_llm.so`即增加`94ms`，排除gateway/token数/归因开关。worker1 `CMakeCache.txt`确认`CMAKE_BUILD_TYPE:STRING=`为空，因此`CMAKE_*_FLAGS_RELEASE=-O3 -DNDEBUG`未生效。构建脚本现强制重新配置`Release`，并硬校验build type及CXX/CUDA Release优化flags后才编译发布。下一步worker1重编、部署并重跑三模式对照，验收目标为当前暖态恢复到历史约95ms。F19保持in_progress。
 >
 > 2026-08-12 F19 历史镜像确认存在，TRT库路径自适应修复：worker1已成功只读mount历史containerd镜像，但旧镜像中不存在脚本假定的`/TensorRT-LLM/cpp/build/.../libtensorrt_llm.so`普通文件，说明镜像布局使用其他前缀或绝对符号链接。提取脚本现限制在rootfs最大10层查找所有同名普通文件/符号链接，绝对链接按容器rootfs重新解析，逐一打印SHA并只接受现场已记录的`e0452812...`精确匹配；不会因`/home/TensorRT-LLM`与`/TensorRT-LLM`多副本取错。下一步worker1拉取后重跑提取。F19保持in_progress。
 >

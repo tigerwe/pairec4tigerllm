@@ -16,6 +16,7 @@ GATEWAY_BUILD_IMAGE="${GATEWAY_BUILD_IMAGE:-}"
 SHOW_HISTORY="${SHOW_HISTORY:-1}"
 APPLY_PATCH="${APPLY_PATCH:-1}"
 BUILD_TRTLLM="${BUILD_TRTLLM:-1}"
+TRT_CMAKE_BUILD_TYPE="${TRT_CMAKE_BUILD_TYPE:-Release}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -26,6 +27,8 @@ done
 [[ "$SHOW_HISTORY" = 0 || "$SHOW_HISTORY" = 1 ]] || die "SHOW_HISTORY must be 0 or 1"
 [[ "$APPLY_PATCH" = 0 || "$APPLY_PATCH" = 1 ]] || die "APPLY_PATCH must be 0 or 1"
 [[ "$BUILD_TRTLLM" = 0 || "$BUILD_TRTLLM" = 1 ]] || die "BUILD_TRTLLM must be 0 or 1"
+[[ "$TRT_CMAKE_BUILD_TYPE" = Release ]] \
+  || die "TRT_CMAKE_BUILD_TYPE must be Release for the production inference runtime"
 test -d "$REPO_DIR/cpp/brpc_gateway" || die "invalid REPO_DIR: $REPO_DIR"
 test -d "$TRTLLM_DIR/cpp/build" || die "TensorRT-LLM build tree is missing: $TRTLLM_DIR"
 
@@ -212,6 +215,7 @@ echo "cuda_driver_dir=$cuda_driver_dir"
 echo "jobs=$JOBS detected_jobs=$detected_jobs"
 echo "apply_patch=$APPLY_PATCH"
 echo "build_trtllm=$BUILD_TRTLLM"
+echo "trt_cmake_build_type=$TRT_CMAKE_BUILD_TYPE"
 
 if [[ "$BUILD_TRTLLM" = 1 ]]; then
   echo "== Stage 1/2: build TensorRT-LLM shared library =="
@@ -222,6 +226,7 @@ docker run --rm \
   --entrypoint /bin/bash \
   -e JOBS="$JOBS" \
   -e TRTLLM_DIR="$CONTAINER_TRTLLM_DIR" \
+  -e TRT_CMAKE_BUILD_TYPE="$TRT_CMAKE_BUILD_TYPE" \
   -v "$TRTLLM_DIR:$CONTAINER_TRTLLM_DIR" \
   -v "$staging_dir:/out" \
   -v "$cuda_driver_dir:/host-driver:ro" \
@@ -257,6 +262,18 @@ docker run --rm \
     export LIBRARY_PATH="$cuda_static_dir:${LIBRARY_PATH:-}"
     export LD_LIBRARY_PATH="/host-driver:$TRTLLM_DIR/cpp/build/tensorrt_llm:$TRTLLM_DIR/cpp/build/tensorrt_llm/plugins:${LD_LIBRARY_PATH:-}"
 
+    cmake -S "$TRTLLM_DIR/cpp" -B "$TRTLLM_DIR/cpp/build" \
+      -DCMAKE_BUILD_TYPE="$TRT_CMAKE_BUILD_TYPE"
+    grep -Fxq "CMAKE_BUILD_TYPE:STRING=$TRT_CMAKE_BUILD_TYPE" \
+      "$TRTLLM_DIR/cpp/build/CMakeCache.txt" || {
+        echo "ERROR: TensorRT-LLM build tree is not configured as $TRT_CMAKE_BUILD_TYPE" >&2
+        exit 1
+      }
+    grep -Eq "^CMAKE_(CXX|CUDA)_FLAGS_RELEASE:STRING=.*-O3.*-DNDEBUG" \
+      "$TRTLLM_DIR/cpp/build/CMakeCache.txt" || {
+        echo "ERROR: Release optimization flags are missing from TensorRT-LLM CMake cache" >&2
+        exit 1
+      }
     cmake --build "$TRTLLM_DIR/cpp/build" --target tensorrt_llm -j"$JOBS"
     trt_library="$TRTLLM_DIR/cpp/build/tensorrt_llm/libtensorrt_llm.so"
     plugin_library="$TRTLLM_DIR/cpp/build/tensorrt_llm/plugins/libnvinfer_plugin_tensorrt_llm.so"

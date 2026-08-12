@@ -120,6 +120,10 @@ TRTLLM_DIR=/home/zcx/TensorRT-LLM \
 The script reproduces the two requirements discovered during the manual native
 build: it mounts the worker1 driver directory at `/host-driver`, and adds the CUDA
 directory containing `libcudadevrt.a` and `libcudart_static.a` to `LIBRARY_PATH`.
+Before compiling, it reconfigures the existing TensorRT-LLM build tree with
+`CMAKE_BUILD_TYPE=Release` and rejects a cache without the Release `-O3 -DNDEBUG`
+flags. This is mandatory: the recovered worker1 cache had an empty build type and
+produced a library whose warm decode cost was about twice the historical runtime.
 It rejects unresolved gateway libraries, missing V2 attribution/V3 timing markers and
 missing output-token or Executor-phase trace fields before replacing the overlay. Success ends with
 `F19_ATTRIBUTION_RUNTIME_BUILD_OK`.
