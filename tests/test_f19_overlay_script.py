@@ -1,6 +1,7 @@
 import json
 import pathlib
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,9 @@ SCRIPT = ROOT / "scripts" / "deploy_f19_datasystem_attribution_overlay.sh"
 
 
 class F19OverlayScriptTest(unittest.TestCase):
+    def test_script_has_valid_shell_syntax(self):
+        subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
+
     def embedded_python_blocks(self):
         text = SCRIPT.read_text()
         blocks = re.findall(r"<<'PY'\n(.*?)\nPY", text, flags=re.DOTALL)
@@ -71,6 +75,14 @@ class F19OverlayScriptTest(unittest.TestCase):
         marker_call = text.index("require_attribution_marker", smoke_function)
         request_call = text.index("trace_single_brpc_datasystem_request.sh", smoke_function)
         self.assertLess(request_call, marker_call)
+
+    def test_current_build_is_not_rejected_by_stale_default_hashes(self):
+        text = SCRIPT.read_text()
+        self.assertIn('EXPECTED_GATEWAY_SHA256="${EXPECTED_GATEWAY_SHA256:-}"', text)
+        self.assertIn('EXPECTED_TRTLLM_SHA256="${EXPECTED_TRTLLM_SHA256:-}"', text)
+        self.assertIn('[[ "$loaded_trtllm_hash" == "$trtllm_hash" ]]', text)
+        self.assertIn("gateway attribution timing capability marker is missing", text)
+        self.assertIn("TensorRT-LLM attribution capability marker is missing", text)
 
 
 if __name__ == "__main__":

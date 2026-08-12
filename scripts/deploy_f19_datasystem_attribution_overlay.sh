@@ -9,8 +9,8 @@ APP_LABEL="${APP_LABEL:-app=inference-brpc-trtllm}"
 HOST_RUNTIME_DIR="${HOST_RUNTIME_DIR:-/home/zcx/pairec-f19-runtime}"
 POD_RUNTIME_DIR="${POD_RUNTIME_DIR:-/opt/pairec-f19}"
 TRTLLM_RUNTIME_PATH="${TRTLLM_RUNTIME_PATH:-/TensorRT-LLM/cpp/build/tensorrt_llm/libtensorrt_llm.so}"
-EXPECTED_GATEWAY_SHA256="${EXPECTED_GATEWAY_SHA256:-39d85875eae04648aed42cebdaaf105000b3eb3244eb6d5c07feface8c3bc751}"
-EXPECTED_TRTLLM_SHA256="${EXPECTED_TRTLLM_SHA256:-c6461918d88e742fea78b02d7dcaa3b9dcea30d5c6d0db3ff02cee20c438ccff}"
+EXPECTED_GATEWAY_SHA256="${EXPECTED_GATEWAY_SHA256:-}"
+EXPECTED_TRTLLM_SHA256="${EXPECTED_TRTLLM_SHA256:-}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-10m}"
 RUN_EXACT_SMOKE="${RUN_EXACT_SMOKE:-1}"
 PAIREC_TARGET="${PAIREC_TARGET:-deploy/pairec-brpc-observed}"
@@ -34,6 +34,9 @@ rollback  Roll the Deployment back one revision and wait for it to become ready.
 
 Important environment overrides:
   HOST_RUNTIME_DIR, EXPECTED_GATEWAY_SHA256, EXPECTED_TRTLLM_SHA256
+  The SHA overrides are optional release locks. By default the script verifies
+  overlay paths, capability markers, dependency resolution, and loaded-library
+  identity without pinning hashes from an older build.
   RUN_EXACT_SMOKE=0, PAIREC_TARGET, NAMESPACE, DEPLOYMENT
 EOF
 }
@@ -122,12 +125,27 @@ verify_runtime() {
   gateway_hash="$(awk 'NR==1 {print $1}' <<<"$hashes")"
   trtllm_hash="$(awk 'NR==2 {print $1}' <<<"$hashes")"
   loaded_trtllm_hash="$(awk 'NR==3 {print $1}' <<<"$hashes")"
-  [[ "$gateway_hash" == "$EXPECTED_GATEWAY_SHA256" ]] \
-    || die "gateway hash mismatch: $gateway_hash"
-  [[ "$trtllm_hash" == "$EXPECTED_TRTLLM_SHA256" ]] \
-    || die "TensorRT-LLM hash mismatch: $trtllm_hash"
-  [[ "$loaded_trtllm_hash" == "$EXPECTED_TRTLLM_SHA256" ]] \
-    || die "loaded TensorRT-LLM hash mismatch: $loaded_trtllm_hash"
+  echo "detected_gateway_sha256=$gateway_hash"
+  echo "detected_trtllm_sha256=$trtllm_hash"
+  if [[ -n "$EXPECTED_GATEWAY_SHA256" ]]; then
+    [[ "$gateway_hash" == "$EXPECTED_GATEWAY_SHA256" ]] \
+      || die "gateway hash mismatch: actual=$gateway_hash expected=$EXPECTED_GATEWAY_SHA256"
+  fi
+  if [[ -n "$EXPECTED_TRTLLM_SHA256" ]]; then
+    [[ "$trtllm_hash" == "$EXPECTED_TRTLLM_SHA256" ]] \
+      || die "TensorRT-LLM hash mismatch: actual=$trtllm_hash expected=$EXPECTED_TRTLLM_SHA256"
+  fi
+  [[ "$loaded_trtllm_hash" == "$trtllm_hash" ]] \
+    || die "loaded TensorRT-LLM differs from overlay: loaded=$loaded_trtllm_hash overlay=$trtllm_hash"
+
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$CONTAINER" -- \
+    grep -aFq trt_executor_request_complete \
+      "$POD_RUNTIME_DIR/bin/brpc_inference_server" \
+    || die "gateway attribution timing capability marker is missing"
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$CONTAINER" -- \
+    grep -aFq datasystem_request_complete \
+      "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
+    || die "TensorRT-LLM attribution capability marker is missing"
 
   ldd_output="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$CONTAINER" -- \
     sh -c 'unset LD_PRELOAD; ldd "$1"' sh \
