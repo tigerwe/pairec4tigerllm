@@ -105,6 +105,23 @@ class PaiRecBrpcObservedDeployScriptTest(unittest.TestCase):
         self.assertLess(env_update, restart)
         self.assertLess(restart, rollout)
 
+    def test_pairec_restart_can_be_skipped_for_workload_only_recovery(self):
+        text = SCRIPT.read_text()
+        self.assertIn('FORCE_PAIREC_RESTART="${FORCE_PAIREC_RESTART:-1}"', text)
+        self.assertIn('if [[ "$FORCE_PAIREC_RESTART" = 1 ]]', text)
+        restart = text.index(
+            'kubectl -n "$NAMESPACE" rollout restart deployment/pairec-brpc-observed'
+        )
+        condition = text.rindex(
+            'if [[ "$FORCE_PAIREC_RESTART" = 1 ]]', 0, restart
+        )
+        rollout = text.index(
+            'kubectl -n "$NAMESPACE" rollout status deployment/pairec-brpc-observed',
+            restart,
+        )
+        self.assertLess(condition, restart)
+        self.assertLess(restart, rollout)
+
     def test_workload_logs_are_streamed_before_requests(self):
         text = SCRIPT.read_text()
         workload = text.index('echo "== Run pure BRPC observed workload')

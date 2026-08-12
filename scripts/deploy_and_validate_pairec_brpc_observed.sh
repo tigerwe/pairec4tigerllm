@@ -19,6 +19,7 @@ HTTP_BASELINE_SERVICE="${HTTP_BASELINE_SERVICE:-pairec-multi-recall-rank}"
 HTTP_BASELINE_REQUESTS="${HTTP_BASELINE_REQUESTS:-100}"
 REQUIRE_DATASYSTEM_ATTRIBUTION="${REQUIRE_DATASYSTEM_ATTRIBUTION:-0}"
 FORCE_INFERENCE_RESTART="${FORCE_INFERENCE_RESTART:-0}"
+FORCE_PAIREC_RESTART="${FORCE_PAIREC_RESTART:-1}"
 RERANK_MAX_P99_MS="${RERANK_MAX_P99_MS:-1.0}"
 CLIENT_MAX_P99_MS="${CLIENT_MAX_P99_MS:-122.622}"
 PAIREC_IMAGE="${PAIREC_IMAGE:-docker.io/library/pairec-server:k8s-arm64-brpc-v1}"
@@ -84,7 +85,8 @@ done
 [[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
   || die "SERVICE_READY_TIMEOUT_SECONDS must be a positive integer"
 for value in "$BUILD_IMAGES" "$IMPORT_IMAGES" "$RUN_HTTP_AB" \
-  "$REQUIRE_DATASYSTEM_ATTRIBUTION" "$FORCE_INFERENCE_RESTART"; do
+  "$REQUIRE_DATASYSTEM_ATTRIBUTION" "$FORCE_INFERENCE_RESTART" \
+  "$FORCE_PAIREC_RESTART"; do
   [[ "$value" = 0 || "$value" = 1 ]] || die "boolean flags must be 0 or 1"
 done
 for command in kubectl python3 curl; do
@@ -217,7 +219,9 @@ kubectl apply -f "$OUTPUT_DIR/pairec.yaml"
 kubectl -n "$NAMESPACE" set image deployment/pairec-brpc-observed "pairec=$PAIREC_IMAGE"
 kubectl -n "$NAMESPACE" set env deployment/pairec-brpc-observed \
   PAIREC_REQUIRE_DATASYSTEM_ATTRIBUTION=0
-kubectl -n "$NAMESPACE" rollout restart deployment/pairec-brpc-observed
+if [[ "$FORCE_PAIREC_RESTART" = 1 ]]; then
+  kubectl -n "$NAMESPACE" rollout restart deployment/pairec-brpc-observed
+fi
 kubectl -n "$NAMESPACE" rollout status deployment/pairec-brpc-observed --timeout=5m
 
 PAIREC_POD="$(ready_pod_for_app pairec-brpc-observed)"

@@ -177,6 +177,13 @@ IMPORT_IMAGES=0 \
   bash scripts/deploy_and_validate_pairec_brpc_observed.sh
 ```
 
+For a workload-only retry after all rendered resources and images have already
+been validated, also set `FORCE_INFERENCE_RESTART=0` and
+`FORCE_PAIREC_RESTART=0`. This avoids destroying a healthy PaiRec Pod on a node
+whose CRI sandbox image lookup cannot currently reach the registry. Keep the
+default `FORCE_PAIREC_RESTART=1` whenever configuration or image changes must be
+activated.
+
 Formal run:
 
 ```bash
