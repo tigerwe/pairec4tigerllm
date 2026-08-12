@@ -4,6 +4,7 @@ set -euo pipefail
 IMAGE="${IMAGE:-docker.io/library/pairec-brpc-inference:k8s-arm64-trtllm-v1}"
 OUTPUT_DIR="${OUTPUT_DIR:-/home/zcx/pairec-f19-historical-runtime}"
 CTR="${CTR:-ctr}"
+IMAGE_TAR="${IMAGE_TAR:-/home/zcx/pairec-brpc-inference-k8s-arm64-trtllm-v1.tar}"
 EXPECTED_GATEWAY_SHA256="${EXPECTED_GATEWAY_SHA256:-acba014e342030a57e1fba51fd691b1fbb7ffd3735488f03b28e08365b00dc43}"
 EXPECTED_TRTLLM_SHA256="${EXPECTED_TRTLLM_SHA256:-e0452812c00a56ae9a0b5817a5c0ca6b1a2e1b8e33dc63fe22c31e2e834010c4}"
 MOUNT_DIR=""
@@ -18,12 +19,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for command in sudo "$CTR" install sha256sum strings mktemp; do
+for command in sudo "$CTR" install sha256sum strings mktemp grep awk; do
   command -v "$command" >/dev/null || die "missing command: $command"
 done
 
-sudo "$CTR" -n k8s.io images inspect "$IMAGE" >/dev/null \
-  || die "historical image is absent from k8s.io containerd: $IMAGE"
+image_exists() {
+  sudo "$CTR" -n k8s.io images list -q 2>/dev/null | grep -Fqx "$IMAGE"
+}
+
+if ! image_exists; then
+  [[ -f "$IMAGE_TAR" ]] \
+    || die "historical image is absent and archive does not exist: image=$IMAGE archive=$IMAGE_TAR"
+  echo "== Import historical inference image archive =="
+  echo "archive=$IMAGE_TAR"
+  sudo "$CTR" -n k8s.io images import "$IMAGE_TAR"
+  image_exists \
+    || die "archive import did not create expected image tag: $IMAGE"
+else
+  echo "historical_image_source=containerd"
+fi
 
 MOUNT_DIR="$(mktemp -d /tmp/f19-historical-image.XXXXXX)"
 echo "== Mount historical inference image =="

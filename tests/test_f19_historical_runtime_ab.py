@@ -15,6 +15,10 @@ class F19HistoricalRuntimeABTest(unittest.TestCase):
 
     def test_extract_uses_containerd_without_mutating_image(self):
         text = EXTRACT.read_text()
+        self.assertNotIn("images inspect", text)
+        self.assertIn('images list -q', text)
+        self.assertIn('IMAGE_TAR="${IMAGE_TAR:-/home/zcx/pairec-brpc-inference-k8s-arm64-trtllm-v1.tar}"', text)
+        self.assertIn('images import "$IMAGE_TAR"', text)
         self.assertIn('images mount "$IMAGE" "$MOUNT_DIR"', text)
         self.assertIn('images unmount "$MOUNT_DIR"', text)
         self.assertIn("/opt/pairec-brpc/bin/brpc_inference_server", text)
