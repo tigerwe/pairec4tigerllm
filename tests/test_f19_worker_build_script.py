@@ -108,15 +108,26 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
         cmake = CMAKE.read_text()
         self.assertIn("option(PAIREC_USE_PREGENERATED_PROTO", cmake)
         self.assertIn("if(PAIREC_USE_PREGENERATED_PROTO)", cmake)
+        self.assertIn("protoc 25.1 / Protobuf C++ 4.25.1", cmake)
         for name in (
                 "recommend.pb.cc", "recommend.pb.h",
                 "pipeline_service.pb.cc", "pipeline_service.pb.h"):
             self.assertTrue((GENERATED / name).is_file(), name)
+        for name in ("recommend.pb.h", "pipeline_service.pb.h"):
+            header = (GENERATED / name).read_text()
+            self.assertIn("Protobuf C++ Version: 4.25.1", header)
+            self.assertIn("generated_message_tctable_decl.h", header)
+            self.assertNotIn("generated_message_table_driven.h", header)
 
     def test_pregenerated_sources_match_current_proto(self):
         protoc = shutil.which("protoc")
         if protoc is None:
             self.skipTest("protoc is unavailable for generated-source audit")
+        version = subprocess.run(
+            [protoc, "--version"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        if version != "libprotoc 25.1":
+            self.skipTest(f"generated sources require protoc 25.1, found {version}")
         with tempfile.TemporaryDirectory() as directory:
             subprocess.run([
                 protoc,
