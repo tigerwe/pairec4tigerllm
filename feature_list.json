@@ -245,7 +245,7 @@
     {
       "id": "F19",
       "name": "Native TRT KVC 请求级 DataSystem 归因",
-      "status": "in_progress",
+      "status": "done",
       "description": "在 native TensorRT-LLM KVC offload/onboard 路径传播 PaiRec request identity，并将同一请求的 DataSystem Get/Set 次数与整数微秒耗时准确回传到 pipeline trace。",
       "branch": "pairec-brpc-observability",
       "files": [
@@ -270,8 +270,9 @@
         "tests/test_pairec_brpc_observed_deploy_script.py"
       ],
       "validation_method": "在真实 native TRT KVC 工作负载中打开 REQUIRE_DATASYSTEM_ATTRIBUTION=1；1000 请求均必须 attribution_complete=true，Get/Set 只能来自相同 request_id 的原生事件，不允许从时间窗口或聚合日志推断；业务、trace闭合、资源和无fallback门禁继续通过。",
-      "validation_evidence": "本地：补丁对全新TensorRT-LLM源码副本连续应用两次成功；独立C++17 tracker smoke确认两个native lifecycle聚合同一UUID的Get/Set并在pending超时时输出incomplete；pipeline/patcher/overlay/真实I/O/Pod选择/A-B汇总/验收脚本专项30项单测通过，动态正反夹具确认旧窗口3/2不能掩盖native completion 0/0，且多Pod并存时只选择最新Running/Ready Pod。正式验收强制TLLM INFO级别并在warmup后拒绝任何DEBUG行；请求前流式采集PaiRec与inference日志并自动清理collector。远端worker1：K8s Pod以F19 gateway作为PID1，loader实际路径SHA256匹配F19 native library，ldd无缺库，严格Health通过。首个新鲜缓存UUID得到唯一0/0 completion并正确闭合。随后连续3轮reset + prime195 + PaiRec replay全部PASS：旧trace和唯一同UUID native completion每轮均为3 Set + 2 Get，complete=true，失败/pending/unknown为0，Pod无重启/crash；E2E均值256.487ms、BRPC差值4ms、KVC均值33.714ms。INFO门禁下正式1000请求严格验收通过：warmup/workload均确认native completion完整，workload valid=1000/1000、missing=0、invalid=0、datasystem_complete=1000；E2E avg/p99=195.395/207.795ms，generative avg=184.332ms、inference avg=179.852ms，vector与DeepFM avg=8.883/9.249ms。原生事件共1995 Set和66 Get；每请求Set累计avg/p99=11.496/14.201ms，Get累计avg/p99=0.414/7.096ms。历史三组disabled/enabled配对A/B中，enabled每轮1000/1000 completion完整且各记录54 Get/1995 Set；配对中位数client avg=-0.672ms、p99=-1.947ms、吞吐损失=0.076%，runner avg/p99=-0.188/-1.000ms。2026-08-11复核确认该disabled仍无条件传播clientId并在每个token竞争mSequencesMtx，因此该结果只能证明tracker统计/日志开销接近零，不能证明整套归因补丁与约85ms回归无关；F19已重新打开，等待V2独立mutex和真正disabled路径远端验收。",
-      "next_step": "Release正式验收核心指标已通过：1000/1000成功、datasystem_complete=1000、runner avg/p99=95.085/105.199ms、五容器CPU throttling=0。仅最终Pod Event门禁扫描到历史BackOff/Unhealthy而误报；代码已改为固定Pod并比较workload前后Event计数增量。master审计失败Pod Event的lastTimestamp，确认没有发生在本轮约148.94秒workload期间后即可将F19标记done，无需重跑1000请求。"
+      "validation_evidence": "本地补丁幂等、C++ tracker、pipeline/patcher/overlay/真实I/O/Pod选择/A-B/验收测试均通过。worker1 Release runtime与历史runtime交叉配对确认此前约85-95ms回归来自空CMAKE_BUILD_TYPE的未优化TRT库；Release三模式暖态runner为92.0/92.0/90.65ms。真实I/O连续3轮同UUID completion精确报告3 Set+2 Get，失败/pending/unknown为0。最终Kubernetes正式验收1000/1000请求成功且无补发，吞吐6.714rps；pipeline valid=1000/1000、missing=0、invalid=0、datasystem_complete=1000。E2E avg/p99=110.002/120.946ms，generative avg/p99=99.066/109.170ms，runner avg/p99=95.085/105.199ms且固定32 output token；native lifecycle avg/p99=95.023/105.146ms、闭合误差p99=0.020us、runner-native差p99=0.081ms。五个容器CPU throttling均为0。末尾Event误报经审计确认为历史镜像拉取：lastTimestamp=2026-08-12T08:01:43Z（北京时间16:01:43），早于本轮16:25:23开始约23分钟，本轮无新增健康故障。",
+      "next_step": "F19已完成。后续保持REQUIRE_DATASYSTEM_ATTRIBUTION=1和Release runtime；若修改TensorRT-LLM、gateway或KVC调度，再复跑1000请求精确归因与runner<=110ms回归门禁。",
+      "done_date": "2026-08-12"
     },
     {
       "id": "F20",
@@ -292,7 +293,7 @@
       ],
       "validation_method": "隔离配置启用source_quota_tail；3次smoke和1000次稳定性全部code=200、输出唯一且数量等于size，生成式候选为1或2个并连续位于末尾；有2个生成式输入时必须保留2个；原DeepFM分数不变；rerank trace 100%有效、p99<=1ms，E2E p99相对F18历史120.622ms增量<=2ms。缺少生成式候选的故障注入必须返回code=500和空items。",
       "validation_evidence": "2026-08-10: 本地Go race、services测试、Python trace summary unittest 6/6及静态检查通过。ARM64/Kubernetes正向正式验收1000/1000有效，missing=0、invalid=0；E2E p99=120.318ms（门禁122.622ms），rerank p99=0.030ms（门禁1ms）；HTTP基线p99=118.604ms，BRPC增量1.713ms；PaiRec CPU throttled period=0.067%，其余adapter/backend均0%，无fallback，分类PAIREC_PURE_BRPC_OBSERVABILITY_OK。远端故障注入请求cd303256-5a8b-483c-9ddc-a0cf3ebbe11c验证code=500、空items、source_quota_rerank及pipeline trace均为error；原ConfigMap恢复后请求4fc2fee7-5f61-4777-ac58-bbf380a92cec返回code=200、8个向量加末尾2个生成式商品。正向、失败关闭和恢复门禁全部通过。",
-      "next_step": "F20已完成。下一任务转入F19，在native TRT KVC offload/onboard路径传播request_id并实现DataSystem Get/Set请求级精确归因。",
+      "next_step": "F20与后续F19请求级DataSystem归因均已完成；后续仅在修改召回配额、重排策略或native KVC链路时执行对应回归验收。",
       "done_date": "2026-08-10"
     }
   ]

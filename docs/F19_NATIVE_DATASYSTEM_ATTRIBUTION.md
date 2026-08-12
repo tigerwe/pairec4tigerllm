@@ -336,9 +336,8 @@ correlation ID, set Executor `clientId`, or access the native request map. Enabl
 mode keeps exact attribution but moves the request map to a dedicated mutex so token
 accounting cannot contend with the scheduler's sequence critical section. Trace
 fields 40 and 41 report output-token count and runner milliseconds per output token.
-The benchmark now fails if token counts differ or if either mode remains above 110
-ms average runner latency. F19 remains in progress until this stricter benchmark
-passes remotely.
+The benchmark fails if token counts differ or if either mode remains above 110 ms
+average runner latency. The final Release validation passed this gate remotely.
 
 ## Bounded Business Failure Handling
 
@@ -378,3 +377,14 @@ The validator snapshots each Ready Pod name and cumulative `OOMKilled`, `BackOff
 and `Unhealthy` Event count before warmup, then requires the same Pod, zero restarts
 and no count increase after the workload. Historical startup events therefore do not
 invalidate a healthy run, while any new event during validation remains fail-closed.
+
+## Final Acceptance
+
+F19 completed on 2026-08-12. The Release workload accepted 1000/1000 requests with
+1000/1000 exact native completion joins. Runner average/p99 was
+`95.085/105.199 ms`, client E2E average/p99 was `110.002/120.946 ms`, and all five
+container CPU throttling ratios were zero. Output-token count was fixed at 32.
+
+The old lifetime Event gate reported a historical image-pull `BackOff` whose last
+timestamp was `2026-08-12T08:01:43Z` (16:01:43 Asia/Shanghai), around 23 minutes
+before the 16:25:23 validation output directory. It was not a workload failure.
