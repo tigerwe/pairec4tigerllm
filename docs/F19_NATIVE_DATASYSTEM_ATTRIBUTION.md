@@ -118,8 +118,11 @@ TRTLLM_DIR=/home/zcx/TensorRT-LLM \
 ```
 
 The script reproduces the two requirements discovered during the manual native
-build: it mounts the worker1 driver directory at `/host-driver`, and adds the CUDA
-directory containing `libcudadevrt.a` and `libcudart_static.a` to `LIBRARY_PATH`.
+build: it mounts only worker1's `libcuda.so.1` at
+`/host-driver/libcuda.so.1`, and adds the CUDA directory containing
+`libcudadevrt.a` and `libcudart_static.a` to `LIBRARY_PATH`. It deliberately does
+not add `/host-driver` to `LD_LIBRARY_PATH`; mounting the whole host `/lib64`
+overrode the build image's `libstdc++` and made PyTorch fail its GLIBCXX check.
 Before compiling, it reconfigures the existing TensorRT-LLM build tree with
 `CMAKE_BUILD_TYPE=Release` and rejects a cache without the Release `-O3 -DNDEBUG`
 flags. This is mandatory: the recovered worker1 cache had an empty build type and

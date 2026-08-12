@@ -180,18 +180,20 @@ fi
   "no local arm64 gateway image contains protobuf and brpc C++ SDK; set GATEWAY_BUILD_IMAGE"
 gateway_image_arch="$(docker image inspect "$GATEWAY_BUILD_IMAGE" --format '{{.Architecture}}')"
 
-cuda_driver_dir="${CUDA_DRIVER_DIR:-}"
-if [[ -z "$cuda_driver_dir" ]]; then
+cuda_driver_file="${CUDA_DRIVER_LIBRARY:-}"
+if [[ -z "$cuda_driver_file" && -n "${CUDA_DRIVER_DIR:-}" ]]; then
+  cuda_driver_file="$CUDA_DRIVER_DIR/libcuda.so.1"
+fi
+if [[ -z "$cuda_driver_file" ]]; then
   for candidate in /lib64 /usr/lib64 /usr/lib/aarch64-linux-gnu /usr/local/nvidia/lib64; do
     if [[ -f "$candidate/libcuda.so.1" ]]; then
-      cuda_driver_dir="$candidate"
+      cuda_driver_file="$candidate/libcuda.so.1"
       break
     fi
   done
 fi
-[[ -n "$cuda_driver_dir" && -d "$cuda_driver_dir" \
-    && -f "$cuda_driver_dir/libcuda.so.1" ]] \
-  || die "host driver directory containing libcuda.so.1 was not found; set CUDA_DRIVER_DIR"
+[[ -n "$cuda_driver_file" && -f "$cuda_driver_file" ]] \
+  || die "host libcuda.so.1 was not found; set CUDA_DRIVER_LIBRARY"
 
 runtime_parent="$(dirname "$RUNTIME_DIR")"
 mkdir -p "$runtime_parent"
@@ -211,7 +213,7 @@ echo "trt_build_image=$TRT_BUILD_IMAGE"
 echo "trt_image_arch=$trt_image_arch"
 echo "gateway_build_image=$GATEWAY_BUILD_IMAGE"
 echo "gateway_image_arch=$gateway_image_arch"
-echo "cuda_driver_dir=$cuda_driver_dir"
+echo "cuda_driver_library=$cuda_driver_file"
 echo "jobs=$JOBS detected_jobs=$detected_jobs"
 echo "apply_patch=$APPLY_PATCH"
 echo "build_trtllm=$BUILD_TRTLLM"
@@ -229,7 +231,7 @@ docker run --rm \
   -e TRT_CMAKE_BUILD_TYPE="$TRT_CMAKE_BUILD_TYPE" \
   -v "$TRTLLM_DIR:$CONTAINER_TRTLLM_DIR" \
   -v "$staging_dir:/out" \
-  -v "$cuda_driver_dir:/host-driver:ro" \
+  -v "$cuda_driver_file:/host-driver/libcuda.so.1:ro" \
   "$TRT_BUILD_IMAGE" \
   -lc '
     set -euo pipefail
@@ -260,7 +262,7 @@ docker run --rm \
       exit 1
     }
     export LIBRARY_PATH="$cuda_static_dir:${LIBRARY_PATH:-}"
-    export LD_LIBRARY_PATH="/host-driver:$TRTLLM_DIR/cpp/build/tensorrt_llm:$TRTLLM_DIR/cpp/build/tensorrt_llm/plugins:${LD_LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="$TRTLLM_DIR/cpp/build/tensorrt_llm:$TRTLLM_DIR/cpp/build/tensorrt_llm/plugins:${LD_LIBRARY_PATH:-}"
 
     cmake -S "$TRTLLM_DIR/cpp" -B "$TRTLLM_DIR/cpp/build" \
       -DCMAKE_BUILD_TYPE="$TRT_CMAKE_BUILD_TYPE"
@@ -306,7 +308,7 @@ docker run --rm \
   -v "$REPO_DIR:$CONTAINER_REPO_DIR:ro" \
   -v "$TRTLLM_DIR:$CONTAINER_TRTLLM_DIR" \
   -v "$staging_dir:/out" \
-  -v "$cuda_driver_dir:/host-driver:ro" \
+  -v "$cuda_driver_file:/host-driver/libcuda.so.1:ro" \
   "$GATEWAY_BUILD_IMAGE" \
   -lc '
     set -euo pipefail
@@ -339,7 +341,7 @@ docker run --rm \
       exit 1
     }
 
-    export LD_LIBRARY_PATH="/host-driver:$TRTLLM_DIR/cpp/build/tensorrt_llm:$TRTLLM_DIR/cpp/build/tensorrt_llm/plugins:${LD_LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="$TRTLLM_DIR/cpp/build/tensorrt_llm:$TRTLLM_DIR/cpp/build/tensorrt_llm/plugins:${LD_LIBRARY_PATH:-}"
     ds_header="$(find /usr/local -type f -path "*/datasystem/include/datasystem/kv_client.h" -print -quit)"
     ds_include="$(dirname "$(dirname "$ds_header")")"
     ds_library="$(find /usr/local -type f -path "*/datasystem/lib/libdatasystem.so" -print -quit)"

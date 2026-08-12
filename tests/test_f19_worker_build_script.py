@@ -29,7 +29,8 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
         self.assertIn("Stage 2/2: build BRPC inference gateway", text)
         self.assertIn("--gpus all", text)
         self.assertIn("--entrypoint /bin/bash", text)
-        self.assertIn('"$cuda_driver_dir:/host-driver:ro"', text)
+        self.assertIn('"$cuda_driver_file:/host-driver/libcuda.so.1:ro"', text)
+        self.assertNotIn('LD_LIBRARY_PATH="/host-driver:', text)
 
     def test_trt_image_is_preflighted_for_static_cuda_runtime(self):
         text = SCRIPT.read_text()
@@ -75,6 +76,8 @@ class F19WorkerBuildScriptTest(unittest.TestCase):
         self.assertIn("libcudadevrt.a", text)
         self.assertIn("libcudart_static.a", text)
         self.assertIn('export LIBRARY_PATH="$cuda_static_dir:', text)
+        self.assertIn('cuda_driver_file="${CUDA_DRIVER_LIBRARY:-}"', text)
+        self.assertIn('-DCUDA_DRIVER_LIBRARY=/host-driver/libcuda.so.1', text)
 
     def test_build_rebuilds_and_installs_both_overlay_artifacts(self):
         text = SCRIPT.read_text()
