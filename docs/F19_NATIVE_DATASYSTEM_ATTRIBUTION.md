@@ -372,3 +372,9 @@ run immediately. Skipped attempts are written to
 and skipped counts. They are excluded from the 1000 successful request IDs used for
 latency and exact DataSystem joins, while their request time remains part of the
 closed-loop workload wall clock.
+
+Health events are evaluated as a workload interval, not as Pod-lifetime history.
+The validator snapshots each Ready Pod name and cumulative `OOMKilled`, `BackOff`
+and `Unhealthy` Event count before warmup, then requires the same Pod, zero restarts
+and no count increase after the workload. Historical startup events therefore do not
+invalidate a healthy run, while any new event during validation remains fail-closed.

@@ -185,6 +185,23 @@ class PaiRecBrpcObservedDeployScriptTest(unittest.TestCase):
         self.assertLess(continuation, accepted)
         self.assertLess(accepted, request_row)
 
+    def test_health_gate_only_rejects_new_failure_events(self):
+        text = SCRIPT.read_text()
+        self.assertIn('collect_failure_event_count()', text)
+        self.assertIn('for deployment in "${HEALTH_TARGETS[@]}"', text)
+        self.assertIn('>"$OUTPUT_DIR/${deployment}.pod.before"', text)
+        self.assertIn(
+            'collect_failure_event_count "$pod" "$OUTPUT_DIR/${deployment}.events.before"',
+            text,
+        )
+        self.assertIn(
+            'collect_failure_event_count "$pod" "$OUTPUT_DIR/${deployment}.events.after"',
+            text,
+        )
+        self.assertIn('[[ "$pod" = "$pod_before" ]]', text)
+        self.assertIn('(( events_after <= events_before ))', text)
+        self.assertNotIn("grep -Eq 'OOMKilled|BackOff|Unhealthy'", text)
+
     def test_log_collectors_are_cleaned_on_exit(self):
         text = SCRIPT.read_text()
         self.assertIn('trap cleanup EXIT', text)

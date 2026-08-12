@@ -269,6 +269,28 @@ collect_cpu_stat() {
     >"$output"
 }
 
+collect_failure_event_count() {
+  local pod="$1" output="$2"
+  kubectl -n "$NAMESPACE" get events \
+    --field-selector "involvedObject.kind=Pod,involvedObject.name=$pod" \
+    -o json | python3 -c '
+import json
+import re
+import sys
+
+pattern = re.compile(r"OOMKilled|BackOff|Unhealthy")
+events = json.load(sys.stdin).get("items", [])
+count = sum(
+    int(event.get("count", 1))
+    for event in events
+    if pattern.search(
+        " ".join(str(event.get(field, "")) for field in ("reason", "message"))
+    )
+)
+print(count)
+' >"$output"
+}
+
 RESOURCE_TARGETS=(
   "pairec-brpc-observed:pairec"
   "vector-recall-brpc:adapter"
@@ -279,6 +301,12 @@ RESOURCE_TARGETS=(
 for tuple in "${RESOURCE_TARGETS[@]}"; do
   IFS=: read -r deployment container <<<"$tuple"
   collect_cpu_stat "$deployment" "$container" "$OUTPUT_DIR/${deployment}-${container}.cpu.before"
+done
+HEALTH_TARGETS=(pairec-brpc-observed vector-recall-brpc deepfm-rank-brpc)
+for deployment in "${HEALTH_TARGETS[@]}"; do
+  pod="$(ready_pod_for_app "$deployment")"
+  printf '%s\n' "$pod" >"$OUTPUT_DIR/${deployment}.pod.before"
+  collect_failure_event_count "$pod" "$OUTPUT_DIR/${deployment}.events.before"
 done
 
 run_requests() {
@@ -575,15 +603,20 @@ print(f"resource deployment={sys.argv[3]} periods={periods} throttled={throttled
 assert ratio <= 5.0, f"CPU throttled period gate failed: {ratio:.3f}%"
 PY
 done
-for deployment in pairec-brpc-observed vector-recall-brpc deepfm-rank-brpc; do
+for deployment in "${HEALTH_TARGETS[@]}"; do
   pod="$(ready_pod_for_app "$deployment")"
+  pod_before="$(<"$OUTPUT_DIR/${deployment}.pod.before")"
+  [[ "$pod" = "$pod_before" ]] \
+    || die "$deployment Pod changed during workload: $pod_before -> $pod"
   restarts="$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[*].restartCount}')"
   [[ "$restarts" =~ ^(0[[:space:]]*)+$ ]] || die "$deployment restart count is not zero: $restarts"
-  if kubectl -n "$NAMESPACE" get events \
-    --field-selector "involvedObject.kind=Pod,involvedObject.name=$pod" | \
-    grep -Eq 'OOMKilled|BackOff|Unhealthy'; then
-    die "resource or health failure event detected for $pod"
-  fi
+  collect_failure_event_count "$pod" "$OUTPUT_DIR/${deployment}.events.after"
+  events_before="$(<"$OUTPUT_DIR/${deployment}.events.before")"
+  events_after="$(<"$OUTPUT_DIR/${deployment}.events.after")"
+  echo "health deployment=$deployment pod=$pod restarts=$restarts" \
+    "failure_events_before=$events_before failure_events_after=$events_after"
+  (( events_after <= events_before )) \
+    || die "new resource or health failure event detected for $pod: $events_before -> $events_after"
 done
 
 echo "== Summary =="
