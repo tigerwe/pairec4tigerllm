@@ -213,6 +213,30 @@ running another enabled/disabled benchmark:
 The strict 1000-request summary emits p50/p95/p99 for all of these fields and fails if
 the native phase event is absent, incomplete, duplicated, or cannot close within 100us.
 
+If an old aggregate report has expired, compare the still-cached historical runtime
+instead of inferring its output-token count. First extract the known gateway/native
+pair on worker1. The extractor pins the previously recorded SHA256 values by default:
+
+```bash
+cd /home/zcx/workspace/pairec4tigerllm-f19
+git pull --ff-only gitcode pairec-brpc-observability
+bash scripts/extract_f19_historical_runtime_worker1.sh
+```
+
+Then run the guarded comparison from master:
+
+```bash
+cd /home/zcx/workspace/pairec4tigerllm
+git pull --ff-only gitcode pairec-brpc-observability
+SAMPLES=5 bash scripts/benchmark_f19_historical_runtime.sh
+```
+
+The benchmark deploys the historical gateway and TensorRT-LLM library as one pair,
+collects one cold plus four warm requests, restores the exact original Deployment
+template, and collects the same current-runtime samples. An EXIT trap restores the
+current template after failures as well. Do not compare a historical gateway against
+the current library or vice versa: their native symbol contracts differ.
+
 That fresh-cache smoke may correctly report `Get=0/Set=0`; it proves identity and
 lifecycle closure, but not real DataSystem I/O. To reproduce the previously stable
 cache shape and require the same UUID to own exactly three Sets and two Gets, run:
