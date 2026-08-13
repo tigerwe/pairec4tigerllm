@@ -96,6 +96,9 @@ kubectl -n "$NAMESPACE" get pods \
   -l "app in ($PAIREC_DEPLOYMENT,$WRAPPER_DEPLOYMENT,$INFERENCE_DEPLOYMENT)" -o wide \
   >"$OUTPUT_DIR/pods.txt" 2>&1 || true
 kubectl -n "$NAMESPACE" get pods \
+  -l "app in ($PAIREC_DEPLOYMENT,$WRAPPER_DEPLOYMENT,$INFERENCE_DEPLOYMENT)" -o json \
+  >"$OUTPUT_DIR/pods.json" 2>&1 || true
+kubectl -n "$NAMESPACE" get pods \
   -l "app in ($PAIREC_DEPLOYMENT,$WRAPPER_DEPLOYMENT,$INFERENCE_DEPLOYMENT)" -o yaml \
   >"$OUTPUT_DIR/pods.yaml" 2>&1 || true
 for app in "$PAIREC_DEPLOYMENT" "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT"; do
@@ -147,8 +150,13 @@ rerank=by_name.get("source_quota_rerank_complete",[])
 burst=by_name.get("pairec_brpc_burst_complete",[])
 native=by_name.get("datasystem_request_complete",[])
 executor=by_name.get("trt_executor_request_complete",[])
+wrapper_started="phase=recommend_start" in wrapper
+wrapper_completed="method=Recommend" in wrapper
 
-if re.search(r"items size not enough|code=299|server error 2001",combined,re.I):
+if (wrapper_started and not wrapper_completed and (native or executor)
+    and re.search(r"read brpc header failed: EOF",combined,re.I)):
+ classification="WRAPPER_RESPONSE_PATH_INTERRUPTED"
+elif re.search(r"items size not enough|code=299|server error 2001",combined,re.I):
  classification="INFERENCE_ITEMS_INSUFFICIENT"
 elif generative and generative[-1].get("status")=="error":
  classification="GENERATIVE_BRPC_FAILURE"
@@ -165,6 +173,7 @@ else:
 
 trt_top_k=[]
 rollout={}
+container_states=[]
 try:
  deployments=json.loads(text("deployments.json"))
  for deployment in deployments.get("items",[]):
@@ -183,6 +192,22 @@ try:
 except (json.JSONDecodeError,KeyError):
  pass
 
+try:
+ pods=json.loads(text("pods.json"))
+ for pod in pods.get("items",[]):
+  pod_name=pod.get("metadata",{}).get("name","")
+  for status in pod.get("status",{}).get("containerStatuses",[]):
+   container_states.append({
+    "pod":pod_name,
+    "container":status.get("name"),
+    "ready":status.get("ready"),
+    "restart_count":status.get("restartCount",0),
+    "state":status.get("state",{}),
+    "last_state":status.get("lastState",{}),
+   })
+except json.JSONDecodeError:
+ pass
+
 result={
  "classification":classification,
  "request_id":rid,
@@ -191,8 +216,11 @@ result={
  "wrapper_evidence":bool(wrapper.strip()),
  "inference_evidence":bool(inference.strip()),
  "inference_completion_found":bool(native or executor),
+ "wrapper_recommend_started":wrapper_started,
+ "wrapper_recommend_completed":wrapper_completed,
  "trt_top_k":trt_top_k,
  "rollout":rollout,
+ "container_states":container_states,
  "generative_span":generative[-1] if generative else None,
  "rerank_event":rerank[-1] if rerank else None,
  "burst_event":burst[-1] if burst else None,
@@ -211,6 +239,11 @@ print(f"classification={classification}")
 print(f"request_id={rid}")
 print(f"trt_top_k={','.join(trt_top_k) if trt_top_k else 'UNKNOWN'}")
 print(f"inference_completion_found={str(bool(native or executor)).lower()}")
+print(f"wrapper_recommend_started={str(wrapper_started).lower()}")
+print(f"wrapper_recommend_completed={str(wrapper_completed).lower()}")
+for state in container_states:
+ if state["container"] in ("brpc-burst-wrapper","brpc-inference"):
+  print("container_state="+json.dumps(state,separators=(",",":")))
 if not inference.strip():
  print("inference_log_note=original inference pod may have been replaced during TRT configuration restore")
 if generative:
