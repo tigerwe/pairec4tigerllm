@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PHASE="${PHASE:-${1:-smoke}}"
+NAMESPACE="${NAMESPACE:-pairec}"
 case "$PHASE" in
   smoke) DEFAULT_REQUESTS=3 ;;
   stability) DEFAULT_REQUESTS=100 ;;
@@ -16,6 +17,12 @@ MAX_RUNNER_P99_DELTA_MS="${MAX_RUNNER_P99_DELTA_MS:-10}"
 MAX_FRONT_BRPC_P99_MS="${MAX_FRONT_BRPC_P99_MS:-10}"
 BUILD_PAIREC_IMAGE="${BUILD_PAIREC_IMAGE:-1}"
 IMPORT_PAIREC_IMAGE="${IMPORT_PAIREC_IMAGE:-1}"
+PREPARE_UNTHROTTLED_WRAPPER="${PREPARE_UNTHROTTLED_WRAPPER:-1}"
+
+[[ "$PREPARE_UNTHROTTLED_WRAPPER" = 0 || "$PREPARE_UNTHROTTLED_WRAPPER" = 1 ]] || {
+  echo "ERROR: PREPARE_UNTHROTTLED_WRAPPER must be 0 or 1" >&2
+  exit 1
+}
 
 echo "== PaiRec BRPC Wrapper pressure phase =="
 echo "phase=$PHASE modes=c1,c1000 requests_per_mode=$REQUESTS warmup_requests=$WARMUP_REQUESTS"
@@ -24,8 +31,46 @@ echo "output_dir=$OUTPUT_DIR"
 
 mkdir -p "$OUTPUT_DIR"
 
+if [[ "$PREPARE_UNTHROTTLED_WRAPPER" = 1 ]]; then
+  echo "== Remove Wrapper CFS CPU quota for pressure measurement =="
+  kubectl -n "$NAMESPACE" patch deployment brpc-burst-wrapper --type=strategic -p '{
+    "spec":{"template":{"spec":{"containers":[{
+      "name":"brpc-burst-wrapper",
+      "resources":{
+        "requests":{"cpu":"8","memory":"2Gi"},
+        "limits":{"cpu":null,"memory":"2Gi"}
+      }
+    }]}}}
+  }'
+  kubectl -n "$NAMESPACE" rollout status deployment/brpc-burst-wrapper --timeout=10m
+  kubectl -n "$NAMESPACE" get deployment brpc-burst-wrapper -o json | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+containers=d["spec"]["template"]["spec"]["containers"]
+c=next(item for item in containers if item["name"]=="brpc-burst-wrapper")
+resources=c.get("resources",{})
+assert resources.get("requests",{}).get("cpu")=="8",resources
+assert "cpu" not in resources.get("limits",{}),resources
+print("BRPC_WRAPPER_CPU_QUOTA_DISABLED requests_cpu=8 limits_cpu=none")
+'
+  WRAPPER_POD="$(kubectl -n "$NAMESPACE" get pod -l app=brpc-burst-wrapper \
+    -o jsonpath='{.items[0].metadata.name}')"
+  kubectl -n "$NAMESPACE" exec "$WRAPPER_POD" -c brpc-burst-wrapper -- /bin/sh -ec '
+    if test -f /sys/fs/cgroup/cpu.max; then
+      set -- $(cat /sys/fs/cgroup/cpu.max)
+      test "$1" = max
+      echo "BRPC_WRAPPER_CGROUP_CPU_MAX quota=$1 period=$2"
+    else
+      quota=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
+      test "$quota" -lt 0
+      echo "BRPC_WRAPPER_CGROUP_CPU_QUOTA quota_us=$quota"
+    fi
+  '
+fi
+
 echo "== Run c1 baseline =="
 BURST_CONCURRENCY=1 \
+NAMESPACE="$NAMESPACE" \
 REQUESTS="$REQUESTS" \
 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
 OUTPUT_DIR="$OUTPUT_DIR/c1" \
@@ -35,6 +80,7 @@ IMPORT_PAIREC_IMAGE="$IMPORT_PAIREC_IMAGE" \
 
 echo "== Run c1000 pressure =="
 BURST_CONCURRENCY=1000 \
+NAMESPACE="$NAMESPACE" \
 REQUESTS="$REQUESTS" \
 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
 OUTPUT_DIR="$OUTPUT_DIR/c1000" \
