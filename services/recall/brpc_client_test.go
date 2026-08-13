@@ -133,6 +133,91 @@ func TestBRPCSessionReusesConnection(t *testing.T) {
 	}
 }
 
+func TestBRPCSessionHealthAttachmentWireLayout(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	wantAttachment := bytes.Repeat([]byte{0x5a}, 102400)
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer conn.Close()
+		header := make([]byte, brpcHeaderSize)
+		if _, readErr := io.ReadFull(conn, header); readErr != nil {
+			serverDone <- readErr
+			return
+		}
+		bodySize := int(binary.BigEndian.Uint32(header[4:8]))
+		metaSize := int(binary.BigEndian.Uint32(header[8:12]))
+		body := make([]byte, bodySize)
+		if _, readErr := io.ReadFull(conn, body); readErr != nil {
+			serverDone <- readErr
+			return
+		}
+		var meta brpcRPCMeta
+		if unmarshalErr := proto.Unmarshal(body[:metaSize], &meta); unmarshalErr != nil {
+			serverDone <- unmarshalErr
+			return
+		}
+		attachmentSize := int(int32Value(meta.AttachmentSize))
+		payloadEnd := bodySize - attachmentSize
+		var request healthRequestPB
+		if unmarshalErr := proto.Unmarshal(body[metaSize:payloadEnd], &request); unmarshalErr != nil {
+			serverDone <- unmarshalErr
+			return
+		}
+		if len(request.PayloadPadding) != 0 || attachmentSize != len(wantAttachment) ||
+			!bytes.Equal(body[payloadEnd:], wantAttachment) {
+			serverDone <- fmt.Errorf("invalid attachment layout: protobuf=%d attachment=%d", len(request.PayloadPadding), attachmentSize)
+			return
+		}
+		responsePayload, marshalErr := proto.Marshal(&healthResponsePB{
+			Code: proto.Int32(200), Status: proto.String("healthy"), Backend: proto.String("test"),
+		})
+		if marshalErr != nil {
+			serverDone <- marshalErr
+			return
+		}
+		responseMeta, marshalErr := proto.Marshal(&brpcRPCMeta{
+			CompressType: proto.Int32(brpcNoCompression), CorrelationID: meta.CorrelationID,
+			AttachmentSize: proto.Int32(0), ContentType: proto.Int32(brpcContentTypePB),
+			ChecksumType: proto.Int32(brpcChecksumNone), Response: &brpcResponseMeta{ErrorCode: proto.Int32(0)},
+		})
+		if marshalErr != nil {
+			serverDone <- marshalErr
+			return
+		}
+		frame, frameErr := buildBRPCFrame(responseMeta, responsePayload)
+		if frameErr == nil {
+			_, frameErr = conn.Write(frame)
+		}
+		serverDone <- frameErr
+	}()
+
+	client, err := NewBRPCRecommendClient(listener.Addr().String(), brpcDefaultServiceName, time.Second, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := client.NewSession()
+	defer session.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	response, err := session.HealthCheckWithAttachment(ctx, wantAttachment)
+	cancel()
+	if err != nil || response.Code != 200 {
+		t.Fatalf("health attachment response=%+v err=%v", response, err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRecommendProtoRoundTrip(t *testing.T) {
 	req := &RecommendRequest{
 		UserID:              "u1",

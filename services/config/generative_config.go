@@ -21,23 +21,24 @@ type KafkaConfig struct {
 // GenerativeRecallConfig 生成式召回配置.
 type GenerativeRecallConfig struct {
 	// 服务配置
-	ServerURL                string        `json:"server_url" yaml:"server_url"`                       // TensorRT-LLM HTTP 服务地址
-	Protocol                 string        `json:"protocol" yaml:"protocol"`                           // 推理服务协议: "http" 或 "brpc"
-	BRPCEndpoint             string        `json:"brpc_endpoint" yaml:"brpc_endpoint"`                 // brpc/TCP 服务地址, 例如 inference-brpc-trtllm:18100
-	BRPCServiceName          string        `json:"brpc_service_name" yaml:"brpc_service_name"`         // brpc service full name
-	BRPCFallbackToHTTP       bool          `json:"brpc_fallback_to_http" yaml:"brpc_fallback_to_http"` // brpc 失败时是否回退 HTTP
-	BRPCPayloadBytes         int           `json:"brpc_payload_bytes" yaml:"brpc_payload_bytes"`       // brpc 压测用额外 payload 字节数, 默认 0
-	BRPCBurstEnabled         bool          `json:"brpc_burst_enabled" yaml:"brpc_burst_enabled"`
-	BRPCBurstConcurrency     int           `json:"brpc_burst_concurrency" yaml:"brpc_burst_concurrency"`
-	BRPCBurstPoolSize        int           `json:"brpc_burst_pool_size" yaml:"brpc_burst_pool_size"`
-	BRPCBurstActive          int           `json:"brpc_burst_active_connections" yaml:"brpc_burst_active_connections"`
-	BRPCBurstCPUShards       []int         `json:"brpc_burst_cpu_shards" yaml:"brpc_burst_cpu_shards"`
-	BRPCBurstPayloadBytes    int           `json:"brpc_burst_payload_bytes" yaml:"brpc_burst_payload_bytes"`
-	BRPCBurstPreconnect      bool          `json:"brpc_burst_preconnect" yaml:"brpc_burst_preconnect"`
-	BRPCBurstPressureTimeout time.Duration `json:"brpc_burst_pressure_timeout" yaml:"brpc_burst_pressure_timeout"`
-	Timeout                  time.Duration `json:"timeout" yaml:"timeout"`               // 请求超时
-	MaxRetries               int           `json:"max_retries" yaml:"max_retries"`       // 最大重试次数
-	MaxBatchSize             int           `json:"max_batch_size" yaml:"max_batch_size"` // 最大批次大小
+	ServerURL                 string        `json:"server_url" yaml:"server_url"`                       // TensorRT-LLM HTTP 服务地址
+	Protocol                  string        `json:"protocol" yaml:"protocol"`                           // 推理服务协议: "http" 或 "brpc"
+	BRPCEndpoint              string        `json:"brpc_endpoint" yaml:"brpc_endpoint"`                 // brpc/TCP 服务地址, 例如 inference-brpc-trtllm:18100
+	BRPCServiceName           string        `json:"brpc_service_name" yaml:"brpc_service_name"`         // brpc service full name
+	BRPCFallbackToHTTP        bool          `json:"brpc_fallback_to_http" yaml:"brpc_fallback_to_http"` // brpc 失败时是否回退 HTTP
+	BRPCPayloadBytes          int           `json:"brpc_payload_bytes" yaml:"brpc_payload_bytes"`       // brpc 压测用额外 payload 字节数, 默认 0
+	BRPCBurstEnabled          bool          `json:"brpc_burst_enabled" yaml:"brpc_burst_enabled"`
+	BRPCBurstConcurrency      int           `json:"brpc_burst_concurrency" yaml:"brpc_burst_concurrency"`
+	BRPCBurstPoolSize         int           `json:"brpc_burst_pool_size" yaml:"brpc_burst_pool_size"`
+	BRPCBurstActive           int           `json:"brpc_burst_active_connections" yaml:"brpc_burst_active_connections"`
+	BRPCBurstCPUShards        []int         `json:"brpc_burst_cpu_shards" yaml:"brpc_burst_cpu_shards"`
+	BRPCBurstPayloadBytes     int           `json:"brpc_burst_payload_bytes" yaml:"brpc_burst_payload_bytes"`
+	BRPCBurstPayloadTransport string        `json:"brpc_burst_payload_transport" yaml:"brpc_burst_payload_transport"`
+	BRPCBurstPreconnect       bool          `json:"brpc_burst_preconnect" yaml:"brpc_burst_preconnect"`
+	BRPCBurstPressureTimeout  time.Duration `json:"brpc_burst_pressure_timeout" yaml:"brpc_burst_pressure_timeout"`
+	Timeout                   time.Duration `json:"timeout" yaml:"timeout"`               // 请求超时
+	MaxRetries                int           `json:"max_retries" yaml:"max_retries"`       // 最大重试次数
+	MaxBatchSize              int           `json:"max_batch_size" yaml:"max_batch_size"` // 最大批次大小
 
 	// 推理参数
 	TopK        int     `json:"topk" yaml:"topk"`               // 推荐数量
@@ -132,6 +133,13 @@ func (c *GenerativeRecallConfig) Validate() error {
 		}
 		if c.BRPCBurstPayloadBytes < 0 || c.BRPCBurstPayloadBytes > 1<<20 {
 			return fmt.Errorf("brpc_burst_payload_bytes must be in [0,1048576]")
+		}
+		c.BRPCBurstPayloadTransport = strings.ToLower(strings.TrimSpace(c.BRPCBurstPayloadTransport))
+		if c.BRPCBurstPayloadTransport == "" {
+			c.BRPCBurstPayloadTransport = "protobuf"
+		}
+		if c.BRPCBurstPayloadTransport != "protobuf" && c.BRPCBurstPayloadTransport != "attachment" {
+			return fmt.Errorf("brpc_burst_payload_transport must be protobuf or attachment")
 		}
 		if !c.BRPCBurstPreconnect {
 			return fmt.Errorf("brpc burst requires brpc_burst_preconnect=true")

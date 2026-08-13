@@ -199,7 +199,7 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
   }
 
   void Health(
-      google::protobuf::RpcController*,
+      google::protobuf::RpcController* controller,
       const pairec::inference::HealthRequest* request,
       pairec::inference::HealthResponse* response,
       google::protobuf::Closure* done) override {
@@ -211,12 +211,21 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
       UpdateMax(&max_health_while_recommend_, health);
     }
 
+    auto* cntl = static_cast<brpc::Controller*>(controller);
+    const size_t protobuf_bytes = request->payload_padding().size();
+    const size_t attachment_bytes = cntl->request_attachment().size();
+    const size_t payload_bytes = protobuf_bytes + attachment_bytes;
+    const char* transport = attachment_bytes > 0 ? "attachment" : "protobuf";
+
     response->set_code(200);
     response->set_status("healthy");
-    response->set_backend("brpc_burst_wrapper");
+    response->set_backend(std::string("brpc_burst_wrapper_") + transport);
     response->set_raw_json(
-        "{\"payload_bytes\":" + std::to_string(request->payload_padding().size()) +
-        ",\"backend_forwarded\":false}");
+        "{\"payload_bytes\":" + std::to_string(payload_bytes) +
+        ",\"protobuf_bytes\":" + std::to_string(protobuf_bytes) +
+        ",\"attachment_bytes\":" + std::to_string(attachment_bytes) +
+        ",\"payload_transport\":\"" + transport +
+        "\",\"backend_forwarded\":false}");
   }
 
  private:

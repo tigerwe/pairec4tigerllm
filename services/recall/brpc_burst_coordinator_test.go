@@ -35,14 +35,22 @@ func (s *fakeBRPCBurstSession) Recommend(context.Context, *RecommendRequest, str
 	return response, nil
 }
 
-func (s *fakeBRPCBurstSession) HealthCheckWithPayload(context.Context, int) (*brpcHealthResponse, error) {
+func (s *fakeBRPCBurstSession) health(backend string) (*brpcHealthResponse, error) {
 	if s.healthGate != nil {
 		<-s.healthGate
 	}
 	if s.healthErr != nil {
 		return nil, s.healthErr
 	}
-	return &brpcHealthResponse{Code: 200, Status: "healthy"}, nil
+	return &brpcHealthResponse{Code: 200, Status: "healthy", Backend: backend}, nil
+}
+
+func (s *fakeBRPCBurstSession) HealthCheckWithPayload(context.Context, int) (*brpcHealthResponse, error) {
+	return s.health("brpc_burst_wrapper_protobuf")
+}
+
+func (s *fakeBRPCBurstSession) HealthCheckWithAttachment(context.Context, []byte) (*brpcHealthResponse, error) {
+	return s.health("brpc_burst_wrapper_attachment")
 }
 
 func (s *fakeBRPCBurstSession) Close() error { return nil }
@@ -142,6 +150,33 @@ func TestBRPCBurstPressureFailureOnlyInvalidatesSample(t *testing.T) {
 	}
 	complete := recorder.waitComplete(t)
 	if complete.BurstValid || complete.PressureErrors != 1 || !complete.BusinessSuccess {
+		t.Fatalf("unexpected completion: %+v", complete)
+	}
+}
+
+func TestBRPCBurstAttachmentUsesSharedPayload(t *testing.T) {
+	sessions := []brpcBurstSession{
+		&fakeBRPCBurstSession{},
+		&fakeBRPCBurstSession{},
+	}
+	recorder := newBurstEventRecorder()
+	coordinator, err := newBRPCBurstCoordinator(sessions, BRPCBurstConfig{
+		Concurrency: 2, PayloadBytes: 102400, PayloadTransport: "attachment",
+		PressureTimeout: time.Second,
+	}, recorder.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(coordinator.sharedPayload) != 102400 {
+		t.Fatalf("shared payload bytes=%d", len(coordinator.sharedPayload))
+	}
+
+	response, err := coordinator.Recommend(&RecommendRequest{UserID: "5"}, "request-attachment")
+	if err != nil || response == nil || response.Code != 200 {
+		t.Fatalf("business response=%+v err=%v", response, err)
+	}
+	complete := recorder.waitComplete(t)
+	if !complete.BurstValid || complete.PayloadTransport != "attachment" || complete.PressureSuccess != 1 {
 		t.Fatalf("unexpected completion: %+v", complete)
 	}
 }
@@ -335,7 +370,7 @@ func TestBRPCBurstCompletionReportsBalancedShardTraffic(t *testing.T) {
 	event := makeBRPCBurstCompleteEvent(
 		"request-shards", 10, 4, time.Now(), 10,
 		brpcBurstBusinessEvent{Success: true, TraceValid: true}, results,
-		100, 102400, []int{0, 2, 4},
+		100, 102400, "attachment", []int{0, 2, 4},
 	)
 	if !event.BurstValid || event.PressureSuccess != 9 {
 		t.Fatalf("unexpected completion: %+v", event)
@@ -345,5 +380,8 @@ func TestBRPCBurstCompletionReportsBalancedShardTraffic(t *testing.T) {
 	}
 	if event.ShardBytes[0] != 3*102400 || event.ShardBytes[1] != 3*102400 || event.ShardBytes[2] != 3*102400 {
 		t.Fatalf("unexpected shard bytes: %v", event.ShardBytes)
+	}
+	if event.PayloadTransport != "attachment" {
+		t.Fatalf("unexpected payload transport: %s", event.PayloadTransport)
 	}
 }

@@ -12,6 +12,7 @@ USER_ID="${USER_ID:-6312}"
 POOL_SIZE="${POOL_SIZE:-10000}"
 ACTIVE_CONNECTIONS="${ACTIVE_CONNECTIONS:-1000}"
 PRESSURE_PAYLOAD_BYTES="${PRESSURE_PAYLOAD_BYTES:-102400}"
+BURST_PAYLOAD_TRANSPORT="${BURST_PAYLOAD_TRANSPORT:-protobuf}"
 BURST_CPU_SHARDS="${BURST_CPU_SHARDS:-[]}"
 MAX_RUNNER_P99_DELTA_MS="${MAX_RUNNER_P99_DELTA_MS:-10}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-runner-diagnosis/$(date +%Y%m%d-%H%M%S)-n${REQUESTS}}"
@@ -33,6 +34,7 @@ run_arm() {
   BURST_ACTIVE_CONNECTIONS="$active" \
   BURST_CPU_SHARDS="$BURST_CPU_SHARDS" \
   BURST_PAYLOAD_BYTES="$payload" \
+  BURST_PAYLOAD_TRANSPORT="$BURST_PAYLOAD_TRANSPORT" \
   NAMESPACE="$NAMESPACE" \
   WRAPPER_DEPLOYMENT="$WRAPPER_DEPLOYMENT" \
   WRAPPER_ENDPOINT="$WRAPPER_ENDPOINT" \
@@ -50,7 +52,7 @@ run_arm() {
 echo "== BRPC Wrapper runner interference diagnosis =="
 echo "requests=$REQUESTS qualification_requests=$QUALIFICATION_REQUESTS user_id=$USER_ID pool_size=$POOL_SIZE cpu_shards=$BURST_CPU_SHARDS"
 echo "wrapper_deployment=$WRAPPER_DEPLOYMENT wrapper_endpoint=$WRAPPER_ENDPOINT inference_deployment=$INFERENCE_DEPLOYMENT"
-echo "arms=idle_pool,rpc_only,payload_100k output_dir=$OUTPUT_DIR"
+echo "arms=idle_pool,rpc_only,payload_100k payload_transport=$BURST_PAYLOAD_TRANSPORT output_dir=$OUTPUT_DIR"
 
 # Every arm preconnects the same 10,000 sessions before warmup or measurement.
 run_arm idle_pool 1 1 0 "$BUILD_PAIREC_IMAGE" "$IMPORT_PAIREC_IMAGE"
@@ -74,6 +76,7 @@ rpc=arms["rpc_only"]["metrics"]
 payload=arms["payload_100k"]["metrics"]
 result={
     "classification":"PAIREC_BRPC_WRAPPER_RUNNER_INTERFERENCE_DIAGNOSIS",
+    "payload_transport":arms["payload_100k"]["payload_transport"],
     "samples_per_arm":len(arms["idle_pool"]["samples"]),
     "arms":{name:item["metrics"] for name,item in arms.items()},
     "runner_p99_rpc_only_delta_ms":rpc["runner_ms"]["p99"]-idle["runner_ms"]["p99"],

@@ -14,6 +14,7 @@ BURST_POOL_SIZE="${BURST_POOL_SIZE:-$BURST_CONCURRENCY}"
 BURST_ACTIVE_CONNECTIONS="${BURST_ACTIVE_CONNECTIONS:-$BURST_CONCURRENCY}"
 BURST_CPU_SHARDS="${BURST_CPU_SHARDS:-[]}"
 BURST_PAYLOAD_BYTES="${BURST_PAYLOAD_BYTES:-102400}"
+BURST_PAYLOAD_TRANSPORT="${BURST_PAYLOAD_TRANSPORT:-protobuf}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
 QUALIFICATION_REQUESTS="${QUALIFICATION_REQUESTS:-0}"
 REQUESTS="${REQUESTS:-3}"
@@ -48,6 +49,8 @@ die() { echo "ERROR: $*" >&2; exit 1; }
   || die "BURST_ACTIVE_CONNECTIONS must be in [1,min(1000,pool_size)]"
 [[ "$BURST_PAYLOAD_BYTES" =~ ^[0-9]+$ ]] && (( BURST_PAYLOAD_BYTES <= 1048576 )) \
   || die "BURST_PAYLOAD_BYTES must be in [0,1048576]"
+[[ "$BURST_PAYLOAD_TRANSPORT" = protobuf || "$BURST_PAYLOAD_TRANSPORT" = attachment ]] \
+  || die "BURST_PAYLOAD_TRANSPORT must be protobuf or attachment"
 python3 -c 'import json,sys; value=json.loads(sys.argv[1]); assert isinstance(value,list); assert all(isinstance(x,int) and x>=0 for x in value); assert len(value)==len(set(value))' \
   "$BURST_CPU_SHARDS" || die "BURST_CPU_SHARDS must be a JSON array of unique non-negative CPU IDs"
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
@@ -181,7 +184,7 @@ RANK_IP="$(kubectl -n "$NAMESPACE" get service deepfm-rank-brpc -o jsonpath='{.s
   || die "dependency endpoint is empty"
 
 echo "== Full-chain BRPC Wrapper configuration =="
-echo "wrapper_endpoint=$WRAPPER_ENDPOINT burst_concurrency=$BURST_CONCURRENCY pool_size=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS cpu_shards=$BURST_CPU_SHARDS payload_bytes=$BURST_PAYLOAD_BYTES"
+echo "wrapper_endpoint=$WRAPPER_ENDPOINT burst_concurrency=$BURST_CONCURRENCY pool_size=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS cpu_shards=$BURST_CPU_SHARDS payload_bytes=$BURST_PAYLOAD_BYTES payload_transport=$BURST_PAYLOAD_TRANSPORT"
 echo "vector_endpoint=${VECTOR_IP}:18201 rank_endpoint=${RANK_IP}:18211"
 echo "deployment=$PAIREC_DEPLOYMENT output_dir=$OUTPUT_DIR"
 
@@ -199,9 +202,10 @@ echo "== Render strict full-chain configuration =="
 python3 - "$CONFIG_TEMPLATE" "$OUTPUT_DIR/pairec_config.json" \
   "$WRAPPER_ENDPOINT" "$BURST_CONCURRENCY" "${VECTOR_IP}:18201" \
   "${RANK_IP}:18211" "$DEEPFM_MODEL_ROLE" "$BURST_POOL_SIZE" \
-  "$BURST_ACTIVE_CONNECTIONS" "$BURST_CPU_SHARDS" "$BURST_PAYLOAD_BYTES" <<'PY'
+  "$BURST_ACTIVE_CONNECTIONS" "$BURST_CPU_SHARDS" "$BURST_PAYLOAD_BYTES" \
+  "$BURST_PAYLOAD_TRANSPORT" <<'PY'
 import json, pathlib, sys
-source,target,wrapper,concurrency,vector,rank,role,pool,active,cpu_shards,payload_bytes=sys.argv[1:]
+source,target,wrapper,concurrency,vector,rank,role,pool,active,cpu_shards,payload_bytes,payload_transport=sys.argv[1:]
 text=pathlib.Path(source).read_text()
 for old,new in {
     "__WRAPPER_ENDPOINT__": wrapper,
@@ -213,6 +217,7 @@ for old,new in {
     "__BURST_ACTIVE_CONNECTIONS__": active,
     "__BURST_CPU_SHARDS__": cpu_shards,
     "__BURST_PAYLOAD_BYTES__": payload_bytes,
+    "__BURST_PAYLOAD_TRANSPORT__": payload_transport,
 }.items():
     text=text.replace(old,new)
 assert "__" not in text
@@ -229,6 +234,7 @@ assert gen["brpc_burst_active_connections"]==int(active)
 assert gen["brpc_burst_cpu_shards"]==json.loads(cpu_shards)
 assert gen["brpc_burst_preconnect"] is True
 assert gen["brpc_burst_payload_bytes"]==int(payload_bytes)
+assert gen["brpc_burst_payload_transport"]==payload_transport
 assert recalls["milvus_recall"]["brpc_endpoint"]==vector
 assert config["UserDefineConfs"]["DeepFMRankSorts"][0]["brpc_endpoint"]==rank
 rerank=config["UserDefineConfs"]["RerankConfs"][0]
@@ -288,7 +294,7 @@ ready_line="$(kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec \
   | grep -F '"event":"pairec_brpc_burst_ready"' | tail -1 || true)"
 [[ -n "$ready_line" ]] || die "pairec_brpc_burst_ready is missing"
 python3 - "$ready_line" "$BURST_ACTIVE_CONNECTIONS" "$BURST_POOL_SIZE" \
-  "$BURST_PAYLOAD_BYTES" <<'PY'
+  "$BURST_PAYLOAD_BYTES" "$BURST_PAYLOAD_TRANSPORT" <<'PY'
 import json, sys
 event=json.loads(sys.argv[1][sys.argv[1].index("{"):])
 expected=int(sys.argv[2])
@@ -296,10 +302,11 @@ assert event["concurrency"]==expected, event
 assert event["active_connections"]==expected, event
 assert event["connected_sessions"]==event["pool_size"]==int(sys.argv[3]), event
 assert event["payload_bytes"]==int(sys.argv[4]), event
+assert event["payload_transport"]==sys.argv[5], event
 connections=event["shard_connections"]
 assert max(connections)-min(connections)<=1,event
 PY
-echo "PAIREC_BRPC_WRAPPER_PRECONNECTED_OK connected_sessions=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS payload_bytes=$BURST_PAYLOAD_BYTES"
+echo "PAIREC_BRPC_WRAPPER_PRECONNECTED_OK connected_sessions=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS payload_bytes=$BURST_PAYLOAD_BYTES payload_transport=$BURST_PAYLOAD_TRANSPORT"
 
 if (( QUALIFICATION_REQUESTS > 0 )); then
   echo "== Qualify deterministic workload user before measurement: $QUALIFICATION_REQUESTS requests =="
@@ -454,9 +461,10 @@ done
 echo "== Validate request-id contracts and latency evidence =="
 python3 - "$OUTPUT_DIR/requests.tsv" "$OUTPUT_DIR/pairec.log" \
   "$OUTPUT_DIR/wrapper.log" "$OUTPUT_DIR/inference.log" "$OUTPUT_DIR/summary.json" \
-  "$BURST_ACTIVE_CONNECTIONS" "$WORKLOAD_ELAPSED_SECONDS" "$BURST_POOL_SIZE" <<'PY'
+  "$BURST_ACTIVE_CONNECTIONS" "$WORKLOAD_ELAPSED_SECONDS" "$BURST_POOL_SIZE" \
+  "$BURST_PAYLOAD_TRANSPORT" <<'PY'
 import csv,json,math,pathlib,statistics,sys
-requests_path,pairec_path,wrapper_path,inference_path,output,concurrency,elapsed,pool=sys.argv[1:]
+requests_path,pairec_path,wrapper_path,inference_path,output,concurrency,elapsed,pool,payload_transport=sys.argv[1:]
 expected=int(concurrency)
 pool=int(pool)
 elapsed=float(elapsed)
@@ -490,10 +498,12 @@ for row in rows:
  assert start["concurrency"]==start["active_connections"]==expected,start
  assert start["selected_sessions"]==expected,start
  assert start["connected_sessions"]==start["pool_size"]==pool,start
+ assert start["pressure_payload_transport"]==payload_transport,start
  assert complete["armed_workers"]==expected,complete
  assert complete["pressure_requests"]==expected-1,complete
  assert complete["pressure_success"]==expected-1 and complete["pressure_errors"]==0,complete
  assert complete["pool_size"]==pool and complete["active_connections"]==expected,complete
+ assert complete["pressure_payload_transport"]==payload_transport,complete
  assert max(complete["shard_requests"])-min(complete["shard_requests"])<=1,complete
  assert sum(complete["shard_requests"])==expected,complete
  assert complete["shard_requests"]==complete["shard_success"],complete
@@ -551,6 +561,7 @@ for name in metric_names:
                 "p50":percentile(values,.5),"p95":percentile(values,.95),
                 "p99":percentile(values,.99),"max":max(values)}
 summary={"classification":classification,"concurrency":expected,"pool_size":pool,
+         "payload_transport":payload_transport,
          "requests":len(samples),"elapsed_seconds":elapsed,
          "throughput_rps":len(samples)/elapsed,
          "rank_reordered_count":rank_reordered_count,"samples":samples}
