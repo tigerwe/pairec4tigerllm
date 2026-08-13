@@ -114,6 +114,9 @@ func NewTRTLLMClient(cfg *config.GenerativeRecallConfig) (*TRTLLMClient, error) 
 		if cfg.BRPCBurstEnabled {
 			burst, err = NewBRPCBurstCoordinator(client, BRPCBurstConfig{
 				Concurrency:     cfg.BRPCBurstConcurrency,
+				PoolSize:        cfg.BRPCBurstPoolSize,
+				Active:          cfg.BRPCBurstActive,
+				CPUShards:       cfg.BRPCBurstCPUShards,
 				PayloadBytes:    cfg.BRPCBurstPayloadBytes,
 				PressureTimeout: cfg.BRPCBurstPressureTimeout,
 			})

@@ -29,6 +29,9 @@ type GenerativeRecallConfig struct {
 	BRPCPayloadBytes         int           `json:"brpc_payload_bytes" yaml:"brpc_payload_bytes"`       // brpc 压测用额外 payload 字节数, 默认 0
 	BRPCBurstEnabled         bool          `json:"brpc_burst_enabled" yaml:"brpc_burst_enabled"`
 	BRPCBurstConcurrency     int           `json:"brpc_burst_concurrency" yaml:"brpc_burst_concurrency"`
+	BRPCBurstPoolSize        int           `json:"brpc_burst_pool_size" yaml:"brpc_burst_pool_size"`
+	BRPCBurstActive          int           `json:"brpc_burst_active_connections" yaml:"brpc_burst_active_connections"`
+	BRPCBurstCPUShards       []int         `json:"brpc_burst_cpu_shards" yaml:"brpc_burst_cpu_shards"`
 	BRPCBurstPayloadBytes    int           `json:"brpc_burst_payload_bytes" yaml:"brpc_burst_payload_bytes"`
 	BRPCBurstPreconnect      bool          `json:"brpc_burst_preconnect" yaml:"brpc_burst_preconnect"`
 	BRPCBurstPressureTimeout time.Duration `json:"brpc_burst_pressure_timeout" yaml:"brpc_burst_pressure_timeout"`
@@ -104,6 +107,28 @@ func (c *GenerativeRecallConfig) Validate() error {
 		}
 		if c.BRPCBurstConcurrency <= 0 || c.BRPCBurstConcurrency > 1000 {
 			return fmt.Errorf("brpc_burst_concurrency must be in [1,1000]")
+		}
+		if c.BRPCBurstPoolSize == 0 {
+			c.BRPCBurstPoolSize = c.BRPCBurstConcurrency
+		}
+		if c.BRPCBurstActive == 0 {
+			c.BRPCBurstActive = c.BRPCBurstConcurrency
+		}
+		if c.BRPCBurstPoolSize < 1 || c.BRPCBurstPoolSize > 10000 {
+			return fmt.Errorf("brpc_burst_pool_size must be in [1,10000]")
+		}
+		if c.BRPCBurstActive < 1 || c.BRPCBurstActive > 1000 || c.BRPCBurstActive > c.BRPCBurstPoolSize {
+			return fmt.Errorf("brpc_burst_active_connections must be in [1,min(1000,pool_size)]")
+		}
+		seenShards := make(map[int]struct{}, len(c.BRPCBurstCPUShards))
+		for _, shard := range c.BRPCBurstCPUShards {
+			if shard < 0 {
+				return fmt.Errorf("brpc_burst_cpu_shards must be non-negative")
+			}
+			if _, exists := seenShards[shard]; exists {
+				return fmt.Errorf("brpc_burst_cpu_shards must be unique")
+			}
+			seenShards[shard] = struct{}{}
 		}
 		if c.BRPCBurstPayloadBytes < 0 || c.BRPCBurstPayloadBytes > 1<<20 {
 			return fmt.Errorf("brpc_burst_payload_bytes must be in [0,1048576]")

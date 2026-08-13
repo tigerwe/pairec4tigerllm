@@ -89,6 +89,9 @@ type recallConfigJSON struct {
 	BRPCPayloadBytes           int                 `json:"brpc_payload_bytes"`
 	BRPCBurstEnabled           bool                `json:"brpc_burst_enabled"`
 	BRPCBurstConcurrency       int                 `json:"brpc_burst_concurrency"`
+	BRPCBurstPoolSize          int                 `json:"brpc_burst_pool_size"`
+	BRPCBurstActiveConnections int                 `json:"brpc_burst_active_connections"`
+	BRPCBurstCPUShards         []int               `json:"brpc_burst_cpu_shards"`
 	BRPCBurstPayloadBytes      int                 `json:"brpc_burst_payload_bytes"`
 	BRPCBurstPreconnect        bool                `json:"brpc_burst_preconnect"`
 	BRPCBurstPressureTimeoutMs int                 `json:"brpc_burst_pressure_timeout_ms"`
@@ -131,6 +134,9 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 				BRPCPayloadBytes:         algoConf.BRPCPayloadBytes,
 				BRPCBurstEnabled:         algoConf.BRPCBurstEnabled,
 				BRPCBurstConcurrency:     algoConf.BRPCBurstConcurrency,
+				BRPCBurstPoolSize:        algoConf.BRPCBurstPoolSize,
+				BRPCBurstActive:          algoConf.BRPCBurstActiveConnections,
+				BRPCBurstCPUShards:       algoConf.BRPCBurstCPUShards,
 				BRPCBurstPayloadBytes:    algoConf.BRPCBurstPayloadBytes,
 				BRPCBurstPreconnect:      algoConf.BRPCBurstPreconnect,
 				BRPCBurstPressureTimeout: time.Duration(algoConf.BRPCBurstPressureTimeoutMs) * time.Millisecond,

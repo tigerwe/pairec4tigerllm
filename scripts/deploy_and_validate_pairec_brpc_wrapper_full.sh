@@ -10,6 +10,9 @@ VECTOR_DEPLOYMENT="${VECTOR_DEPLOYMENT:-vector-recall-brpc}"
 RANK_DEPLOYMENT="${RANK_DEPLOYMENT:-deepfm-rank-brpc}"
 WRAPPER_ENDPOINT="${WRAPPER_ENDPOINT:-192.168.100.11:18103}"
 BURST_CONCURRENCY="${BURST_CONCURRENCY:-1}"
+BURST_POOL_SIZE="${BURST_POOL_SIZE:-$BURST_CONCURRENCY}"
+BURST_ACTIVE_CONNECTIONS="${BURST_ACTIVE_CONNECTIONS:-$BURST_CONCURRENCY}"
+BURST_CPU_SHARDS="${BURST_CPU_SHARDS:-[]}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
 REQUESTS="${REQUESTS:-3}"
 USER_ID="${USER_ID:-1}"
@@ -36,6 +39,13 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 [[ "$BURST_CONCURRENCY" =~ ^(1|1000)$ ]] \
   || die "BURST_CONCURRENCY must be 1 or 1000"
+[[ "$BURST_POOL_SIZE" =~ ^[1-9][0-9]*$ ]] && (( BURST_POOL_SIZE <= 10000 )) \
+  || die "BURST_POOL_SIZE must be in [1,10000]"
+[[ "$BURST_ACTIVE_CONNECTIONS" =~ ^[1-9][0-9]*$ ]] && \
+  (( BURST_ACTIVE_CONNECTIONS <= 1000 && BURST_ACTIVE_CONNECTIONS <= BURST_POOL_SIZE )) \
+  || die "BURST_ACTIVE_CONNECTIONS must be in [1,min(1000,pool_size)]"
+python3 -c 'import json,sys; value=json.loads(sys.argv[1]); assert isinstance(value,list); assert all(isinstance(x,int) and x>=0 for x in value); assert len(value)==len(set(value))' \
+  "$BURST_CPU_SHARDS" || die "BURST_CPU_SHARDS must be a JSON array of unique non-negative CPU IDs"
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
 [[ "$REQUESTS" =~ ^[1-9][0-9]*$ ]] || die "REQUESTS must be positive"
 [[ "$SIZE" =~ ^[1-9][0-9]*$ ]] || die "SIZE must be positive"
@@ -166,7 +176,7 @@ RANK_IP="$(kubectl -n "$NAMESPACE" get service deepfm-rank-brpc -o jsonpath='{.s
   || die "dependency endpoint is empty"
 
 echo "== Full-chain BRPC Wrapper configuration =="
-echo "wrapper_endpoint=$WRAPPER_ENDPOINT burst_concurrency=$BURST_CONCURRENCY"
+echo "wrapper_endpoint=$WRAPPER_ENDPOINT burst_concurrency=$BURST_CONCURRENCY pool_size=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS cpu_shards=$BURST_CPU_SHARDS"
 echo "vector_endpoint=${VECTOR_IP}:18201 rank_endpoint=${RANK_IP}:18211"
 echo "deployment=$PAIREC_DEPLOYMENT output_dir=$OUTPUT_DIR"
 
@@ -183,9 +193,10 @@ fi
 echo "== Render strict full-chain configuration =="
 python3 - "$CONFIG_TEMPLATE" "$OUTPUT_DIR/pairec_config.json" \
   "$WRAPPER_ENDPOINT" "$BURST_CONCURRENCY" "${VECTOR_IP}:18201" \
-  "${RANK_IP}:18211" "$DEEPFM_MODEL_ROLE" <<'PY'
+  "${RANK_IP}:18211" "$DEEPFM_MODEL_ROLE" "$BURST_POOL_SIZE" \
+  "$BURST_ACTIVE_CONNECTIONS" "$BURST_CPU_SHARDS" <<'PY'
 import json, pathlib, sys
-source, target, wrapper, concurrency, vector, rank, role = sys.argv[1:]
+source,target,wrapper,concurrency,vector,rank,role,pool,active,cpu_shards=sys.argv[1:]
 text=pathlib.Path(source).read_text()
 for old,new in {
     "__WRAPPER_ENDPOINT__": wrapper,
@@ -193,6 +204,9 @@ for old,new in {
     "__VECTOR_ENDPOINT__": vector,
     "__RANK_ENDPOINT__": rank,
     "__DEEPFM_MODEL_ROLE__": role,
+    "__BURST_POOL_SIZE__": pool,
+    "__BURST_ACTIVE_CONNECTIONS__": active,
+    "__BURST_CPU_SHARDS__": cpu_shards,
 }.items():
     text=text.replace(old,new)
 assert "__" not in text
@@ -204,6 +218,9 @@ assert gen["brpc_fallback_to_http"] is False and gen["max_retries"]==0
 assert gen["brpc_burst_enabled"] is True
 assert int(concurrency) in (1,1000)
 assert gen["brpc_burst_concurrency"]==int(concurrency)
+assert gen["brpc_burst_pool_size"]==int(pool)
+assert gen["brpc_burst_active_connections"]==int(active)
+assert gen["brpc_burst_cpu_shards"]==json.loads(cpu_shards)
 assert gen["brpc_burst_preconnect"] is True
 assert gen["brpc_burst_payload_bytes"]==102400
 assert recalls["milvus_recall"]["brpc_endpoint"]==vector
@@ -264,13 +281,16 @@ echo "== Verify preconnected c${BURST_CONCURRENCY} sessions =="
 ready_line="$(kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec \
   | grep -F '"event":"pairec_brpc_burst_ready"' | tail -1 || true)"
 [[ -n "$ready_line" ]] || die "pairec_brpc_burst_ready is missing"
-python3 - "$ready_line" "$BURST_CONCURRENCY" <<'PY'
+python3 - "$ready_line" "$BURST_ACTIVE_CONNECTIONS" "$BURST_POOL_SIZE" <<'PY'
 import json, sys
 event=json.loads(sys.argv[1][sys.argv[1].index("{"):])
 expected=int(sys.argv[2])
 assert event["concurrency"]==expected, event
-assert event["connected_sessions"]==expected, event
+assert event["active_connections"]==expected, event
+assert event["connected_sessions"]==event["pool_size"]==int(sys.argv[3]), event
 assert event["payload_bytes"]==102400, event
+connections=event["shard_connections"]
+assert max(connections)-min(connections)<=1,event
 PY
 
 if (( WARMUP_REQUESTS > 0 )); then
@@ -403,10 +423,11 @@ done
 echo "== Validate request-id contracts and latency evidence =="
 python3 - "$OUTPUT_DIR/requests.tsv" "$OUTPUT_DIR/pairec.log" \
   "$OUTPUT_DIR/wrapper.log" "$OUTPUT_DIR/inference.log" "$OUTPUT_DIR/summary.json" \
-  "$BURST_CONCURRENCY" "$WORKLOAD_ELAPSED_SECONDS" <<'PY'
+  "$BURST_ACTIVE_CONNECTIONS" "$WORKLOAD_ELAPSED_SECONDS" "$BURST_POOL_SIZE" <<'PY'
 import csv,json,math,pathlib,statistics,sys
-requests_path,pairec_path,wrapper_path,inference_path,output,concurrency,elapsed=sys.argv[1:]
+requests_path,pairec_path,wrapper_path,inference_path,output,concurrency,elapsed,pool=sys.argv[1:]
 expected=int(concurrency)
+pool=int(pool)
 elapsed=float(elapsed)
 rows=list(csv.DictReader(open(requests_path),delimiter="\t"))
 ids=[row["request_id"] for row in rows]
@@ -435,10 +456,18 @@ for row in rows:
  pipeline=one("pipeline_trace_complete")
  rank=one("deepfm_rank_complete")
  rerank=one("source_quota_rerank_complete")
- assert start["concurrency"]==start["connected_sessions"]==expected,start
+ assert start["concurrency"]==start["active_connections"]==expected,start
+ assert start["selected_sessions"]==expected,start
+ assert start["connected_sessions"]==start["pool_size"]==pool,start
  assert complete["armed_workers"]==expected,complete
  assert complete["pressure_requests"]==expected-1,complete
  assert complete["pressure_success"]==expected-1 and complete["pressure_errors"]==0,complete
+ assert complete["pool_size"]==pool and complete["active_connections"]==expected,complete
+ assert max(complete["shard_requests"])-min(complete["shard_requests"])<=1,complete
+ assert sum(complete["shard_requests"])==expected,complete
+ assert complete["shard_requests"]==complete["shard_success"],complete
+ assert min(complete["shard_requests"])>0,complete
+ assert max(complete["shard_bytes"])-min(complete["shard_bytes"])<=204800,complete
  assert business["business_success"] and business["trace_valid"],business
  assert complete["business_success"] and complete["trace_valid"] and complete["burst_valid"],complete
  assert business["wrapper_total_ms"]>0 and business["wrapper_backend_rpc_ms"]>0,business
@@ -490,7 +519,7 @@ for name in metric_names:
  metrics[name]={"count":len(values),"avg":statistics.fmean(values),
                 "p50":percentile(values,.5),"p95":percentile(values,.95),
                 "p99":percentile(values,.99),"max":max(values)}
-summary={"classification":classification,"concurrency":expected,
+summary={"classification":classification,"concurrency":expected,"pool_size":pool,
          "requests":len(samples),"elapsed_seconds":elapsed,
          "throughput_rps":len(samples)/elapsed,
          "rank_reordered_count":rank_reordered_count,"samples":samples}

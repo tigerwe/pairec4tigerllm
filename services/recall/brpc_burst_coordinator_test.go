@@ -264,3 +264,86 @@ func TestBRPCBurstStartupFailsWhenAnySessionCannotConnect(t *testing.T) {
 		t.Fatal("expected strict preconnect failure")
 	}
 }
+
+func TestBalancedCountsSupportsArbitraryCPUShardCount(t *testing.T) {
+	for _, shards := range []int{1, 2, 3, 7, 16, 64} {
+		counts := balancedCounts(1000, shards, 5)
+		total, minimum, maximum := 0, 1000, 0
+		for _, count := range counts {
+			total += count
+			if count < minimum {
+				minimum = count
+			}
+			if count > maximum {
+				maximum = count
+			}
+		}
+		if total != 1000 || maximum-minimum > 1 {
+			t.Fatalf("shards=%d counts=%v total=%d spread=%d", shards, counts, total, maximum-minimum)
+		}
+	}
+}
+
+func TestBRPCBurstPoolSelectsActiveSessionsAcrossArbitraryShards(t *testing.T) {
+	const poolSize = 10000
+	coordinator := &BRPCBurstCoordinator{
+		poolSize:      poolSize,
+		active:        1000,
+		cpuShards:     []int{0, 1, 2, 3, 4, 5, 6},
+		shardSessions: make([][]int, 7),
+	}
+	for index := 0; index < poolSize; index++ {
+		shard := index % len(coordinator.cpuShards)
+		coordinator.shardSessions[shard] = append(coordinator.shardSessions[shard], index)
+	}
+	seen := make(map[int]struct{}, poolSize)
+	for request := 0; request < 10; request++ {
+		selected, shardCounts := coordinator.selectSessions()
+		if len(selected) != 1000 {
+			t.Fatalf("request=%d selected=%d", request, len(selected))
+		}
+		minimum, maximum := 1000, 0
+		for _, count := range shardCounts {
+			if count < minimum {
+				minimum = count
+			}
+			if count > maximum {
+				maximum = count
+			}
+		}
+		if maximum-minimum > 1 {
+			t.Fatalf("request=%d shardCounts=%v", request, shardCounts)
+		}
+		for _, session := range selected {
+			seen[session] = struct{}{}
+		}
+	}
+	if len(seen) != poolSize {
+		t.Fatalf("ten selections covered %d/%d sessions", len(seen), poolSize)
+	}
+}
+
+func TestBRPCBurstCompletionReportsBalancedShardTraffic(t *testing.T) {
+	results := make(chan brpcBurstLaneResult, 10)
+	for lane := 0; lane < 10; lane++ {
+		results <- brpcBurstLaneResult{
+			index: lane + 1, business: lane == 3, shard: lane % 3,
+			latencyUs: 1000, startOffsetUs: int64(lane),
+		}
+	}
+	close(results)
+	event := makeBRPCBurstCompleteEvent(
+		"request-shards", 10, 4, time.Now(), 10,
+		brpcBurstBusinessEvent{Success: true, TraceValid: true}, results,
+		100, 102400, []int{0, 2, 4},
+	)
+	if !event.BurstValid || event.PressureSuccess != 9 {
+		t.Fatalf("unexpected completion: %+v", event)
+	}
+	if event.ShardRequests[0] != 4 || event.ShardRequests[1] != 3 || event.ShardRequests[2] != 3 {
+		t.Fatalf("unexpected shard requests: %v", event.ShardRequests)
+	}
+	if event.ShardBytes[0] != 3*102400 || event.ShardBytes[1] != 3*102400 || event.ShardBytes[2] != 3*102400 {
+		t.Fatalf("unexpected shard bytes: %v", event.ShardBytes)
+	}
+}

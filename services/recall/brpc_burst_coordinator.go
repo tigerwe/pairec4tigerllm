@@ -8,10 +8,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type BRPCBurstConfig struct {
 	Concurrency     int
+	PoolSize        int
+	Active          int
+	CPUShards       []int
 	PayloadBytes    int
 	PressureTimeout time.Duration
 }
@@ -26,12 +31,32 @@ type brpcBurstSession interface {
 type BRPCBurstCoordinator struct {
 	sessions        []brpcBurstSession
 	concurrency     int
+	poolSize        int
+	active          int
+	cpuShards       []int
+	shardSessions   [][]int
+	poolCursor      int
+	workers         []chan brpcBurstJob
 	payloadBytes    int
 	pressureTimeout time.Duration
 	stride          int
 	sequence        uint64
 	slot            chan struct{}
 	logEvent        func(any)
+}
+
+type brpcBurstJob struct {
+	req            *RecommendRequest
+	requestID      string
+	lane           int
+	business       bool
+	gate           <-chan struct{}
+	releasedAt     *time.Time
+	results        chan<- brpcBurstLaneResult
+	businessResult chan<- brpcBurstLaneResult
+	complete       *sync.WaitGroup
+	active         *int64
+	maxActive      *int64
 }
 
 type brpcBurstLaneResult struct {
@@ -41,6 +66,7 @@ type brpcBurstLaneResult struct {
 	latencyUs     int64
 	response      *RecommendResponse
 	err           error
+	shard         int
 }
 
 type brpcBurstStartEvent struct {
@@ -50,8 +76,13 @@ type brpcBurstStartEvent struct {
 	BusinessLane      int     `json:"business_lane"`
 	PayloadBytes      int     `json:"pressure_payload_bytes"`
 	ConnectedSessions int     `json:"connected_sessions"`
+	SelectedSessions  int     `json:"selected_sessions"`
 	PreflightMs       float64 `json:"preflight_ms"`
 	Stride            int     `json:"business_lane_stride"`
+	PoolSize          int     `json:"pool_size"`
+	ActiveConnections int     `json:"active_connections"`
+	CPUShards         []int   `json:"cpu_shards"`
+	ShardSelected     []int   `json:"shard_selected"`
 }
 
 type brpcBurstBusinessEvent struct {
@@ -88,13 +119,23 @@ type brpcBurstCompleteEvent struct {
 	BusinessSuccess      bool    `json:"business_success"`
 	TraceValid           bool    `json:"trace_valid"`
 	BurstValid           bool    `json:"burst_valid"`
+	PoolSize             int     `json:"pool_size"`
+	ActiveConnections    int     `json:"active_connections"`
+	CPUShards            []int   `json:"cpu_shards"`
+	ShardRequests        []int   `json:"shard_requests"`
+	ShardSuccess         []int   `json:"shard_success"`
+	ShardBytes           []int64 `json:"shard_bytes"`
 }
 
 func NewBRPCBurstCoordinator(client *BRPCRecommendClient, cfg BRPCBurstConfig) (*BRPCBurstCoordinator, error) {
 	if client == nil {
 		return nil, fmt.Errorf("brpc client is nil")
 	}
-	sessions := make([]brpcBurstSession, cfg.Concurrency)
+	poolSize := cfg.PoolSize
+	if poolSize == 0 {
+		poolSize = cfg.Concurrency
+	}
+	sessions := make([]brpcBurstSession, poolSize)
 	for index := range sessions {
 		sessions[index] = client.NewSession()
 	}
@@ -110,8 +151,27 @@ func newBRPCBurstCoordinator(sessions []brpcBurstSession, cfg BRPCBurstConfig, l
 	if cfg.Concurrency < 1 || cfg.Concurrency > 1000 {
 		return nil, fmt.Errorf("concurrency must be in [1,1000]")
 	}
-	if len(sessions) != cfg.Concurrency {
-		return nil, fmt.Errorf("session count %d does not match concurrency %d", len(sessions), cfg.Concurrency)
+	if cfg.PoolSize == 0 {
+		cfg.PoolSize = cfg.Concurrency
+	}
+	if cfg.Active == 0 {
+		cfg.Active = cfg.Concurrency
+	}
+	if cfg.PoolSize < 1 || cfg.PoolSize > 10000 {
+		return nil, fmt.Errorf("pool size must be in [1,10000]")
+	}
+	if cfg.Active < 1 || cfg.Active > cfg.Concurrency || cfg.Active > cfg.PoolSize {
+		return nil, fmt.Errorf("active connections must be in [1,min(concurrency,pool size)]")
+	}
+	if len(sessions) != cfg.PoolSize {
+		return nil, fmt.Errorf("session count %d does not match pool size %d", len(sessions), cfg.PoolSize)
+	}
+	cpuShards, err := resolveBRPCBurstCPUShards(cfg.CPUShards, cfg.Active)
+	if err != nil {
+		return nil, err
+	}
+	if len(cpuShards) > cfg.Active {
+		return nil, fmt.Errorf("CPU shard count %d exceeds active connections %d", len(cpuShards), cfg.Active)
 	}
 	if cfg.PayloadBytes < 0 || cfg.PayloadBytes > 1<<20 {
 		return nil, fmt.Errorf("payload bytes must be in [0,1048576]")
@@ -125,21 +185,39 @@ func newBRPCBurstCoordinator(sessions []brpcBurstSession, cfg BRPCBurstConfig, l
 
 	c := &BRPCBurstCoordinator{
 		sessions:        sessions,
-		concurrency:     cfg.Concurrency,
+		concurrency:     cfg.Active,
+		poolSize:        cfg.PoolSize,
+		active:          cfg.Active,
+		cpuShards:       cpuShards,
 		payloadBytes:    cfg.PayloadBytes,
 		pressureTimeout: cfg.PressureTimeout,
 		stride:          coprimeStride(cfg.Concurrency),
 		slot:            make(chan struct{}, 1),
 		logEvent:        logger,
 	}
+	c.shardSessions = make([][]int, len(cpuShards))
+	c.workers = make([]chan brpcBurstJob, cfg.PoolSize)
+	for index := range sessions {
+		shard := index % len(cpuShards)
+		c.shardSessions[shard] = append(c.shardSessions[shard], index)
+		c.workers[index] = make(chan brpcBurstJob)
+		go c.runSessionWorker(index, shard, c.workers[index])
+	}
 	if _, err := c.connectAll(); err != nil {
+		for _, worker := range c.workers {
+			close(worker)
+		}
 		return nil, err
 	}
 	c.slot <- struct{}{}
 	c.logEvent(map[string]any{
 		"event":                "pairec_brpc_burst_ready",
 		"concurrency":          c.concurrency,
-		"connected_sessions":   c.concurrency,
+		"connected_sessions":   c.poolSize,
+		"pool_size":            c.poolSize,
+		"active_connections":   c.active,
+		"cpu_shards":           c.cpuShards,
+		"shard_connections":    shardLengths(c.shardSessions),
 		"payload_bytes":        c.payloadBytes,
 		"business_lane_stride": c.stride,
 	})
@@ -148,85 +226,58 @@ func newBRPCBurstCoordinator(sessions []brpcBurstSession, cfg BRPCBurstConfig, l
 
 func (c *BRPCBurstCoordinator) Recommend(req *RecommendRequest, requestID string) (*RecommendResponse, error) {
 	<-c.slot
-	preflightStarted := time.Now()
-	connected, err := c.connectAll()
-	preflightMs := elapsedMilliseconds(preflightStarted)
-	if err != nil {
-		c.slot <- struct{}{}
-		return nil, fmt.Errorf("brpc burst preflight connected %d/%d sessions: %w", connected, c.concurrency, err)
-	}
+	selected, shardSelected := c.selectSessions()
+	preflightMs := 0.0
 
 	sequence := atomic.AddUint64(&c.sequence, 1)
-	businessLane := int((sequence*uint64(c.stride))%uint64(c.concurrency)) + 1
-	results := make(chan brpcBurstLaneResult, c.concurrency)
+	businessLane := int((sequence*uint64(c.stride))%uint64(c.active)) + 1
+	results := make(chan brpcBurstLaneResult, c.active)
 	businessResult := make(chan brpcBurstLaneResult, 1)
 	gate := make(chan struct{})
-	var armed sync.WaitGroup
 	var complete sync.WaitGroup
 	var active int64
 	var maxActive int64
-	armed.Add(c.concurrency)
-	complete.Add(c.concurrency)
-	startOffsets := make([]int64, c.concurrency)
+	complete.Add(c.active)
 	var releasedAt time.Time
 
-	for lane := 1; lane <= c.concurrency; lane++ {
-		go func(lane int) {
-			defer complete.Done()
-			armed.Done()
-			<-gate
-			callStarted := time.Now()
-			result := brpcBurstLaneResult{
-				index:         lane,
-				business:      lane == businessLane,
-				startOffsetUs: callStarted.Sub(releasedAt).Microseconds(),
-			}
-			current := atomic.AddInt64(&active, 1)
-			updateBurstMaximum(&maxActive, current)
-			defer atomic.AddInt64(&active, -1)
-
-			if result.business {
-				ctx, cancel := context.WithTimeout(context.Background(), c.pressureTimeout)
-				result.response, result.err = c.sessions[lane-1].Recommend(ctx, req, requestID)
-				cancel()
-			} else {
-				ctx, cancel := context.WithTimeout(context.Background(), c.pressureTimeout)
-				_, result.err = c.sessions[lane-1].HealthCheckWithPayload(ctx, c.payloadBytes)
-				cancel()
-			}
-			result.latencyUs = time.Since(callStarted).Microseconds()
-			startOffsets[lane-1] = result.startOffsetUs
-			results <- result
-			if result.business {
-				businessResult <- result
-			}
-		}(lane)
+	for lane, sessionIndex := range selected {
+		c.workers[sessionIndex] <- brpcBurstJob{
+			req: req, requestID: requestID, lane: lane + 1,
+			business: lane+1 == businessLane, gate: gate, releasedAt: &releasedAt,
+			results: results, businessResult: businessResult, complete: &complete,
+			active: &active, maxActive: &maxActive,
+		}
 	}
 
-	armed.Wait()
 	c.logEvent(brpcBurstStartEvent{
 		Event:             "pairec_brpc_burst_start",
 		RequestID:         requestID,
 		Concurrency:       c.concurrency,
 		BusinessLane:      businessLane,
 		PayloadBytes:      c.payloadBytes,
-		ConnectedSessions: connected,
+		ConnectedSessions: c.poolSize,
+		SelectedSessions:  len(selected),
 		PreflightMs:       preflightMs,
 		Stride:            c.stride,
+		PoolSize:          c.poolSize,
+		ActiveConnections: c.active,
+		CPUShards:         c.cpuShards,
+		ShardSelected:     shardSelected,
 	})
 	releasedAt = time.Now()
 	close(gate)
 
 	business := <-businessResult
-	businessEvent := makeBRPCBurstBusinessEvent(requestID, c.concurrency, businessLane, business)
+	businessEvent := makeBRPCBurstBusinessEvent(requestID, c.active, businessLane, business)
 	c.logEvent(businessEvent)
 
 	go func() {
 		complete.Wait()
 		close(results)
 		c.logEvent(makeBRPCBurstCompleteEvent(
-			requestID, c.concurrency, businessLane, releasedAt,
-			atomic.LoadInt64(&maxActive), startOffsets, businessEvent, results,
+			requestID, c.active, businessLane, releasedAt,
+			atomic.LoadInt64(&maxActive), businessEvent, results,
+			c.poolSize, c.payloadBytes, c.cpuShards,
 		))
 		c.slot <- struct{}{}
 	}()
@@ -237,14 +288,65 @@ func (c *BRPCBurstCoordinator) Recommend(req *RecommendRequest, requestID string
 	return business.response, nil
 }
 
+func (c *BRPCBurstCoordinator) runSessionWorker(sessionIndex, shard int, jobs <-chan brpcBurstJob) {
+	for job := range jobs {
+		<-job.gate
+		callStarted := time.Now()
+		result := brpcBurstLaneResult{
+			index: job.lane, business: job.business, shard: shard,
+			startOffsetUs: callStarted.Sub(*job.releasedAt).Microseconds(),
+		}
+		current := atomic.AddInt64(job.active, 1)
+		updateBurstMaximum(job.maxActive, current)
+		ctx, cancel := context.WithTimeout(context.Background(), c.pressureTimeout)
+		if job.business {
+			result.response, result.err = c.sessions[sessionIndex].Recommend(ctx, job.req, job.requestID)
+		} else {
+			_, result.err = c.sessions[sessionIndex].HealthCheckWithPayload(ctx, c.payloadBytes)
+		}
+		cancel()
+		atomic.AddInt64(job.active, -1)
+		result.latencyUs = time.Since(callStarted).Microseconds()
+		job.results <- result
+		if result.business {
+			job.businessResult <- result
+		}
+		job.complete.Done()
+	}
+}
+
+func (c *BRPCBurstCoordinator) selectSessions() ([]int, []int) {
+	selected := make([]int, 0, c.active)
+	counts := make([]int, len(c.cpuShards))
+	for offset := 0; offset < c.active; offset++ {
+		session := (c.poolCursor + offset) % c.poolSize
+		selected = append(selected, session)
+		counts[session%len(c.cpuShards)]++
+	}
+	c.poolCursor = (c.poolCursor + c.active) % c.poolSize
+	return selected, counts
+}
+
 func (c *BRPCBurstCoordinator) connectAll() (int, error) {
+	indices := make([]int, len(c.sessions))
+	for index := range indices {
+		indices[index] = index
+	}
+	return c.connectSessions(indices)
+}
+
+func (c *BRPCBurstCoordinator) connectSessions(indices []int) (int, error) {
 	var wg sync.WaitGroup
-	errs := make(chan error, len(c.sessions))
+	errs := make(chan error, len(indices))
+	limit := make(chan struct{}, 256)
 	var connected int64
-	for _, session := range c.sessions {
+	for _, index := range indices {
+		session := c.sessions[index]
 		wg.Add(1)
 		go func(session brpcBurstSession) {
 			defer wg.Done()
+			limit <- struct{}{}
+			defer func() { <-limit }()
 			ctx, cancel := context.WithTimeout(context.Background(), c.pressureTimeout)
 			err := session.Connect(ctx)
 			cancel()
@@ -264,6 +366,10 @@ func (c *BRPCBurstCoordinator) connectAll() (int, error) {
 }
 
 func (c *BRPCBurstCoordinator) Close() {
+	<-c.slot
+	for _, worker := range c.workers {
+		close(worker)
+	}
 	closeBRPCBurstSessions(c.sessions)
 }
 
@@ -308,15 +414,29 @@ func makeBRPCBurstCompleteEvent(
 	businessLane int,
 	releasedAt time.Time,
 	maxActive int64,
-	startOffsets []int64,
 	business brpcBurstBusinessEvent,
 	results <-chan brpcBurstLaneResult,
+	poolSize int,
+	payloadBytes int,
+	cpuShards []int,
 ) brpcBurstCompleteEvent {
 	pressureLatencies := make([]int64, 0, concurrency-1)
+	startOffsets := make([]int64, 0, concurrency)
 	pressureSuccess := 0
+	shardRequests := make([]int, len(cpuShards))
+	shardSuccess := make([]int, len(cpuShards))
+	shardBytes := make([]int64, len(cpuShards))
 	for result := range results {
+		startOffsets = append(startOffsets, result.startOffsetUs)
+		shardRequests[result.shard]++
+		if result.err == nil {
+			shardSuccess[result.shard]++
+		}
 		if result.business {
 			continue
+		}
+		if !result.business {
+			shardBytes[result.shard] += int64(payloadBytes)
 		}
 		if result.err == nil {
 			pressureSuccess++
@@ -341,7 +461,60 @@ func makeBRPCBurstCompleteEvent(
 		BusinessSuccess:      business.Success,
 		TraceValid:           business.TraceValid,
 		BurstValid:           business.Success && business.TraceValid && pressureSuccess == pressureRequests,
+		PoolSize:             poolSize,
+		ActiveConnections:    concurrency,
+		CPUShards:            append([]int(nil), cpuShards...),
+		ShardRequests:        shardRequests,
+		ShardSuccess:         shardSuccess,
+		ShardBytes:           shardBytes,
 	}
+}
+
+func resolveBRPCBurstCPUShards(configured []int, active int) ([]int, error) {
+	var allowed unix.CPUSet
+	if err := unix.SchedGetaffinity(0, &allowed); err != nil {
+		return nil, fmt.Errorf("read process CPU affinity: %w", err)
+	}
+	if len(configured) == 0 {
+		for cpu := 0; cpu < 1024; cpu++ {
+			if allowed.IsSet(cpu) {
+				configured = append(configured, cpu)
+				if len(configured) == active {
+					break
+				}
+			}
+		}
+	}
+	if len(configured) == 0 {
+		return nil, fmt.Errorf("no CPU shards available")
+	}
+	seen := make(map[int]struct{}, len(configured))
+	for _, cpu := range configured {
+		if cpu < 0 || !allowed.IsSet(cpu) {
+			return nil, fmt.Errorf("CPU shard %d is outside process affinity", cpu)
+		}
+		if _, exists := seen[cpu]; exists {
+			return nil, fmt.Errorf("duplicate CPU shard %d", cpu)
+		}
+		seen[cpu] = struct{}{}
+	}
+	return append([]int(nil), configured...), nil
+}
+
+func balancedCounts(total, shards, rotation int) []int {
+	counts := make([]int, shards)
+	for index := 0; index < total; index++ {
+		counts[(index+rotation)%shards]++
+	}
+	return counts
+}
+
+func shardLengths(shards [][]int) []int {
+	result := make([]int, len(shards))
+	for index := range shards {
+		result[index] = len(shards[index])
+	}
+	return result
 }
 
 func writeBRPCBurstEvent(event any) {
