@@ -151,6 +151,12 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
     max_health_while_recommend_.store(0, std::memory_order_relaxed);
     active_recommend_.fetch_add(1, std::memory_order_relaxed);
 
+    std::cout << "[brpc-burst-wrapper] phase=recommend_start"
+              << " request_id=" << request->request_id()
+              << " user_id=" << request->user_id()
+              << " active_health=" << active_health_.load(std::memory_order_relaxed)
+              << " backend=" << backend_ << std::endl;
+
     const int64_t health_at_start = active_health_.load(std::memory_order_relaxed);
     UpdateMax(&max_health_while_recommend_, health_at_start);
     butil::Timer wrapper_timer;
@@ -167,6 +173,12 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
         max_health_while_recommend_.load(std::memory_order_relaxed);
     const double wrapper_total_ms = wrapper_timer.m_elapsed();
     const double backend_inference_ms = response->inference_time_ms();
+    if (!ok) {
+      response->set_code(500);
+      response->set_user_id(request->user_id());
+      response->set_error("backend brpc Recommend failed: " + error);
+      front_cntl->SetFailed(response->error());
+    }
     auto* trace = response->mutable_trace();
     trace->set_wrapper_total_ms(wrapper_total_ms);
     trace->set_wrapper_backend_rpc_ms(backend_rpc_ms);
@@ -188,14 +200,8 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
               << " active_health_at_start=" << health_at_start
               << " max_active_health=" << max_health
               << " max_active_total=" << max_health + 1
-              << " backend=" << backend_ << std::endl;
-
-    if (!ok) {
-      response->set_code(500);
-      response->set_user_id(request->user_id());
-      response->set_error("backend brpc Recommend failed: " + error);
-      front_cntl->SetFailed(response->error());
-    }
+              << " backend=" << backend_
+              << " error=" << (error.empty() ? "none" : error) << std::endl;
   }
 
   void Health(

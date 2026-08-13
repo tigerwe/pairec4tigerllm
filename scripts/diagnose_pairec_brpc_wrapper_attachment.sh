@@ -119,8 +119,9 @@ if [[ "$(cat "$DETERMINISTIC_PATCH")" != "[]" ]]; then
 fi
 
 run_transport() {
-  local transport="$1"
+  local transport="$1" status
   echo "== Payload transport: $transport =="
+  set +e
   NAMESPACE="$NAMESPACE" \
   WRAPPER_DEPLOYMENT="$WRAPPER_DEPLOYMENT" WRAPPER_ENDPOINT="$WRAPPER_ENDPOINT" \
   INFERENCE_DEPLOYMENT="$INFERENCE_DEPLOYMENT" \
@@ -131,6 +132,20 @@ run_transport() {
   OUTPUT_DIR="$OUTPUT_DIR/$transport" \
     bash scripts/diagnose_pairec_brpc_wrapper_runner_interference.sh \
     | tee "$OUTPUT_DIR/$transport.log"
+  status="${PIPESTATUS[0]}"
+  set -e
+  if [[ "$status" != 0 ]]; then
+    echo "== Freeze failure evidence before TRT restore: $transport =="
+    NAMESPACE="$NAMESPACE" \
+    PAIREC_DEPLOYMENT=pairec-brpc-observed-wrapper \
+    WRAPPER_DEPLOYMENT="$WRAPPER_DEPLOYMENT" \
+    INFERENCE_DEPLOYMENT="$INFERENCE_DEPLOYMENT" \
+    RUN_OUTPUT_DIR="$OUTPUT_DIR/$transport" \
+    OUTPUT_DIR="$OUTPUT_DIR/$transport/failure-diagnostic" \
+      bash scripts/diagnose_pairec_wrapper_rerank_failure.sh \
+      | tee "$OUTPUT_DIR/$transport-failure-diagnostic.log" || true
+    return "$status"
+  fi
 }
 
 run_transport protobuf

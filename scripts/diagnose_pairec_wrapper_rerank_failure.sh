@@ -27,7 +27,7 @@ if [[ -z "$REQUEST_ID" && -n "$RUN_OUTPUT_DIR" ]]; then
 import json,pathlib,sys
 root=pathlib.Path(sys.argv[1])
 failures=[]
-for path in root.glob("response-*.json"):
+for path in root.rglob("response-*.json"):
  try:
   data=json.loads(path.read_text())
  except (OSError,json.JSONDecodeError):
@@ -95,6 +95,18 @@ kubectl -n "$NAMESPACE" get deployment "$PAIREC_DEPLOYMENT" \
 kubectl -n "$NAMESPACE" get pods \
   -l "app in ($PAIREC_DEPLOYMENT,$WRAPPER_DEPLOYMENT,$INFERENCE_DEPLOYMENT)" -o wide \
   >"$OUTPUT_DIR/pods.txt" 2>&1 || true
+kubectl -n "$NAMESPACE" get pods \
+  -l "app in ($PAIREC_DEPLOYMENT,$WRAPPER_DEPLOYMENT,$INFERENCE_DEPLOYMENT)" -o yaml \
+  >"$OUTPUT_DIR/pods.yaml" 2>&1 || true
+for app in "$PAIREC_DEPLOYMENT" "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT"; do
+  mapfile -t app_pods < <(kubectl -n "$NAMESPACE" get pods -l "app=$app" -o name 2>/dev/null || true)
+  for pod_ref in "${app_pods[@]}"; do
+    [[ -n "$pod_ref" ]] || continue
+    pod="${pod_ref#pod/}"
+    kubectl -n "$NAMESPACE" describe pod "$pod" \
+      >"$OUTPUT_DIR/describe-${pod}.txt" 2>&1 || true
+  done
+done
 kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp \
   >"$OUTPUT_DIR/events.txt" 2>&1 || true
 
