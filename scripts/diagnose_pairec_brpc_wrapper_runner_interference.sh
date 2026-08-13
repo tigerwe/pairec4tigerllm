@@ -2,6 +2,9 @@
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-pairec}"
+WRAPPER_DEPLOYMENT="${WRAPPER_DEPLOYMENT:-brpc-burst-wrapper}"
+WRAPPER_ENDPOINT="${WRAPPER_ENDPOINT:-192.168.100.11:18103}"
+INFERENCE_DEPLOYMENT="${INFERENCE_DEPLOYMENT:-inference-brpc-trtllm}"
 REQUESTS="${REQUESTS:-100}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
 QUALIFICATION_REQUESTS="${QUALIFICATION_REQUESTS:-10}"
@@ -31,6 +34,9 @@ run_arm() {
   BURST_CPU_SHARDS="$BURST_CPU_SHARDS" \
   BURST_PAYLOAD_BYTES="$payload" \
   NAMESPACE="$NAMESPACE" \
+  WRAPPER_DEPLOYMENT="$WRAPPER_DEPLOYMENT" \
+  WRAPPER_ENDPOINT="$WRAPPER_ENDPOINT" \
+  INFERENCE_DEPLOYMENT="$INFERENCE_DEPLOYMENT" \
   REQUESTS="$REQUESTS" \
   WARMUP_REQUESTS="$WARMUP_REQUESTS" \
   QUALIFICATION_REQUESTS="$QUALIFICATION_REQUESTS" \
@@ -43,6 +49,7 @@ run_arm() {
 
 echo "== BRPC Wrapper runner interference diagnosis =="
 echo "requests=$REQUESTS qualification_requests=$QUALIFICATION_REQUESTS user_id=$USER_ID pool_size=$POOL_SIZE cpu_shards=$BURST_CPU_SHARDS"
+echo "wrapper_deployment=$WRAPPER_DEPLOYMENT wrapper_endpoint=$WRAPPER_ENDPOINT inference_deployment=$INFERENCE_DEPLOYMENT"
 echo "arms=idle_pool,rpc_only,payload_100k output_dir=$OUTPUT_DIR"
 
 # Every arm preconnects the same 10,000 sessions before warmup or measurement.
