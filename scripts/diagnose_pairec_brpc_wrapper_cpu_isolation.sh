@@ -6,6 +6,9 @@ WRAPPER_APP="${WRAPPER_APP:-brpc-burst-wrapper}"
 WRAPPER_CONTAINER="${WRAPPER_CONTAINER:-brpc-burst-wrapper}"
 INFERENCE_APP="${INFERENCE_APP:-inference-brpc-trtllm}"
 INFERENCE_CONTAINER="${INFERENCE_CONTAINER:-brpc-inference}"
+INFERENCE_DEPLOYMENT="${INFERENCE_DEPLOYMENT:-inference-brpc-trtllm}"
+DETERMINISTIC_TRT_TOP_K="${DETERMINISTIC_TRT_TOP_K:-1}"
+INFERENCE_ROLLOUT_TIMEOUT="${INFERENCE_ROLLOUT_TIMEOUT:-10m}"
 INFERENCE_CPU_COUNT="${INFERENCE_CPU_COUNT:-8}"
 WRAPPER_CPU_COUNT="${WRAPPER_CPU_COUNT:-32}"
 INFERENCE_CPUSET="${INFERENCE_CPUSET:-}"
@@ -21,6 +24,8 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 for value in "$INFERENCE_CPU_COUNT" "$WRAPPER_CPU_COUNT" "$REQUESTS"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "CPU counts and REQUESTS must be positive integers"
 done
+[[ "$DETERMINISTIC_TRT_TOP_K" = 1 ]] \
+  || die "DETERMINISTIC_TRT_TOP_K must be 1 so request seeds cannot change sampled output"
 for command in kubectl python3; do
   command -v "$command" >/dev/null 2>&1 || die "missing command: $command"
 done
@@ -67,6 +72,86 @@ verify_all_threads_affinity() {
       test "$count" -gt 0 && test "$failed" -eq 0
       echo "thread_affinity_ok threads=$count cpuset=$expected"' -- "$expected"
 }
+
+DEPLOYMENT_BEFORE="$OUTPUT_DIR/inference-deployment-before.json"
+DETERMINISTIC_PATCH="$OUTPUT_DIR/inference-top-k-deterministic-patch.json"
+RESTORE_PATCH="$OUTPUT_DIR/inference-top-k-restore-patch.json"
+kubectl -n "$NAMESPACE" get deployment "$INFERENCE_DEPLOYMENT" -o json \
+  >"$DEPLOYMENT_BEFORE"
+python3 - "$DEPLOYMENT_BEFORE" "$INFERENCE_CONTAINER" \
+  "$DETERMINISTIC_TRT_TOP_K" "$DETERMINISTIC_PATCH" "$RESTORE_PATCH" <<'PY'
+import json,pathlib,sys
+source,container_name,top_k,deterministic_path,restore_path=sys.argv[1:]
+deployment=json.load(open(source))
+containers=deployment["spec"]["template"]["spec"]["containers"]
+matches=[(index,item) for index,item in enumerate(containers) if item["name"]==container_name]
+assert len(matches)==1,f"expected one container {container_name}, got {len(matches)}"
+index,container=matches[0]
+original=list(container.get("args",[]))
+positions=[i for i,arg in enumerate(original) if arg.startswith("--trt_top_k=")]
+assert len(positions)==1,f"expected one --trt_top_k argument, got {positions}"
+deterministic=list(original)
+deterministic[positions[0]]=f"--trt_top_k={top_k}"
+path=f"/spec/template/spec/containers/{index}/args"
+deterministic_patch=[] if deterministic==original else [{"op":"replace","path":path,"value":deterministic}]
+restore_patch=[] if deterministic==original else [{"op":"replace","path":path,"value":original}]
+pathlib.Path(deterministic_path).write_text(json.dumps(deterministic_patch)+"\n")
+pathlib.Path(restore_path).write_text(json.dumps(restore_patch)+"\n")
+print(f"original_trt_top_k={original[positions[0]].split('=',1)[1]}")
+print(f"diagnostic_trt_top_k={top_k}")
+print(f"deployment_patch_required={str(bool(deterministic_patch)).lower()}")
+PY
+
+DETERMINISTIC_APPLIED=0
+AFFINITY_APPLIED=0
+WRAPPER_POD=""
+INFERENCE_POD=""
+WRAPPER_ORIGINAL_CPUSET=""
+INFERENCE_ORIGINAL_CPUSET=""
+cleanup() {
+  local status=$?
+  local cleanup_failed=0
+  trap - EXIT INT TERM
+  if [[ "$AFFINITY_APPLIED" = 1 ]]; then
+    echo "== Restore original CPU affinity =="
+    if [[ "$(ready_pod "$WRAPPER_APP" 2>/dev/null || true)" = "$WRAPPER_POD" ]]; then
+      set_affinity "$WRAPPER_POD" "$WRAPPER_CONTAINER" "$WRAPPER_ORIGINAL_CPUSET" \
+        >"$OUTPUT_DIR/wrapper-affinity-restore.log" 2>&1 || cleanup_failed=1
+    fi
+    if [[ "$(ready_pod "$INFERENCE_APP" 2>/dev/null || true)" = "$INFERENCE_POD" ]]; then
+      set_affinity "$INFERENCE_POD" "$INFERENCE_CONTAINER" "$INFERENCE_ORIGINAL_CPUSET" \
+        >"$OUTPUT_DIR/inference-affinity-restore.log" 2>&1 || cleanup_failed=1
+    fi
+  fi
+  if [[ "$DETERMINISTIC_APPLIED" = 1 ]]; then
+    echo "== Restore original TRT sampling configuration =="
+    kubectl -n "$NAMESPACE" patch deployment "$INFERENCE_DEPLOYMENT" \
+      --type=json -p "$(cat "$RESTORE_PATCH")" \
+      >"$OUTPUT_DIR/inference-config-restore.log" 2>&1 || cleanup_failed=1
+    if [[ "$cleanup_failed" = 0 ]]; then
+      kubectl -n "$NAMESPACE" rollout status "deployment/$INFERENCE_DEPLOYMENT" \
+        --timeout="$INFERENCE_ROLLOUT_TIMEOUT" \
+        >>"$OUTPUT_DIR/inference-config-restore.log" 2>&1 || cleanup_failed=1
+    fi
+  fi
+  if [[ "$cleanup_failed" = 1 ]]; then
+    echo "ERROR: diagnostic cleanup failed; inspect $OUTPUT_DIR/*restore.log" >&2
+    [[ "$status" != 0 ]] || status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+if [[ "$(cat "$DETERMINISTIC_PATCH")" != "[]" ]]; then
+  echo "== Apply deterministic TRT sampling for diagnostic =="
+  kubectl -n "$NAMESPACE" patch deployment "$INFERENCE_DEPLOYMENT" \
+    --type=json -p "$(cat "$DETERMINISTIC_PATCH")"
+  DETERMINISTIC_APPLIED=1
+  kubectl -n "$NAMESPACE" rollout status "deployment/$INFERENCE_DEPLOYMENT" \
+    --timeout="$INFERENCE_ROLLOUT_TIMEOUT"
+else
+  echo "TRT_DETERMINISTIC_SAMPLING_ALREADY_CONFIGURED top_k=$DETERMINISTIC_TRT_TOP_K"
+fi
 
 WRAPPER_POD="$(ready_pod "$WRAPPER_APP")"
 INFERENCE_POD="$(ready_pod "$INFERENCE_APP")"
@@ -128,35 +213,30 @@ PY
 INFERENCE_ISOLATED_CPUSET="${selected_sets[0]}"
 WRAPPER_ISOLATED_CPUSET="${selected_sets[1]}"
 
-RESTORED=0
-restore_affinity() {
-  local status=$?
-  trap - EXIT INT TERM
-  if [[ "$RESTORED" = 0 ]]; then
-    echo "== Restore original CPU affinity =="
-    if [[ "$(ready_pod "$WRAPPER_APP" 2>/dev/null || true)" = "$WRAPPER_POD" ]]; then
-      set_affinity "$WRAPPER_POD" "$WRAPPER_CONTAINER" "$WRAPPER_ORIGINAL_CPUSET" \
-        >"$OUTPUT_DIR/wrapper-affinity-restore.log" 2>&1 || true
-    fi
-    if [[ "$(ready_pod "$INFERENCE_APP" 2>/dev/null || true)" = "$INFERENCE_POD" ]]; then
-      set_affinity "$INFERENCE_POD" "$INFERENCE_CONTAINER" "$INFERENCE_ORIGINAL_CPUSET" \
-        >"$OUTPUT_DIR/inference-affinity-restore.log" 2>&1 || true
-    fi
-    RESTORED=1
-  fi
-  exit "$status"
-}
-trap restore_affinity EXIT INT TERM
-
 cat <<EOF
 == BRPC Wrapper / TRT CPU isolation ==
 node=$WRAPPER_NODE
 wrapper_pod=$WRAPPER_POD original=$WRAPPER_ORIGINAL_CPUSET isolated=$WRAPPER_ISOLATED_CPUSET
 inference_pod=$INFERENCE_POD original=$INFERENCE_ORIGINAL_CPUSET isolated=$INFERENCE_ISOLATED_CPUSET
 requests=$REQUESTS qualification_requests=$QUALIFICATION_REQUESTS user_id=$USER_ID output_dir=$OUTPUT_DIR
+diagnostic_trt_top_k=$DETERMINISTIC_TRT_TOP_K comparison=unisolated_vs_isolated_same_runtime
 EOF
 
+echo "== Baseline: unisolated CPU affinity =="
+REQUESTS="$REQUESTS" \
+QUALIFICATION_REQUESTS="$QUALIFICATION_REQUESTS" \
+USER_ID="$USER_ID" \
+OUTPUT_DIR="$OUTPUT_DIR/unisolated" \
+BUILD_PAIREC_IMAGE=0 \
+IMPORT_PAIREC_IMAGE=0 \
+  bash scripts/diagnose_pairec_brpc_wrapper_runner_interference.sh \
+  | tee "$OUTPUT_DIR/unisolated.log"
+
+[[ "$(ready_pod "$WRAPPER_APP")" = "$WRAPPER_POD" ]] || die "Wrapper pod changed during baseline"
+[[ "$(ready_pod "$INFERENCE_APP")" = "$INFERENCE_POD" ]] || die "inference pod changed during baseline"
+
 echo "== Apply disjoint CPU affinity to all existing process threads =="
+AFFINITY_APPLIED=1
 set_affinity "$INFERENCE_POD" "$INFERENCE_CONTAINER" "$INFERENCE_ISOLATED_CPUSET" \
   | tee "$OUTPUT_DIR/inference-taskset.log"
 set_affinity "$WRAPPER_POD" "$WRAPPER_CONTAINER" "$WRAPPER_ISOLATED_CPUSET" \
@@ -186,19 +266,32 @@ IMPORT_PAIREC_IMAGE=0 \
 [[ "$(ready_pod "$WRAPPER_APP")" = "$WRAPPER_POD" ]] || die "Wrapper pod changed during test"
 [[ "$(ready_pod "$INFERENCE_APP")" = "$INFERENCE_POD" ]] || die "inference pod changed during test"
 
-if [[ -n "$BASELINE_SUMMARY" ]]; then
-  [[ -f "$BASELINE_SUMMARY" ]] || die "BASELINE_SUMMARY does not exist: $BASELINE_SUMMARY"
-  python3 - "$BASELINE_SUMMARY" "$OUTPUT_DIR/isolated/summary.json" \
-    "$OUTPUT_DIR/comparison.json" <<'PY'
+python3 - "$OUTPUT_DIR/unisolated/summary.json" "$OUTPUT_DIR/isolated/summary.json" \
+  "$OUTPUT_DIR/comparison.json" <<'PY'
 import json,pathlib,sys
 baseline=json.load(open(sys.argv[1])); isolated=json.load(open(sys.argv[2]))
 def total(item): return float(item['runner_p99_total_delta_ms'])
 result={
  'classification':'PAIREC_BRPC_WRAPPER_CPU_ISOLATION_COMPARISON',
- 'baseline_runner_p99_total_delta_ms':total(baseline),
+ 'unisolated_runner_p99_total_delta_ms':total(baseline),
  'isolated_runner_p99_total_delta_ms':total(isolated),
  'improvement_ms':total(baseline)-total(isolated),
  'isolated_runner_gate_passed':bool(isolated['runner_gate_passed']),
+}
+pathlib.Path(sys.argv[3]).write_text(json.dumps(result,indent=2)+'\n')
+print(json.dumps(result,ensure_ascii=False))
+PY
+
+if [[ -n "$BASELINE_SUMMARY" ]]; then
+  [[ -f "$BASELINE_SUMMARY" ]] || die "BASELINE_SUMMARY does not exist: $BASELINE_SUMMARY"
+  python3 - "$BASELINE_SUMMARY" "$OUTPUT_DIR/unisolated/summary.json" \
+    "$OUTPUT_DIR/historical-comparison.json" <<'PY'
+import json,pathlib,sys
+historical=json.load(open(sys.argv[1])); current=json.load(open(sys.argv[2]))
+result={
+ 'classification':'PAIREC_BRPC_WRAPPER_CPU_ISOLATION_HISTORICAL_CONTEXT',
+ 'historical_runner_p99_total_delta_ms':float(historical['runner_p99_total_delta_ms']),
+ 'deterministic_unisolated_runner_p99_total_delta_ms':float(current['runner_p99_total_delta_ms']),
 }
 pathlib.Path(sys.argv[3]).write_text(json.dumps(result,indent=2)+'\n')
 print(json.dumps(result,ensure_ascii=False))
