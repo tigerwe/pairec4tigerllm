@@ -21,6 +21,7 @@ PAIREC_IMAGE="${PAIREC_IMAGE:-docker.io/library/pairec-server:k8s-arm64-brpc-v1}
 ENSURE_PAUSE_IMAGE="${ENSURE_PAUSE_IMAGE:-1}"
 PAUSE_IMAGE="${PAUSE_IMAGE:-docker.io/library/pause-aarch64:3.8}"
 PAUSE_ARCHIVE="${PAUSE_ARCHIVE:-/home/zcx/pause-aarch64-3.8.tar}"
+PAUSE_FALLBACK_ARCHIVE="${PAUSE_FALLBACK_ARCHIVE:-/home/zcx/master-runtime-images.tar}"
 CONFIG_TEMPLATE="${CONFIG_TEMPLATE:-configs/pairec_config.brpc_wrapper_full.json}"
 PAIREC_MANIFEST="${PAIREC_MANIFEST:-k8s/deployment-pairec-brpc-observed-wrapper.yaml}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-full/$(date +%Y%m%d-%H%M%S)}"
@@ -42,7 +43,8 @@ done
 for command in kubectl curl python3; do
   command -v "$command" >/dev/null 2>&1 || die "missing command: $command"
 done
-if [[ "$BUILD_PAIREC_IMAGE" = 1 || "$IMPORT_PAIREC_IMAGE" = 1 ]]; then
+if [[ "$BUILD_PAIREC_IMAGE" = 1 || "$IMPORT_PAIREC_IMAGE" = 1 || \
+      "$ENSURE_PAUSE_IMAGE" = 1 ]]; then
   command -v docker >/dev/null 2>&1 || die "missing command: docker"
 fi
 if [[ "$IMPORT_PAIREC_IMAGE" = 1 || "$ENSURE_PAUSE_IMAGE" = 1 ]]; then
@@ -61,24 +63,51 @@ ctr_k8s() {
   sudo -n ctr -n k8s.io "$@"
 }
 
+ctr_k8s_has_image() {
+  local listing
+  listing="$(ctr_k8s images list)"
+  awk 'NR > 1 {print $1}' <<<"$listing" | grep -Fxq "$1"
+}
+
 ensure_pause_image() {
   [[ "$ENSURE_PAUSE_IMAGE" = 1 ]] || return
-  local images
+  local archive import_log
 
   echo "== Ensure Kubernetes sandbox image in k8s.io containerd =="
-  images="$(ctr_k8s images list -q)"
-  if grep -Fxq "$PAUSE_IMAGE" <<<"$images"; then
+  if ctr_k8s_has_image "$PAUSE_IMAGE"; then
     echo "K8S_PAUSE_IMAGE_PRESENT image=$PAUSE_IMAGE"
     return
   fi
 
-  test -f "$PAUSE_ARCHIVE" \
-    || die "sandbox image is missing and archive was not found: $PAUSE_ARCHIVE"
-  ctr_k8s images import "$PAUSE_ARCHIVE"
-  images="$(ctr_k8s images list -q)"
-  grep -Fxq "$PAUSE_IMAGE" <<<"$images" \
-    || die "sandbox image import did not create exact tag: $PAUSE_IMAGE"
-  echo "K8S_PAUSE_IMAGE_IMPORTED image=$PAUSE_IMAGE archive=$PAUSE_ARCHIVE"
+  import_log="$OUTPUT_DIR/pause-image-import.log"
+  for archive in "$PAUSE_ARCHIVE" "$PAUSE_FALLBACK_ARCHIVE"; do
+    [[ -f "$archive" ]] || continue
+    echo "Trying sandbox archive: $archive"
+
+    if ctr_k8s images import "$archive" >"$import_log" 2>&1; then
+      cat "$import_log"
+    else
+      echo "WARN: direct ctr import failed for $archive" >&2
+      cat "$import_log" >&2
+      if docker load -i "$archive" >>"$import_log" 2>&1 && \
+          docker image inspect "$PAUSE_IMAGE" >/dev/null 2>&1 && \
+          docker save "$PAUSE_IMAGE" | ctr_k8s images import - >>"$import_log" 2>&1; then
+        echo "Repacked sandbox image through Docker: $archive"
+      else
+        echo "WARN: Docker repack failed for $archive" >&2
+        tail -80 "$import_log" >&2
+        continue
+      fi
+    fi
+
+    if ctr_k8s_has_image "$PAUSE_IMAGE"; then
+      echo "K8S_PAUSE_IMAGE_IMPORTED image=$PAUSE_IMAGE archive=$archive"
+      return
+    fi
+    echo "WARN: archive did not create exact sandbox tag: $archive" >&2
+  done
+
+  die "sandbox image $PAUSE_IMAGE is missing; neither $PAUSE_ARCHIVE nor $PAUSE_FALLBACK_ARCHIVE produced the required tag (log: $import_log)"
 }
 
 ready_pod() {
