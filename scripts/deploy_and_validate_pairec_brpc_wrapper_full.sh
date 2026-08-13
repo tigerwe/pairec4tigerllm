@@ -10,6 +10,7 @@ VECTOR_DEPLOYMENT="${VECTOR_DEPLOYMENT:-vector-recall-brpc}"
 RANK_DEPLOYMENT="${RANK_DEPLOYMENT:-deepfm-rank-brpc}"
 WRAPPER_ENDPOINT="${WRAPPER_ENDPOINT:-192.168.100.11:18103}"
 BURST_CONCURRENCY="${BURST_CONCURRENCY:-1}"
+WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
 REQUESTS="${REQUESTS:-3}"
 USER_ID="${USER_ID:-1}"
 SCENE_ID="${SCENE_ID:-home_feed}"
@@ -33,6 +34,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 [[ "$BURST_CONCURRENCY" = 1 ]] \
   || die "this first-stage script intentionally requires BURST_CONCURRENCY=1"
+[[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
 [[ "$REQUESTS" =~ ^[1-9][0-9]*$ ]] || die "REQUESTS must be positive"
 [[ "$SIZE" =~ ^[1-9][0-9]*$ ]] || die "SIZE must be positive"
 [[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
@@ -263,6 +265,30 @@ assert event["connected_sessions"]==1, event
 assert event["payload_bytes"]==102400, event
 PY
 
+if (( WARMUP_REQUESTS > 0 )); then
+  echo "== Warm up full-chain Wrapper instance: $WARMUP_REQUESTS requests (excluded) =="
+  mkdir -p "$OUTPUT_DIR/warmup"
+  for index in $(seq 1 "$WARMUP_REQUESTS"); do
+    response="$OUTPUT_DIR/warmup/response-${index}.json"
+    curl --noproxy '*' -fsS --connect-timeout 2 --max-time 10 \
+      "$PAIREC_URL" -H 'Content-Type: application/json' \
+      -d "{\"scene_id\":\"$SCENE_ID\",\"uid\":\"$USER_ID\",\"size\":$SIZE}" \
+      -o "$response"
+    python3 - "$response" "$SIZE" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1])); size=int(sys.argv[2]); items=data.get("items", [])
+assert data.get("code")==200, data
+assert len(items)==size and len({item["item_id"] for item in items})==size, data
+sources=[item.get("retrieve_id") for item in items]
+generative=sources.count("generative_recall")
+assert 1 <= generative <= min(2,size), data
+assert sources==["milvus_recall"]*(size-generative)+["generative_recall"]*generative, data
+print(f"warmup request_id={data['request_id']} generative={generative} vector={size-generative}")
+PY
+  done
+  echo "PAIREC_BRPC_WRAPPER_FULL_WARMUP_OK requests=$WARMUP_REQUESTS"
+fi
+
 for app in "$PAIREC_DEPLOYMENT" "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT" \
   "$VECTOR_DEPLOYMENT" "$RANK_DEPLOYMENT"; do
   pod_state "$app" >"$OUTPUT_DIR/${app}.before"
@@ -421,6 +447,7 @@ done
 echo "== Summary =="
 echo "classification=PAIREC_BRPC_WRAPPER_FULL_C1_OK"
 echo "endpoint=$PAIREC_URL"
+echo "warmup_requests=$WARMUP_REQUESTS"
 echo "requests=$REQUESTS"
 echo "output_dir=$OUTPUT_DIR"
 echo "PAIREC_BRPC_WRAPPER_FULL_C1_OK"
