@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NAMESPACE="${NAMESPACE:-pairec}"
+PAIREC_DEPLOYMENT="pairec-brpc-observed-wrapper"
+PAIREC_CONFIGMAP="pairec-config-brpc-observed-wrapper"
+WRAPPER_DEPLOYMENT="${WRAPPER_DEPLOYMENT:-brpc-burst-wrapper}"
+INFERENCE_DEPLOYMENT="${INFERENCE_DEPLOYMENT:-inference-brpc-trtllm}"
+VECTOR_DEPLOYMENT="${VECTOR_DEPLOYMENT:-vector-recall-brpc}"
+RANK_DEPLOYMENT="${RANK_DEPLOYMENT:-deepfm-rank-brpc}"
+WRAPPER_ENDPOINT="${WRAPPER_ENDPOINT:-192.168.100.11:18103}"
+BURST_CONCURRENCY="${BURST_CONCURRENCY:-1}"
+REQUESTS="${REQUESTS:-3}"
+USER_ID="${USER_ID:-1}"
+SCENE_ID="${SCENE_ID:-home_feed}"
+SIZE="${SIZE:-10}"
+DEEPFM_MODEL_ROLE="${DEEPFM_MODEL_ROLE:-engineering}"
+BUILD_PAIREC_IMAGE="${BUILD_PAIREC_IMAGE:-1}"
+IMPORT_PAIREC_IMAGE="${IMPORT_PAIREC_IMAGE:-1}"
+PAIREC_IMAGE="${PAIREC_IMAGE:-docker.io/library/pairec-server:k8s-arm64-brpc-v1}"
+CONFIG_TEMPLATE="${CONFIG_TEMPLATE:-configs/pairec_config.brpc_wrapper_full.json}"
+PAIREC_MANIFEST="${PAIREC_MANIFEST:-k8s/deployment-pairec-brpc-observed-wrapper.yaml}"
+OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-full/$(date +%Y%m%d-%H%M%S)}"
+ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-10m}"
+COMPLETION_TIMEOUT_SECONDS="${COMPLETION_TIMEOUT_SECONDS:-30}"
+SERVICE_READY_TIMEOUT_SECONDS="${SERVICE_READY_TIMEOUT_SECONDS:-60}"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+[[ "$BURST_CONCURRENCY" = 1 ]] \
+  || die "this first-stage script intentionally requires BURST_CONCURRENCY=1"
+[[ "$REQUESTS" =~ ^[1-9][0-9]*$ ]] || die "REQUESTS must be positive"
+[[ "$SIZE" =~ ^[1-9][0-9]*$ ]] || die "SIZE must be positive"
+[[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+  || die "SERVICE_READY_TIMEOUT_SECONDS must be positive"
+for flag in "$BUILD_PAIREC_IMAGE" "$IMPORT_PAIREC_IMAGE"; do
+  [[ "$flag" = 0 || "$flag" = 1 ]] || die "boolean flags must be 0 or 1"
+done
+for command in kubectl curl python3; do
+  command -v "$command" >/dev/null 2>&1 || die "missing command: $command"
+done
+if [[ "$BUILD_PAIREC_IMAGE" = 1 || "$IMPORT_PAIREC_IMAGE" = 1 ]]; then
+  command -v docker >/dev/null 2>&1 || die "missing command: docker"
+fi
+if [[ "$IMPORT_PAIREC_IMAGE" = 1 ]]; then
+  command -v ctr >/dev/null 2>&1 || die "missing command: ctr"
+fi
+test -f "$CONFIG_TEMPLATE" || die "missing config template: $CONFIG_TEMPLATE"
+test -f "$PAIREC_MANIFEST" || die "missing manifest: $PAIREC_MANIFEST"
+mkdir -p "$OUTPUT_DIR"
+
+ready_pod() {
+  local app="$1"
+  kubectl -n "$NAMESPACE" get pods -l "app=$app" -o json | python3 -c '
+import json, sys
+pods=[]
+for pod in json.load(sys.stdin).get("items", []):
+    status=pod.get("status", {})
+    containers=status.get("containerStatuses", [])
+    if (not pod.get("metadata", {}).get("deletionTimestamp") and
+            status.get("phase")=="Running" and containers and
+            all(item.get("ready") for item in containers)):
+        pods.append((pod["metadata"].get("creationTimestamp", ""), pod["metadata"]["name"]))
+if not pods:
+    raise SystemExit(f"no ready pod for app={sys.argv[1]}")
+print(max(pods)[1])
+' "$app"
+}
+
+pod_state() {
+  local app="$1" pod
+  pod="$(ready_pod "$app")"
+  kubectl -n "$NAMESPACE" get pod "$pod" -o json | python3 -c '
+import json, sys
+pod=json.load(sys.stdin)
+statuses=pod["status"].get("containerStatuses", [])
+print("pod=" + pod["metadata"]["name"])
+print("uid=" + pod["metadata"]["uid"])
+print("restarts=" + str(sum(item.get("restartCount", 0) for item in statuses)))
+'
+}
+
+for app in "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT" \
+  "$VECTOR_DEPLOYMENT" "$RANK_DEPLOYMENT"; do
+  ready_pod "$app" >/dev/null || die "dependency is not ready: $app"
+done
+
+WRAPPER_HOST="${WRAPPER_ENDPOINT%:*}"
+WRAPPER_PORT="${WRAPPER_ENDPOINT##*:}"
+VECTOR_IP="$(kubectl -n "$NAMESPACE" get service vector-recall-brpc -o jsonpath='{.spec.clusterIP}')"
+RANK_IP="$(kubectl -n "$NAMESPACE" get service deepfm-rank-brpc -o jsonpath='{.spec.clusterIP}')"
+[[ -n "$WRAPPER_HOST" && -n "$WRAPPER_PORT" && -n "$VECTOR_IP" && -n "$RANK_IP" ]] \
+  || die "dependency endpoint is empty"
+
+echo "== Full-chain BRPC Wrapper configuration =="
+echo "wrapper_endpoint=$WRAPPER_ENDPOINT burst_concurrency=$BURST_CONCURRENCY"
+echo "vector_endpoint=${VECTOR_IP}:18201 rank_endpoint=${RANK_IP}:18211"
+echo "deployment=$PAIREC_DEPLOYMENT output_dir=$OUTPUT_DIR"
+
+if [[ "$BUILD_PAIREC_IMAGE" = 1 ]]; then
+  echo "== Build PaiRec binary image =="
+  bash scripts/build_pairec_binary_image.sh "$PAIREC_IMAGE"
+fi
+if [[ "$IMPORT_PAIREC_IMAGE" = 1 ]]; then
+  echo "== Import PaiRec image into k8s.io containerd =="
+  docker image inspect "$PAIREC_IMAGE" >/dev/null || die "missing image: $PAIREC_IMAGE"
+  docker save "$PAIREC_IMAGE" | ctr -n k8s.io images import -
+fi
+
+echo "== Render strict full-chain configuration =="
+python3 - "$CONFIG_TEMPLATE" "$OUTPUT_DIR/pairec_config.json" \
+  "$WRAPPER_ENDPOINT" "$BURST_CONCURRENCY" "${VECTOR_IP}:18201" \
+  "${RANK_IP}:18211" "$DEEPFM_MODEL_ROLE" <<'PY'
+import json, pathlib, sys
+source, target, wrapper, concurrency, vector, rank, role = sys.argv[1:]
+text=pathlib.Path(source).read_text()
+for old,new in {
+    "__WRAPPER_ENDPOINT__": wrapper,
+    "__BURST_CONCURRENCY__": concurrency,
+    "__VECTOR_ENDPOINT__": vector,
+    "__RANK_ENDPOINT__": rank,
+    "__DEEPFM_MODEL_ROLE__": role,
+}.items():
+    text=text.replace(old,new)
+assert "__" not in text
+config=json.loads(text)
+recalls={item["Name"]:json.loads(item["RecallAlgo"]) for item in config["RecallConfs"]}
+gen=recalls["generative_recall"]
+assert gen["protocol"]=="brpc" and gen["brpc_endpoint"]==wrapper
+assert gen["brpc_fallback_to_http"] is False and gen["max_retries"]==0
+assert gen["brpc_burst_enabled"] is True
+assert gen["brpc_burst_concurrency"]==int(concurrency)==1
+assert gen["brpc_burst_preconnect"] is True
+assert gen["brpc_burst_payload_bytes"]==102400
+assert recalls["milvus_recall"]["brpc_endpoint"]==vector
+assert config["UserDefineConfs"]["DeepFMRankSorts"][0]["brpc_endpoint"]==rank
+rerank=config["UserDefineConfs"]["RerankConfs"][0]
+assert rerank["fail_closed"] is True and rerank["minimum_generative"]==1
+pathlib.Path(target).write_text(json.dumps(config, indent=2)+"\n")
+print("PAIREC_BRPC_WRAPPER_FULL_CONFIG_OK")
+PY
+kubectl -n "$NAMESPACE" create configmap "$PAIREC_CONFIGMAP" \
+  --from-file="pairec_config.json=$OUTPUT_DIR/pairec_config.json" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+python3 - "$PAIREC_MANIFEST" "$OUTPUT_DIR/pairec.yaml" \
+  "$WRAPPER_HOST" "$WRAPPER_PORT" "$VECTOR_IP" "$RANK_IP" <<'PY'
+import pathlib, sys
+source,target,wrapper_host,wrapper_port,vector_host,rank_host=sys.argv[1:]
+text=pathlib.Path(source).read_text()
+for old,new in {
+    "__WRAPPER_HOST__":wrapper_host, "__WRAPPER_PORT__":wrapper_port,
+    "__VECTOR_HOST__":vector_host, "__RANK_HOST__":rank_host,
+}.items():
+    text=text.replace(old,new)
+assert "__" not in text
+pathlib.Path(target).write_text(text)
+PY
+
+echo "== Deploy isolated full-chain Wrapper instance =="
+kubectl apply -f "$OUTPUT_DIR/pairec.yaml"
+kubectl -n "$NAMESPACE" set image "deployment/$PAIREC_DEPLOYMENT" "pairec=$PAIREC_IMAGE"
+kubectl -n "$NAMESPACE" rollout restart "deployment/$PAIREC_DEPLOYMENT"
+kubectl -n "$NAMESPACE" rollout status "deployment/$PAIREC_DEPLOYMENT" --timeout="$ROLLOUT_TIMEOUT"
+
+PAIREC_POD="$(ready_pod "$PAIREC_DEPLOYMENT")"
+WRAPPER_POD="$(ready_pod "$WRAPPER_DEPLOYMENT")"
+INFERENCE_POD="$(ready_pod "$INFERENCE_DEPLOYMENT")"
+SERVICE_IP="$(kubectl -n "$NAMESPACE" get service "$PAIREC_DEPLOYMENT" -o jsonpath='{.spec.clusterIP}')"
+[[ -n "$SERVICE_IP" && "$SERVICE_IP" != None ]] || die "PaiRec service has no ClusterIP"
+PAIREC_URL="http://${SERVICE_IP}:18080/api/recommend"
+
+echo "== Wait for isolated PaiRec Service endpoint =="
+service_deadline=$((SECONDS + SERVICE_READY_TIMEOUT_SECONDS))
+while true; do
+  ready_addresses="$(kubectl -n "$NAMESPACE" get endpoints "$PAIREC_DEPLOYMENT" \
+    -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}' 2>/dev/null || true)"
+  if [[ -n "$ready_addresses" ]] && \
+      curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 \
+        "http://${SERVICE_IP}:18080/ping" | grep -q success; then
+    break
+  fi
+  (( SECONDS < service_deadline )) \
+    || die "service/$PAIREC_DEPLOYMENT did not become reachable"
+  sleep 1
+done
+echo "PAIREC_BRPC_WRAPPER_FULL_SERVICE_READY endpoint=${SERVICE_IP}:18080"
+
+echo "== Verify preconnected c1 session =="
+ready_line="$(kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec \
+  | grep -F '"event":"pairec_brpc_burst_ready"' | tail -1 || true)"
+[[ -n "$ready_line" ]] || die "pairec_brpc_burst_ready is missing"
+python3 - "$ready_line" <<'PY'
+import json, sys
+event=json.loads(sys.argv[1][sys.argv[1].index("{"):])
+assert event["concurrency"]==1, event
+assert event["connected_sessions"]==1, event
+assert event["payload_bytes"]==102400, event
+PY
+
+for app in "$PAIREC_DEPLOYMENT" "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT" \
+  "$VECTOR_DEPLOYMENT" "$RANK_DEPLOYMENT"; do
+  pod_state "$app" >"$OUTPUT_DIR/${app}.before"
+done
+
+echo "== Run strict full-chain c1 smoke: $REQUESTS requests =="
+STARTED_AT="$(date --iso-8601=seconds)"
+printf 'index\te2e_ms\trequest_id\n' >"$OUTPUT_DIR/requests.tsv"
+for index in $(seq 1 "$REQUESTS"); do
+  response="$OUTPUT_DIR/response-${index}.json"
+  seconds="$(curl --noproxy '*' -sS --connect-timeout 2 --max-time 10 \
+    "$PAIREC_URL" -H 'Content-Type: application/json' \
+    -d "{\"scene_id\":\"$SCENE_ID\",\"uid\":\"$USER_ID\",\"size\":$SIZE}" \
+    -o "$response" -w '%{time_total}')"
+  request_id="$(python3 - "$response" "$SIZE" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1])); size=int(sys.argv[2]); items=data.get("items", [])
+assert data.get("code")==200, data
+assert len(items)==size and len({item["item_id"] for item in items})==size, data
+sources=[item.get("retrieve_id") for item in items]
+generative=sources.count("generative_recall")
+assert 1 <= generative <= min(2,size), data
+assert sources==["milvus_recall"]*(size-generative)+["generative_recall"]*generative, data
+print(data["request_id"])
+PY
+)"
+  e2e_ms="$(python3 -c 'import sys; print(round(float(sys.argv[1])*1000,3))' "$seconds")"
+  printf '%s\t%s\t%s\n' "$index" "$e2e_ms" "$request_id" | tee -a "$OUTPUT_DIR/requests.tsv"
+done
+
+deadline=$((SECONDS + COMPLETION_TIMEOUT_SECONDS))
+while true; do
+  kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec --since-time="$STARTED_AT" \
+    >"$OUTPUT_DIR/pairec.log"
+  kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper --since-time="$STARTED_AT" \
+    >"$OUTPUT_DIR/wrapper.log"
+  kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference --since-time="$STARTED_AT" \
+    >"$OUTPUT_DIR/inference.log"
+  if python3 - "$OUTPUT_DIR/requests.tsv" "$OUTPUT_DIR/pairec.log" \
+      "$OUTPUT_DIR/inference.log" <<'PY'
+import csv,json,pathlib,sys
+ids={row["request_id"] for row in csv.DictReader(open(sys.argv[1]),delimiter="\t")}
+def events(path):
+ out=[]
+ for line in pathlib.Path(path).read_text(errors="replace").splitlines():
+  pos=line.find("{")
+  if pos<0: continue
+  try: out.append(json.loads(line[pos:]))
+  except json.JSONDecodeError: pass
+ return out
+p=events(sys.argv[2]); i=events(sys.argv[3])
+for rid in ids:
+ for name in ("pairec_brpc_burst_start","pairec_brpc_burst_business_complete",
+              "pairec_brpc_burst_complete","pipeline_trace_complete",
+              "deepfm_rank_complete","source_quota_rerank_complete"):
+  assert sum(e.get("event")==name and e.get("request_id")==rid for e in p)==1
+ assert sum(e.get("event")=="datasystem_request_complete" and e.get("request_id")==rid for e in i)==1
+ assert sum(e.get("event")=="trt_executor_request_complete" and e.get("request_id")==rid for e in i)==1
+PY
+  then break; fi
+  (( SECONDS < deadline )) || die "timed out waiting for request-level completion events"
+  sleep 1
+done
+
+echo "== Validate request-id contracts and latency evidence =="
+python3 - "$OUTPUT_DIR/requests.tsv" "$OUTPUT_DIR/pairec.log" \
+  "$OUTPUT_DIR/wrapper.log" "$OUTPUT_DIR/inference.log" "$OUTPUT_DIR/summary.json" <<'PY'
+import csv,json,pathlib,re,statistics,sys
+requests_path,pairec_path,wrapper_path,inference_path,output=sys.argv[1:]
+rows=list(csv.DictReader(open(requests_path),delimiter="\t"))
+ids=[row["request_id"] for row in rows]
+def json_events(path):
+ out=[]
+ for line in pathlib.Path(path).read_text(errors="replace").splitlines():
+  pos=line.find("{")
+  if pos<0: continue
+  try: out.append(json.loads(line[pos:]))
+  except json.JSONDecodeError: pass
+ return out
+p=json_events(pairec_path); native=json_events(inference_path)
+wrapper_text=pathlib.Path(wrapper_path).read_text(errors="replace")
+samples=[]
+rank_reordered_count=0
+for row in rows:
+ rid=row["request_id"]
+ by_name={}
+ for event in p:
+  if event.get("request_id")==rid: by_name.setdefault(event.get("event"),[]).append(event)
+ def one(name):
+  values=by_name.get(name,[]); assert len(values)==1,(rid,name,values); return values[0]
+ start=one("pairec_brpc_burst_start")
+ business=one("pairec_brpc_burst_business_complete")
+ complete=one("pairec_brpc_burst_complete")
+ pipeline=one("pipeline_trace_complete")
+ rank=one("deepfm_rank_complete")
+ rerank=one("source_quota_rerank_complete")
+ assert start["concurrency"]==start["connected_sessions"]==1,start
+ assert complete["armed_workers"]==1 and complete["pressure_requests"]==0,complete
+ assert complete["pressure_success"]==complete["pressure_errors"]==0,complete
+ assert business["business_success"] and business["trace_valid"],business
+ assert complete["business_success"] and complete["trace_valid"] and complete["burst_valid"],complete
+ assert business["wrapper_total_ms"]>0 and business["wrapper_backend_rpc_ms"]>0,business
+ assert pipeline["status"]=="ok" and pipeline["valid"] is True,pipeline
+ spans={span["name"]:span for span in pipeline["spans"]}
+ for name in ("generative_recall","vector_recall","deepfm_rank"):
+  assert spans[name]["protocol"]=="brpc" and spans[name]["status"]=="ok",spans[name]
+ assert spans["rerank"]["status"]=="ok",spans["rerank"]
+ assert rank["candidate_count"]==50 and rank["service_total_ms"]>0,rank
+ rank_reordered_count += int(rank["reordered"] is True)
+ assert rerank["status"]=="ok" and rerank["generative_selected"]>=1,rerank
+ wrapper_lines=[line for line in wrapper_text.splitlines()
+                if "[brpc-burst-wrapper] method=Recommend" in line and f"request_id={rid}" in line]
+ assert len(wrapper_lines)==1,(rid,wrapper_lines)
+ assert " code=200 " in wrapper_lines[0],wrapper_lines[0]
+ ds=[e for e in native if e.get("event")=="datasystem_request_complete" and e.get("request_id")==rid]
+ executor=[e for e in native if e.get("event")=="trt_executor_request_complete" and e.get("request_id")==rid]
+ assert len(ds)==len(executor)==1,(rid,ds,executor)
+ ds=ds[0]; executor=executor[0]
+ assert ds.get("attribution_complete") is True and ds.get("phase_timing_complete") is True,ds
+ for field in ("get_failed_count","set_failed_count","pending_count","unknown_count","phase_unknown_count"):
+  assert int(ds.get(field,-1))==0,(field,ds)
+ assert int(ds["native_closure_error_us"])<=100,ds
+ assert int(executor["gateway_closure_error_us"])<=100,executor
+ samples.append({
+  "request_id":rid,"client_e2e_ms":float(row["e2e_ms"]),
+  "front_brpc_ms":business["business_front_brpc_ms"],
+  "wrapper_total_ms":business["wrapper_total_ms"],
+  "wrapper_backend_rpc_ms":business["wrapper_backend_rpc_ms"],
+  "runner_ms":business["business_runner_generate_ms"],
+  "datasystem_get_count":ds["get_count"],"datasystem_get_ms":ds["get_us"]/1000,
+  "datasystem_set_count":ds["set_count"],"datasystem_set_ms":ds["set_us"]/1000,
+ })
+assert rank_reordered_count>0,"DeepFM did not reorder any smoke request"
+summary={"classification":"PAIREC_BRPC_WRAPPER_FULL_C1_OK",
+         "rank_reordered_count":rank_reordered_count,"samples":samples}
+pathlib.Path(output).write_text(json.dumps(summary,indent=2)+"\n")
+print("request e2e_ms front_brpc_ms wrapper_ms backend_rpc_ms runner_ms ds_get ds_set")
+for s in samples:
+ print(s["request_id"],s["client_e2e_ms"],round(s["front_brpc_ms"],3),
+       round(s["wrapper_total_ms"],3),round(s["wrapper_backend_rpc_ms"],3),
+       round(s["runner_ms"],3),s["datasystem_get_count"],s["datasystem_set_count"])
+print(f"avg_e2e_ms={statistics.fmean(s['client_e2e_ms'] for s in samples):.3f}")
+PY
+
+if grep -Eqi 'fallback to HTTP|fallback_to_http[^a-zA-Z0-9]+true|brpc request failed|Segmentation|core dumped|Out of memory' \
+    "$OUTPUT_DIR/pairec.log" "$OUTPUT_DIR/wrapper.log" "$OUTPUT_DIR/inference.log"; then
+  die "fallback, BRPC failure, or crash marker detected"
+fi
+for app in "$PAIREC_DEPLOYMENT" "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT" \
+  "$VECTOR_DEPLOYMENT" "$RANK_DEPLOYMENT"; do
+  pod_state "$app" >"$OUTPUT_DIR/${app}.after"
+  cmp -s "$OUTPUT_DIR/${app}.before" "$OUTPUT_DIR/${app}.after" \
+    || die "pod identity or restart count changed: $app"
+done
+
+echo "== Summary =="
+echo "classification=PAIREC_BRPC_WRAPPER_FULL_C1_OK"
+echo "endpoint=$PAIREC_URL"
+echo "requests=$REQUESTS"
+echo "output_dir=$OUTPUT_DIR"
+echo "PAIREC_BRPC_WRAPPER_FULL_C1_OK"
