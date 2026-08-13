@@ -736,3 +736,5 @@ seed；批量化需要先验证候选多样性，不能直接替换串行循环�
 5. TensorRT-LLM runtime 恢复 KV 配置参数化，确保两组使用相同 primary / secondary block 数
 6. 基于同一份 engine 构建原生 pinned DRAM baseline，与当前 DataSystem runtime 对照
 7. 后续独立优化 fallback JSON 启动预加载
+> 2026-08-13 F14 BRPC Wrapper stability 验收口径纠正并获得100样本结论：用户确认runner p99应尽量不增长，硬容忍上限为c1000相对c1增量`<=10ms`；用户未要求front BRPC p99 `<=10ms`，该指标改为只观测、不阻断。100样本中100/100业务和99900个Health成功、无CPU throttling，但runner p99从`104.297ms`升至`128.214ms`，增量=`23.917ms`，因此本轮仍按真实runner门禁失败；front BRPC p99=`50.321ms`、start skew p99=`55.157ms`作为定位证据。下一步先定位并消除runner干扰，不进入formal 1000样本。
+> 2026-08-13 F14 runner干扰三组定位脚本完成，待master远端执行：不改连接池业务实现，新增`diagnose_pairec_brpc_wrapper_runner_interference.sh`，依次运行`idle_pool=10000池/1活跃/0 payload`、`rpc_only=10000池/1000活跃/0 payload`、`payload_100k=10000池/1000活跃/100KB payload`三组，各组正式采样前必须由ready事件确认`connected_sessions=pool_size=10000`，再预热并采样。汇总将runner p99总增量拆成纯RPC调度增量和100KB payload附加增量，front BRPC/start skew仅作定位；runner硬门禁仍为相对基线`<=10ms`且理想不增长。full-chain脚本新增可配置`BURST_PAYLOAD_BYTES`及`PAIREC_BRPC_WRAPPER_PRECONNECTED_OK`硬证据，默认行为仍为100KB。Shell、JSON、9段内嵌Python和diff检查通过。下一步master执行100样本诊断，据dominant factor决定优化调度还是预编码/内存复制路径。

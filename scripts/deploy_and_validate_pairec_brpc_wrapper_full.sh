@@ -13,6 +13,7 @@ BURST_CONCURRENCY="${BURST_CONCURRENCY:-1}"
 BURST_POOL_SIZE="${BURST_POOL_SIZE:-$BURST_CONCURRENCY}"
 BURST_ACTIVE_CONNECTIONS="${BURST_ACTIVE_CONNECTIONS:-$BURST_CONCURRENCY}"
 BURST_CPU_SHARDS="${BURST_CPU_SHARDS:-[]}"
+BURST_PAYLOAD_BYTES="${BURST_PAYLOAD_BYTES:-102400}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
 REQUESTS="${REQUESTS:-3}"
 USER_ID="${USER_ID:-1}"
@@ -44,6 +45,8 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 [[ "$BURST_ACTIVE_CONNECTIONS" =~ ^[1-9][0-9]*$ ]] && \
   (( BURST_ACTIVE_CONNECTIONS <= 1000 && BURST_ACTIVE_CONNECTIONS <= BURST_POOL_SIZE )) \
   || die "BURST_ACTIVE_CONNECTIONS must be in [1,min(1000,pool_size)]"
+[[ "$BURST_PAYLOAD_BYTES" =~ ^[0-9]+$ ]] && (( BURST_PAYLOAD_BYTES <= 1048576 )) \
+  || die "BURST_PAYLOAD_BYTES must be in [0,1048576]"
 python3 -c 'import json,sys; value=json.loads(sys.argv[1]); assert isinstance(value,list); assert all(isinstance(x,int) and x>=0 for x in value); assert len(value)==len(set(value))' \
   "$BURST_CPU_SHARDS" || die "BURST_CPU_SHARDS must be a JSON array of unique non-negative CPU IDs"
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
@@ -176,7 +179,7 @@ RANK_IP="$(kubectl -n "$NAMESPACE" get service deepfm-rank-brpc -o jsonpath='{.s
   || die "dependency endpoint is empty"
 
 echo "== Full-chain BRPC Wrapper configuration =="
-echo "wrapper_endpoint=$WRAPPER_ENDPOINT burst_concurrency=$BURST_CONCURRENCY pool_size=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS cpu_shards=$BURST_CPU_SHARDS"
+echo "wrapper_endpoint=$WRAPPER_ENDPOINT burst_concurrency=$BURST_CONCURRENCY pool_size=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS cpu_shards=$BURST_CPU_SHARDS payload_bytes=$BURST_PAYLOAD_BYTES"
 echo "vector_endpoint=${VECTOR_IP}:18201 rank_endpoint=${RANK_IP}:18211"
 echo "deployment=$PAIREC_DEPLOYMENT output_dir=$OUTPUT_DIR"
 
@@ -194,9 +197,9 @@ echo "== Render strict full-chain configuration =="
 python3 - "$CONFIG_TEMPLATE" "$OUTPUT_DIR/pairec_config.json" \
   "$WRAPPER_ENDPOINT" "$BURST_CONCURRENCY" "${VECTOR_IP}:18201" \
   "${RANK_IP}:18211" "$DEEPFM_MODEL_ROLE" "$BURST_POOL_SIZE" \
-  "$BURST_ACTIVE_CONNECTIONS" "$BURST_CPU_SHARDS" <<'PY'
+  "$BURST_ACTIVE_CONNECTIONS" "$BURST_CPU_SHARDS" "$BURST_PAYLOAD_BYTES" <<'PY'
 import json, pathlib, sys
-source,target,wrapper,concurrency,vector,rank,role,pool,active,cpu_shards=sys.argv[1:]
+source,target,wrapper,concurrency,vector,rank,role,pool,active,cpu_shards,payload_bytes=sys.argv[1:]
 text=pathlib.Path(source).read_text()
 for old,new in {
     "__WRAPPER_ENDPOINT__": wrapper,
@@ -207,6 +210,7 @@ for old,new in {
     "__BURST_POOL_SIZE__": pool,
     "__BURST_ACTIVE_CONNECTIONS__": active,
     "__BURST_CPU_SHARDS__": cpu_shards,
+    "__BURST_PAYLOAD_BYTES__": payload_bytes,
 }.items():
     text=text.replace(old,new)
 assert "__" not in text
@@ -222,7 +226,7 @@ assert gen["brpc_burst_pool_size"]==int(pool)
 assert gen["brpc_burst_active_connections"]==int(active)
 assert gen["brpc_burst_cpu_shards"]==json.loads(cpu_shards)
 assert gen["brpc_burst_preconnect"] is True
-assert gen["brpc_burst_payload_bytes"]==102400
+assert gen["brpc_burst_payload_bytes"]==int(payload_bytes)
 assert recalls["milvus_recall"]["brpc_endpoint"]==vector
 assert config["UserDefineConfs"]["DeepFMRankSorts"][0]["brpc_endpoint"]==rank
 rerank=config["UserDefineConfs"]["RerankConfs"][0]
@@ -281,17 +285,19 @@ echo "== Verify preconnected c${BURST_CONCURRENCY} sessions =="
 ready_line="$(kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec \
   | grep -F '"event":"pairec_brpc_burst_ready"' | tail -1 || true)"
 [[ -n "$ready_line" ]] || die "pairec_brpc_burst_ready is missing"
-python3 - "$ready_line" "$BURST_ACTIVE_CONNECTIONS" "$BURST_POOL_SIZE" <<'PY'
+python3 - "$ready_line" "$BURST_ACTIVE_CONNECTIONS" "$BURST_POOL_SIZE" \
+  "$BURST_PAYLOAD_BYTES" <<'PY'
 import json, sys
 event=json.loads(sys.argv[1][sys.argv[1].index("{"):])
 expected=int(sys.argv[2])
 assert event["concurrency"]==expected, event
 assert event["active_connections"]==expected, event
 assert event["connected_sessions"]==event["pool_size"]==int(sys.argv[3]), event
-assert event["payload_bytes"]==102400, event
+assert event["payload_bytes"]==int(sys.argv[4]), event
 connections=event["shard_connections"]
 assert max(connections)-min(connections)<=1,event
 PY
+echo "PAIREC_BRPC_WRAPPER_PRECONNECTED_OK connected_sessions=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS payload_bytes=$BURST_PAYLOAD_BYTES"
 
 if (( WARMUP_REQUESTS > 0 )); then
   echo "== Warm up full-chain Wrapper instance: $WARMUP_REQUESTS requests (excluded) =="
