@@ -75,5 +75,5 @@ spec:
       volumes:
         - name: brpc-burst-wrapper-bin
           hostPath:
-            path: /home/zcx/bin/brpc_burst_wrapper
+            path: /home/zcx/bin/brpc_burst_wrapper_master_diag
             type: File
