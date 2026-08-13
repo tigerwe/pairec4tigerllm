@@ -18,6 +18,9 @@ DEEPFM_MODEL_ROLE="${DEEPFM_MODEL_ROLE:-engineering}"
 BUILD_PAIREC_IMAGE="${BUILD_PAIREC_IMAGE:-1}"
 IMPORT_PAIREC_IMAGE="${IMPORT_PAIREC_IMAGE:-1}"
 PAIREC_IMAGE="${PAIREC_IMAGE:-docker.io/library/pairec-server:k8s-arm64-brpc-v1}"
+ENSURE_PAUSE_IMAGE="${ENSURE_PAUSE_IMAGE:-1}"
+PAUSE_IMAGE="${PAUSE_IMAGE:-docker.io/library/pause-aarch64:3.8}"
+PAUSE_ARCHIVE="${PAUSE_ARCHIVE:-/home/zcx/pause-aarch64-3.8.tar}"
 CONFIG_TEMPLATE="${CONFIG_TEMPLATE:-configs/pairec_config.brpc_wrapper_full.json}"
 PAIREC_MANIFEST="${PAIREC_MANIFEST:-k8s/deployment-pairec-brpc-observed-wrapper.yaml}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-full/$(date +%Y%m%d-%H%M%S)}"
@@ -33,7 +36,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 [[ "$SIZE" =~ ^[1-9][0-9]*$ ]] || die "SIZE must be positive"
 [[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
   || die "SERVICE_READY_TIMEOUT_SECONDS must be positive"
-for flag in "$BUILD_PAIREC_IMAGE" "$IMPORT_PAIREC_IMAGE"; do
+for flag in "$BUILD_PAIREC_IMAGE" "$IMPORT_PAIREC_IMAGE" "$ENSURE_PAUSE_IMAGE"; do
   [[ "$flag" = 0 || "$flag" = 1 ]] || die "boolean flags must be 0 or 1"
 done
 for command in kubectl curl python3; do
@@ -42,12 +45,41 @@ done
 if [[ "$BUILD_PAIREC_IMAGE" = 1 || "$IMPORT_PAIREC_IMAGE" = 1 ]]; then
   command -v docker >/dev/null 2>&1 || die "missing command: docker"
 fi
-if [[ "$IMPORT_PAIREC_IMAGE" = 1 ]]; then
+if [[ "$IMPORT_PAIREC_IMAGE" = 1 || "$ENSURE_PAUSE_IMAGE" = 1 ]]; then
   command -v ctr >/dev/null 2>&1 || die "missing command: ctr"
 fi
 test -f "$CONFIG_TEMPLATE" || die "missing config template: $CONFIG_TEMPLATE"
 test -f "$PAIREC_MANIFEST" || die "missing manifest: $PAIREC_MANIFEST"
 mkdir -p "$OUTPUT_DIR"
+
+ctr_k8s() {
+  if (( EUID == 0 )); then
+    ctr -n k8s.io "$@"
+    return
+  fi
+  command -v sudo >/dev/null 2>&1 || die "ctr requires root and sudo is unavailable"
+  sudo -n ctr -n k8s.io "$@"
+}
+
+ensure_pause_image() {
+  [[ "$ENSURE_PAUSE_IMAGE" = 1 ]] || return
+  local images
+
+  echo "== Ensure Kubernetes sandbox image in k8s.io containerd =="
+  images="$(ctr_k8s images list -q)"
+  if grep -Fxq "$PAUSE_IMAGE" <<<"$images"; then
+    echo "K8S_PAUSE_IMAGE_PRESENT image=$PAUSE_IMAGE"
+    return
+  fi
+
+  test -f "$PAUSE_ARCHIVE" \
+    || die "sandbox image is missing and archive was not found: $PAUSE_ARCHIVE"
+  ctr_k8s images import "$PAUSE_ARCHIVE"
+  images="$(ctr_k8s images list -q)"
+  grep -Fxq "$PAUSE_IMAGE" <<<"$images" \
+    || die "sandbox image import did not create exact tag: $PAUSE_IMAGE"
+  echo "K8S_PAUSE_IMAGE_IMPORTED image=$PAUSE_IMAGE archive=$PAUSE_ARCHIVE"
+}
 
 ready_pod() {
   local app="$1"
@@ -80,6 +112,10 @@ print("restarts=" + str(sum(item.get("restartCount", 0) for item in statuses)))
 '
 }
 
+# Repair CRI before inspecting dependencies: an existing dependency may also be
+# waiting for a sandbox when this script is used to recover the cluster.
+ensure_pause_image
+
 for app in "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT" \
   "$VECTOR_DEPLOYMENT" "$RANK_DEPLOYMENT"; do
   ready_pod "$app" >/dev/null || die "dependency is not ready: $app"
@@ -104,7 +140,7 @@ fi
 if [[ "$IMPORT_PAIREC_IMAGE" = 1 ]]; then
   echo "== Import PaiRec image into k8s.io containerd =="
   docker image inspect "$PAIREC_IMAGE" >/dev/null || die "missing image: $PAIREC_IMAGE"
-  docker save "$PAIREC_IMAGE" | ctr -n k8s.io images import -
+  docker save "$PAIREC_IMAGE" | ctr_k8s images import -
 fi
 
 echo "== Render strict full-chain configuration =="
