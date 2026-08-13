@@ -15,6 +15,7 @@ BURST_ACTIVE_CONNECTIONS="${BURST_ACTIVE_CONNECTIONS:-$BURST_CONCURRENCY}"
 BURST_CPU_SHARDS="${BURST_CPU_SHARDS:-[]}"
 BURST_PAYLOAD_BYTES="${BURST_PAYLOAD_BYTES:-102400}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
+QUALIFICATION_REQUESTS="${QUALIFICATION_REQUESTS:-0}"
 REQUESTS="${REQUESTS:-3}"
 USER_ID="${USER_ID:-1}"
 SCENE_ID="${SCENE_ID:-home_feed}"
@@ -50,6 +51,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 python3 -c 'import json,sys; value=json.loads(sys.argv[1]); assert isinstance(value,list); assert all(isinstance(x,int) and x>=0 for x in value); assert len(value)==len(set(value))' \
   "$BURST_CPU_SHARDS" || die "BURST_CPU_SHARDS must be a JSON array of unique non-negative CPU IDs"
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
+[[ "$QUALIFICATION_REQUESTS" =~ ^[0-9]+$ ]] || die "QUALIFICATION_REQUESTS must be non-negative"
 [[ "$REQUESTS" =~ ^[1-9][0-9]*$ ]] || die "REQUESTS must be positive"
 [[ "$SIZE" =~ ^[1-9][0-9]*$ ]] || die "SIZE must be positive"
 [[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
@@ -298,6 +300,29 @@ connections=event["shard_connections"]
 assert max(connections)-min(connections)<=1,event
 PY
 echo "PAIREC_BRPC_WRAPPER_PRECONNECTED_OK connected_sessions=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS payload_bytes=$BURST_PAYLOAD_BYTES"
+
+if (( QUALIFICATION_REQUESTS > 0 )); then
+  echo "== Qualify deterministic workload user before measurement: $QUALIFICATION_REQUESTS requests =="
+  mkdir -p "$OUTPUT_DIR/qualification"
+  for index in $(seq 1 "$QUALIFICATION_REQUESTS"); do
+    response="$OUTPUT_DIR/qualification/response-${index}.json"
+    curl --noproxy '*' -fsS --connect-timeout 2 --max-time 10 \
+      "$PAIREC_URL" -H 'Content-Type: application/json' \
+      -d "{\"scene_id\":\"$SCENE_ID\",\"uid\":\"$USER_ID\",\"size\":$SIZE}" \
+      -o "$response"
+    python3 - "$response" "$SIZE" <<'PY'
+import json,sys
+data=json.load(open(sys.argv[1])); size=int(sys.argv[2]); items=data.get("items",[])
+assert data.get("code")==200,data
+assert len(items)==size and len({item["item_id"] for item in items})==size,data
+sources=[item.get("retrieve_id") for item in items]
+generative=sources.count("generative_recall")
+assert 1<=generative<=min(2,size),data
+assert sources==["milvus_recall"]*(size-generative)+["generative_recall"]*generative,data
+PY
+  done
+  echo "PAIREC_BRPC_WRAPPER_WORKLOAD_QUALIFIED user_id=$USER_ID requests=$QUALIFICATION_REQUESTS"
+fi
 
 if (( WARMUP_REQUESTS > 0 )); then
   echo "== Warm up full-chain Wrapper instance: $WARMUP_REQUESTS requests (excluded) =="

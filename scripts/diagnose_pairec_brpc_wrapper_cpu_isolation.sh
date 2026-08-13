@@ -11,6 +11,8 @@ WRAPPER_CPU_COUNT="${WRAPPER_CPU_COUNT:-32}"
 INFERENCE_CPUSET="${INFERENCE_CPUSET:-}"
 WRAPPER_CPUSET="${WRAPPER_CPUSET:-}"
 REQUESTS="${REQUESTS:-100}"
+QUALIFICATION_REQUESTS="${QUALIFICATION_REQUESTS:-10}"
+USER_ID="${USER_ID:-6312}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-cpu-isolation/$(date +%Y%m%d-%H%M%S)-n${REQUESTS}}"
 BASELINE_SUMMARY="${BASELINE_SUMMARY:-}"
 
@@ -133,10 +135,12 @@ restore_affinity() {
   if [[ "$RESTORED" = 0 ]]; then
     echo "== Restore original CPU affinity =="
     if [[ "$(ready_pod "$WRAPPER_APP" 2>/dev/null || true)" = "$WRAPPER_POD" ]]; then
-      set_affinity "$WRAPPER_POD" "$WRAPPER_CONTAINER" "$WRAPPER_ORIGINAL_CPUSET" || true
+      set_affinity "$WRAPPER_POD" "$WRAPPER_CONTAINER" "$WRAPPER_ORIGINAL_CPUSET" \
+        >"$OUTPUT_DIR/wrapper-affinity-restore.log" 2>&1 || true
     fi
     if [[ "$(ready_pod "$INFERENCE_APP" 2>/dev/null || true)" = "$INFERENCE_POD" ]]; then
-      set_affinity "$INFERENCE_POD" "$INFERENCE_CONTAINER" "$INFERENCE_ORIGINAL_CPUSET" || true
+      set_affinity "$INFERENCE_POD" "$INFERENCE_CONTAINER" "$INFERENCE_ORIGINAL_CPUSET" \
+        >"$OUTPUT_DIR/inference-affinity-restore.log" 2>&1 || true
     fi
     RESTORED=1
   fi
@@ -149,7 +153,7 @@ cat <<EOF
 node=$WRAPPER_NODE
 wrapper_pod=$WRAPPER_POD original=$WRAPPER_ORIGINAL_CPUSET isolated=$WRAPPER_ISOLATED_CPUSET
 inference_pod=$INFERENCE_POD original=$INFERENCE_ORIGINAL_CPUSET isolated=$INFERENCE_ISOLATED_CPUSET
-requests=$REQUESTS output_dir=$OUTPUT_DIR
+requests=$REQUESTS qualification_requests=$QUALIFICATION_REQUESTS user_id=$USER_ID output_dir=$OUTPUT_DIR
 EOF
 
 echo "== Apply disjoint CPU affinity to all existing process threads =="
@@ -171,6 +175,8 @@ verify_all_threads_affinity "$WRAPPER_POD" "$WRAPPER_CONTAINER" \
 echo "BRPC_WRAPPER_TRT_CPU_ISOLATION_OK inference=$actual_inference wrapper=$actual_wrapper"
 
 REQUESTS="$REQUESTS" \
+QUALIFICATION_REQUESTS="$QUALIFICATION_REQUESTS" \
+USER_ID="$USER_ID" \
 OUTPUT_DIR="$OUTPUT_DIR/isolated" \
 BUILD_PAIREC_IMAGE=0 \
 IMPORT_PAIREC_IMAGE=0 \

@@ -4,6 +4,8 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-pairec}"
 REQUESTS="${REQUESTS:-100}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
+QUALIFICATION_REQUESTS="${QUALIFICATION_REQUESTS:-10}"
+USER_ID="${USER_ID:-6312}"
 POOL_SIZE="${POOL_SIZE:-10000}"
 ACTIVE_CONNECTIONS="${ACTIVE_CONNECTIONS:-1000}"
 PRESSURE_PAYLOAD_BYTES="${PRESSURE_PAYLOAD_BYTES:-102400}"
@@ -31,6 +33,8 @@ run_arm() {
   NAMESPACE="$NAMESPACE" \
   REQUESTS="$REQUESTS" \
   WARMUP_REQUESTS="$WARMUP_REQUESTS" \
+  QUALIFICATION_REQUESTS="$QUALIFICATION_REQUESTS" \
+  USER_ID="$USER_ID" \
   OUTPUT_DIR="$OUTPUT_DIR/$name" \
   BUILD_PAIREC_IMAGE="$build" \
   IMPORT_PAIREC_IMAGE="$import" \
@@ -38,7 +42,7 @@ run_arm() {
 }
 
 echo "== BRPC Wrapper runner interference diagnosis =="
-echo "requests=$REQUESTS pool_size=$POOL_SIZE cpu_shards=$BURST_CPU_SHARDS"
+echo "requests=$REQUESTS qualification_requests=$QUALIFICATION_REQUESTS user_id=$USER_ID pool_size=$POOL_SIZE cpu_shards=$BURST_CPU_SHARDS"
 echo "arms=idle_pool,rpc_only,payload_100k output_dir=$OUTPUT_DIR"
 
 # Every arm preconnects the same 10,000 sessions before warmup or measurement.
