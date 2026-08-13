@@ -25,20 +25,26 @@ PAUSE_ARCHIVE="${PAUSE_ARCHIVE:-/home/zcx/pause-aarch64-3.8.tar}"
 PAUSE_FALLBACK_ARCHIVE="${PAUSE_FALLBACK_ARCHIVE:-/home/zcx/master-runtime-images.tar}"
 CONFIG_TEMPLATE="${CONFIG_TEMPLATE:-configs/pairec_config.brpc_wrapper_full.json}"
 PAIREC_MANIFEST="${PAIREC_MANIFEST:-k8s/deployment-pairec-brpc-observed-wrapper.yaml}"
-OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-full/$(date +%Y%m%d-%H%M%S)}"
+OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-full/$(date +%Y%m%d-%H%M%S)-c${BURST_CONCURRENCY}-n${REQUESTS}}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-10m}"
 COMPLETION_TIMEOUT_SECONDS="${COMPLETION_TIMEOUT_SECONDS:-30}"
 SERVICE_READY_TIMEOUT_SECONDS="${SERVICE_READY_TIMEOUT_SECONDS:-60}"
+CPU_THROTTLED_PERIOD_LIMIT_PCT="${CPU_THROTTLED_PERIOD_LIMIT_PCT:-5}"
+CPU_THROTTLED_GATE_MIN_PERIODS="${CPU_THROTTLED_GATE_MIN_PERIODS:-100}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-[[ "$BURST_CONCURRENCY" = 1 ]] \
-  || die "this first-stage script intentionally requires BURST_CONCURRENCY=1"
+[[ "$BURST_CONCURRENCY" =~ ^(1|1000)$ ]] \
+  || die "BURST_CONCURRENCY must be 1 or 1000"
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
 [[ "$REQUESTS" =~ ^[1-9][0-9]*$ ]] || die "REQUESTS must be positive"
 [[ "$SIZE" =~ ^[1-9][0-9]*$ ]] || die "SIZE must be positive"
 [[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
   || die "SERVICE_READY_TIMEOUT_SECONDS must be positive"
+[[ "$CPU_THROTTLED_PERIOD_LIMIT_PCT" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+  || die "CPU_THROTTLED_PERIOD_LIMIT_PCT must be numeric"
+[[ "$CPU_THROTTLED_GATE_MIN_PERIODS" =~ ^[1-9][0-9]*$ ]] \
+  || die "CPU_THROTTLED_GATE_MIN_PERIODS must be positive"
 for flag in "$BUILD_PAIREC_IMAGE" "$IMPORT_PAIREC_IMAGE" "$ENSURE_PAUSE_IMAGE"; do
   [[ "$flag" = 0 || "$flag" = 1 ]] || die "boolean flags must be 0 or 1"
 done
@@ -196,7 +202,8 @@ gen=recalls["generative_recall"]
 assert gen["protocol"]=="brpc" and gen["brpc_endpoint"]==wrapper
 assert gen["brpc_fallback_to_http"] is False and gen["max_retries"]==0
 assert gen["brpc_burst_enabled"] is True
-assert gen["brpc_burst_concurrency"]==int(concurrency)==1
+assert int(concurrency) in (1,1000)
+assert gen["brpc_burst_concurrency"]==int(concurrency)
 assert gen["brpc_burst_preconnect"] is True
 assert gen["brpc_burst_payload_bytes"]==102400
 assert recalls["milvus_recall"]["brpc_endpoint"]==vector
@@ -253,28 +260,30 @@ while true; do
 done
 echo "PAIREC_BRPC_WRAPPER_FULL_SERVICE_READY endpoint=${SERVICE_IP}:18080"
 
-echo "== Verify preconnected c1 session =="
+echo "== Verify preconnected c${BURST_CONCURRENCY} sessions =="
 ready_line="$(kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec \
   | grep -F '"event":"pairec_brpc_burst_ready"' | tail -1 || true)"
 [[ -n "$ready_line" ]] || die "pairec_brpc_burst_ready is missing"
-python3 - "$ready_line" <<'PY'
+python3 - "$ready_line" "$BURST_CONCURRENCY" <<'PY'
 import json, sys
 event=json.loads(sys.argv[1][sys.argv[1].index("{"):])
-assert event["concurrency"]==1, event
-assert event["connected_sessions"]==1, event
+expected=int(sys.argv[2])
+assert event["concurrency"]==expected, event
+assert event["connected_sessions"]==expected, event
 assert event["payload_bytes"]==102400, event
 PY
 
 if (( WARMUP_REQUESTS > 0 )); then
   echo "== Warm up full-chain Wrapper instance: $WARMUP_REQUESTS requests (excluded) =="
   mkdir -p "$OUTPUT_DIR/warmup"
+  WARMUP_REQUEST_IDS=()
   for index in $(seq 1 "$WARMUP_REQUESTS"); do
     response="$OUTPUT_DIR/warmup/response-${index}.json"
     curl --noproxy '*' -fsS --connect-timeout 2 --max-time 10 \
       "$PAIREC_URL" -H 'Content-Type: application/json' \
       -d "{\"scene_id\":\"$SCENE_ID\",\"uid\":\"$USER_ID\",\"size\":$SIZE}" \
       -o "$response"
-    python3 - "$response" "$SIZE" <<'PY'
+    warmup_request_id="$(python3 - "$response" "$SIZE" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1])); size=int(sys.argv[2]); items=data.get("items", [])
 assert data.get("code")==200, data
@@ -283,8 +292,22 @@ sources=[item.get("retrieve_id") for item in items]
 generative=sources.count("generative_recall")
 assert 1 <= generative <= min(2,size), data
 assert sources==["milvus_recall"]*(size-generative)+["generative_recall"]*generative, data
-print(f"warmup request_id={data['request_id']} generative={generative} vector={size-generative}")
+print(data["request_id"])
 PY
+    )"
+    WARMUP_REQUEST_IDS+=("$warmup_request_id")
+    echo "warmup request_id=$warmup_request_id"
+  done
+  echo "== Wait for warmup pressure completion =="
+  warmup_deadline=$((SECONDS + COMPLETION_TIMEOUT_SECONDS))
+  for warmup_request_id in "${WARMUP_REQUEST_IDS[@]}"; do
+    while ! kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec 2>/dev/null \
+        | grep -F '"event":"pairec_brpc_burst_complete"' \
+        | grep -F "\"request_id\":\"${warmup_request_id}\"" >/dev/null; do
+      (( SECONDS < warmup_deadline )) \
+        || die "warmup burst completion timed out for request_id=$warmup_request_id"
+      sleep 0.1
+    done
   done
   echo "PAIREC_BRPC_WRAPPER_FULL_WARMUP_OK requests=$WARMUP_REQUESTS"
 fi
@@ -294,8 +317,27 @@ for app in "$PAIREC_DEPLOYMENT" "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT" \
   pod_state "$app" >"$OUTPUT_DIR/${app}.before"
 done
 
-echo "== Run strict full-chain c1 smoke: $REQUESTS requests =="
+collect_cpu_stat() {
+  local app="$1" container="$2" output="$3" pod
+  pod="$(ready_pod "$app")"
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$container" -- /bin/sh -ec \
+    'if test -f /sys/fs/cgroup/cpu.stat; then cat /sys/fs/cgroup/cpu.stat; else cat /sys/fs/cgroup/cpu/cpu.stat; fi' \
+    >"$output"
+}
+
+RESOURCE_TARGETS=(
+  "$PAIREC_DEPLOYMENT:pairec"
+  "$WRAPPER_DEPLOYMENT:brpc-burst-wrapper"
+  "$INFERENCE_DEPLOYMENT:brpc-inference"
+)
+for tuple in "${RESOURCE_TARGETS[@]}"; do
+  IFS=: read -r app container <<<"$tuple"
+  collect_cpu_stat "$app" "$container" "$OUTPUT_DIR/${app}-${container}.cpu.before"
+done
+
+echo "== Run strict full-chain c${BURST_CONCURRENCY} pressure: $REQUESTS requests =="
 STARTED_AT="$(date --iso-8601=seconds)"
+WORKLOAD_STARTED_AT="$(date +%s.%N)"
 printf 'index\te2e_ms\trequest_id\n' >"$OUTPUT_DIR/requests.tsv"
 for index in $(seq 1 "$REQUESTS"); do
   response="$OUTPUT_DIR/response-${index}.json"
@@ -318,6 +360,11 @@ PY
   e2e_ms="$(python3 -c 'import sys; print(round(float(sys.argv[1])*1000,3))' "$seconds")"
   printf '%s\t%s\t%s\n' "$index" "$e2e_ms" "$request_id" | tee -a "$OUTPUT_DIR/requests.tsv"
 done
+WORKLOAD_FINISHED_AT="$(date +%s.%N)"
+WORKLOAD_ELAPSED_SECONDS="$(python3 -c \
+  'import sys; print(float(sys.argv[2])-float(sys.argv[1]))' \
+  "$WORKLOAD_STARTED_AT" "$WORKLOAD_FINISHED_AT")"
+echo "workload elapsed_seconds=$WORKLOAD_ELAPSED_SECONDS requests=$REQUESTS"
 
 deadline=$((SECONDS + COMPLETION_TIMEOUT_SECONDS))
 while true; do
@@ -355,9 +402,12 @@ done
 
 echo "== Validate request-id contracts and latency evidence =="
 python3 - "$OUTPUT_DIR/requests.tsv" "$OUTPUT_DIR/pairec.log" \
-  "$OUTPUT_DIR/wrapper.log" "$OUTPUT_DIR/inference.log" "$OUTPUT_DIR/summary.json" <<'PY'
-import csv,json,pathlib,re,statistics,sys
-requests_path,pairec_path,wrapper_path,inference_path,output=sys.argv[1:]
+  "$OUTPUT_DIR/wrapper.log" "$OUTPUT_DIR/inference.log" "$OUTPUT_DIR/summary.json" \
+  "$BURST_CONCURRENCY" "$WORKLOAD_ELAPSED_SECONDS" <<'PY'
+import csv,json,math,pathlib,statistics,sys
+requests_path,pairec_path,wrapper_path,inference_path,output,concurrency,elapsed=sys.argv[1:]
+expected=int(concurrency)
+elapsed=float(elapsed)
 rows=list(csv.DictReader(open(requests_path),delimiter="\t"))
 ids=[row["request_id"] for row in rows]
 def json_events(path):
@@ -385,9 +435,10 @@ for row in rows:
  pipeline=one("pipeline_trace_complete")
  rank=one("deepfm_rank_complete")
  rerank=one("source_quota_rerank_complete")
- assert start["concurrency"]==start["connected_sessions"]==1,start
- assert complete["armed_workers"]==1 and complete["pressure_requests"]==0,complete
- assert complete["pressure_success"]==complete["pressure_errors"]==0,complete
+ assert start["concurrency"]==start["connected_sessions"]==expected,start
+ assert complete["armed_workers"]==expected,complete
+ assert complete["pressure_requests"]==expected-1,complete
+ assert complete["pressure_success"]==expected-1 and complete["pressure_errors"]==0,complete
  assert business["business_success"] and business["trace_valid"],business
  assert complete["business_success"] and complete["trace_valid"] and complete["burst_valid"],complete
  assert business["wrapper_total_ms"]>0 and business["wrapper_backend_rpc_ms"]>0,business
@@ -418,19 +469,45 @@ for row in rows:
   "wrapper_total_ms":business["wrapper_total_ms"],
   "wrapper_backend_rpc_ms":business["wrapper_backend_rpc_ms"],
   "runner_ms":business["business_runner_generate_ms"],
+  "burst_total_ms":complete["burst_total_ms"],
+  "max_active_workers":complete["max_active_workers"],
+  "start_skew_us":complete["start_skew_us"],
+  "pressure_latency_p95_ms":complete["pressure_latency_p95_ms"],
   "datasystem_get_count":ds["get_count"],"datasystem_get_ms":ds["get_us"]/1000,
   "datasystem_set_count":ds["set_count"],"datasystem_set_ms":ds["set_us"]/1000,
  })
-assert rank_reordered_count>0,"DeepFM did not reorder any smoke request"
-summary={"classification":"PAIREC_BRPC_WRAPPER_FULL_C1_OK",
+assert rank_reordered_count>0,"DeepFM did not reorder any pressure request"
+classification=f"PAIREC_BRPC_WRAPPER_FULL_C{expected}_OK"
+def percentile(values,q):
+ values=sorted(values); pos=(len(values)-1)*q; lo=math.floor(pos); hi=math.ceil(pos)
+ return values[lo] if lo==hi else values[lo]+(values[hi]-values[lo])*(pos-lo)
+metric_names=("client_e2e_ms","front_brpc_ms","wrapper_total_ms",
+              "wrapper_backend_rpc_ms","runner_ms","burst_total_ms",
+              "max_active_workers","start_skew_us","pressure_latency_p95_ms")
+metrics={}
+for name in metric_names:
+ values=[float(sample[name]) for sample in samples]
+ metrics[name]={"count":len(values),"avg":statistics.fmean(values),
+                "p50":percentile(values,.5),"p95":percentile(values,.95),
+                "p99":percentile(values,.99),"max":max(values)}
+summary={"classification":classification,"concurrency":expected,
+         "requests":len(samples),"elapsed_seconds":elapsed,
+         "throughput_rps":len(samples)/elapsed,
          "rank_reordered_count":rank_reordered_count,"samples":samples}
+summary["metrics"]=metrics
 pathlib.Path(output).write_text(json.dumps(summary,indent=2)+"\n")
-print("request e2e_ms front_brpc_ms wrapper_ms backend_rpc_ms runner_ms ds_get ds_set")
+print("request e2e_ms front_brpc_ms wrapper_ms backend_rpc_ms runner_ms burst_ms active skew_us pressure_p95_ms ds_get ds_set")
 for s in samples:
  print(s["request_id"],s["client_e2e_ms"],round(s["front_brpc_ms"],3),
        round(s["wrapper_total_ms"],3),round(s["wrapper_backend_rpc_ms"],3),
-       round(s["runner_ms"],3),s["datasystem_get_count"],s["datasystem_set_count"])
-print(f"avg_e2e_ms={statistics.fmean(s['client_e2e_ms'] for s in samples):.3f}")
+       round(s["runner_ms"],3),round(s["burst_total_ms"],3),s["max_active_workers"],
+       s["start_skew_us"],round(s["pressure_latency_p95_ms"],3),
+       s["datasystem_get_count"],s["datasystem_set_count"])
+print("metric count avg p50 p95 p99 max")
+for name in metric_names:
+ item=metrics[name]
+ print(f"{name} {item['count']} {item['avg']:.3f} {item['p50']:.3f} {item['p95']:.3f} {item['p99']:.3f} {item['max']:.3f}")
+print(f"throughput_rps={summary['throughput_rps']:.6f}")
 PY
 
 if grep -Eqi 'fallback to HTTP|fallback_to_http[^a-zA-Z0-9]+true|brpc request failed|Segmentation|core dumped|Out of memory' \
@@ -444,10 +521,37 @@ for app in "$PAIREC_DEPLOYMENT" "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT" \
     || die "pod identity or restart count changed: $app"
 done
 
+echo "== CPU throttling gates =="
+for tuple in "${RESOURCE_TARGETS[@]}"; do
+  IFS=: read -r app container <<<"$tuple"
+  collect_cpu_stat "$app" "$container" "$OUTPUT_DIR/${app}-${container}.cpu.after"
+  python3 - "$OUTPUT_DIR/${app}-${container}.cpu.before" \
+    "$OUTPUT_DIR/${app}-${container}.cpu.after" "$app/$container" \
+    "$CPU_THROTTLED_PERIOD_LIMIT_PCT" "$CPU_THROTTLED_GATE_MIN_PERIODS" <<'PY'
+import pathlib,sys
+def parse(path):
+ result={}
+ for line in pathlib.Path(path).read_text().splitlines():
+  fields=line.split()
+  if len(fields)==2: result[fields[0]]=int(fields[1])
+ return result
+before,after=parse(sys.argv[1]),parse(sys.argv[2])
+periods=max(0,after.get("nr_periods",0)-before.get("nr_periods",0))
+throttled=max(0,after.get("nr_throttled",0)-before.get("nr_throttled",0))
+ratio=100.0*throttled/max(periods,1)
+print(f"resource={sys.argv[3]} periods={periods} throttled={throttled} throttled_period_pct={ratio:.3f}")
+if periods<int(sys.argv[5]):
+ print(f"resource_gate=diagnostic reason=periods_below_{sys.argv[5]}")
+else:
+ assert ratio<=float(sys.argv[4]),f"CPU throttling gate failed for {sys.argv[3]}: {ratio:.3f}%"
+PY
+done
+
 echo "== Summary =="
-echo "classification=PAIREC_BRPC_WRAPPER_FULL_C1_OK"
+CLASSIFICATION="PAIREC_BRPC_WRAPPER_FULL_C${BURST_CONCURRENCY}_OK"
+echo "classification=$CLASSIFICATION"
 echo "endpoint=$PAIREC_URL"
 echo "warmup_requests=$WARMUP_REQUESTS"
 echo "requests=$REQUESTS"
 echo "output_dir=$OUTPUT_DIR"
-echo "PAIREC_BRPC_WRAPPER_FULL_C1_OK"
+echo "$CLASSIFICATION"

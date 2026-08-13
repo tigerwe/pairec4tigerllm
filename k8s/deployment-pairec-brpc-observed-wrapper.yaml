@@ -33,7 +33,7 @@ spec:
             - {name: PAIREC_DATASYSTEM_EXPECTED, value: "1"}
             - {name: PAIREC_REQUIRE_DATASYSTEM_ATTRIBUTION, value: "0"}
           resources:
-            requests: {cpu: "2", memory: "2Gi"}
+            requests: {cpu: "8", memory: "2Gi"}
             limits: {cpu: "8", memory: "8Gi"}
           volumeMounts:
             - {name: config, mountPath: /app/configs, readOnly: true}
