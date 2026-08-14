@@ -87,7 +87,6 @@ runtime_env_names = {
     "HOST_IP",
     "LD_LIBRARY_PATH",
     "LD_PRELOAD",
-    "NVIDIA_DRIVER_CAPABILITIES",
 }
 sidecar_env = [
     entry for entry in inference.get("env", [])
@@ -99,6 +98,19 @@ if not preload:
     raise RuntimeError(
         "inference LD_PRELOAD is empty; KVC sidecar requires the DataSystem ARM GPU runtime preload chain"
     )
+sidecar_preload = " ".join(
+    token for token in preload.split() if "libnvidia-ml.so" not in token
+)
+required_preloads = ("block_ds_consumer.so", "stub_gpu.so", "libabseil_dll.so")
+missing_preloads = [name for name in required_preloads if name not in sidecar_preload]
+if missing_preloads:
+    raise RuntimeError(
+        "inference LD_PRELOAD lacks required KVC sidecar libraries: " + ",".join(missing_preloads)
+    )
+for index, entry in enumerate(sidecar_env):
+    if entry["name"] == "LD_PRELOAD":
+        sidecar_env[index] = {**entry, "value": sidecar_preload}
+        break
 patch = {"spec": {"template": {"metadata": {"annotations": {
     "pairec.io/f14-kvc-burst-generation": str(__import__("time").time_ns())
 }}, "spec": {

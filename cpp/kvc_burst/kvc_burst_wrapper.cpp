@@ -12,6 +12,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -32,6 +33,7 @@ using pairec::kvc_burst::SharedControl;
 using pairec::kvc_burst::State;
 
 std::atomic<bool> gStop{false};
+const char* gStartupStage{"process_start"};
 
 struct Config
 {
@@ -487,13 +489,15 @@ void PressureWorker(uint32_t lane, SharedControl* control, datasystem::KVClient*
 
 } // namespace
 
-int main(int argc, char** argv)
+int Run(int argc, char** argv)
 {
+    gStartupStage = "parse_args";
     Config config;
     if (!ParseArgs(argc, argv, &config)) return 2;
     std::signal(SIGINT, HandleSignal);
     std::signal(SIGTERM, HandleSignal);
 
+    gStartupStage = "create_mapping";
     Mapping mapping;
     if (!CreateMapping(config, &mapping)) return 1;
     auto& control = *mapping.control;
@@ -501,15 +505,22 @@ int main(int argc, char** argv)
     auto keys = BuildKeys(config, pressureLanes);
     std::string value(config.objectSize, 'k');
 
-    auto controlClient = CreateClient(config, false);
-    if (!controlClient) return 1;
-    if (!PrefillAndVerify(*controlClient, keys, value)) return 1;
+    std::unique_ptr<datasystem::KVClient> controlClient;
+    if (pressureLanes > 0)
+    {
+        gStartupStage = "create_control_client";
+        controlClient = CreateClient(config, false);
+        if (!controlClient) return 1;
+        gStartupStage = "prefill_and_verify";
+        if (!PrefillAndVerify(*controlClient, keys, value)) return 1;
+    }
     pairec::kvc_burst::Store(&control.keys_verified, pressureLanes);
 
     std::vector<std::unique_ptr<datasystem::KVClient>> clients;
     clients.reserve(pressureLanes);
     for (uint32_t i = 0; i < pressureLanes; ++i)
     {
+        gStartupStage = "create_pressure_clients";
         auto client = CreateClient(config, true);
         if (!client) return 1;
         clients.emplace_back(std::move(client));
@@ -522,6 +533,7 @@ int main(int argc, char** argv)
     workers.reserve(pressureLanes);
     for (uint32_t i = 0; i < pressureLanes; ++i)
     {
+        gStartupStage = "start_pressure_workers";
         workers.emplace_back(PressureWorker, i, &control, clients[i].get(), &keys, &permutation);
     }
 
@@ -542,6 +554,7 @@ int main(int argc, char** argv)
         pairec::kvc_burst::FutexWake(&control.state);
     };
     prepare();
+    gStartupStage = "ready";
 
     if (!config.readyFile.empty())
     {
@@ -629,6 +642,26 @@ int main(int argc, char** argv)
         if (worker.joinable()) worker.join();
     }
     if (!config.readyFile.empty()) std::remove(config.readyFile.c_str());
-    if (config.cleanupKeys) DeleteKeys(*controlClient, keys);
+    if (config.cleanupKeys && controlClient) DeleteKeys(*controlClient, keys);
     return pairec::kvc_burst::Load(&control.barrier_failed) == 0 ? 0 : 1;
+}
+
+int main(int argc, char** argv)
+{
+    try
+    {
+        return Run(argc, argv);
+    }
+    catch (const std::exception& error)
+    {
+        std::cerr << "{\"event\":\"kvc_burst_startup_failed\",\"stage\":\"" << gStartupStage
+                  << "\",\"error\":\"" << error.what() << "\"}" << std::endl;
+        return 1;
+    }
+    catch (...)
+    {
+        std::cerr << "{\"event\":\"kvc_burst_startup_failed\",\"stage\":\"" << gStartupStage
+                  << "\",\"error\":\"unknown exception\"}" << std::endl;
+        return 1;
+    }
 }
