@@ -414,6 +414,52 @@ void WriteLine(const Config& config, const std::string& line)
     }
 }
 
+bool PublishReadyFile(const std::string& path, const std::string& contents)
+{
+    if (path.empty()) return true;
+    auto temporary = path + ".tmp." + std::to_string(::getpid());
+    auto fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+    {
+        std::perror("open ready file");
+        return false;
+    }
+    size_t written = 0;
+    while (written < contents.size())
+    {
+        auto count = ::write(fd, contents.data() + written, contents.size() - written);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0)
+        {
+            std::perror("write ready file");
+            ::close(fd);
+            std::remove(temporary.c_str());
+            return false;
+        }
+        written += static_cast<size_t>(count);
+    }
+    if (::fsync(fd) != 0)
+    {
+        std::perror("fsync ready file");
+        ::close(fd);
+        std::remove(temporary.c_str());
+        return false;
+    }
+    if (::close(fd) != 0)
+    {
+        std::perror("close ready file");
+        std::remove(temporary.c_str());
+        return false;
+    }
+    if (::rename(temporary.c_str(), path.c_str()) != 0)
+    {
+        std::perror("rename ready file");
+        std::remove(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
 void ResetGeneration(SharedControl& control, uint32_t generation, uint64_t shuffleSeed)
 {
     pairec::kvc_burst::Store(&control.arrived_participants, 0U);
@@ -558,10 +604,15 @@ int Run(int argc, char** argv)
 
     if (!config.readyFile.empty())
     {
-        std::ofstream ready(config.readyFile);
-        ready << "pid=" << ::getpid() << " concurrency=" << config.concurrency << " pressure_lanes="
-              << pressureLanes << " keys_verified=" << pressureLanes << " clients_connected=" << pressureLanes
-              << " armed_workers=" << pressureLanes << '\n';
+        auto ready = std::string{"pid="} + std::to_string(::getpid()) + " concurrency="
+            + std::to_string(config.concurrency) + " pressure_lanes=" + std::to_string(pressureLanes)
+            + " keys_verified=" + std::to_string(pressureLanes) + " clients_connected="
+            + std::to_string(pressureLanes) + " armed_workers=" + std::to_string(pressureLanes) + "\n";
+        if (!PublishReadyFile(config.readyFile, ready))
+        {
+            pairec::kvc_burst::Store(&control.state, static_cast<uint32_t>(State::kFailed));
+            return 1;
+        }
     }
     WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":2,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
             + ",\"pressure_lanes\":" + std::to_string(pressureLanes) + ",\"object_size_bytes\":"
