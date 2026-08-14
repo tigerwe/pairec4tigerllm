@@ -158,22 +158,50 @@ PY
 }
 
 restore() {
-  [[ -f "$BACKUP_FILE" ]] || die "backup not found: $BACKUP_FILE"
-  restore_file=$(mktemp /tmp/f14-kvc-restore.XXXXXX.json)
-  python3 - "$BACKUP_FILE" "$restore_file" <<'PY'
+  current_file=$(mktemp /tmp/f14-kvc-current.XXXXXX.json)
+  restore_patch=$(mktemp /tmp/f14-kvc-restore-patch.XXXXXX.json)
+  kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o json >"$current_file"
+  python3 - "$current_file" "$restore_patch" "$INFERENCE_CONTAINER" "$SIDECAR_CONTAINER" <<'PY'
 import json, pathlib, sys
-source, output = map(pathlib.Path, sys.argv[1:])
-value = json.loads(source.read_text())
-value.pop("status", None)
-metadata = value["metadata"]
-for key in ("creationTimestamp", "generation", "managedFields", "resourceVersion", "uid"):
-    metadata.pop(key, None)
-pathlib.Path(output).write_text(json.dumps(value))
+source, output = map(pathlib.Path, sys.argv[1:3])
+inference_name, sidecar_name = sys.argv[3:]
+deployment = json.loads(source.read_text())
+pod_spec = deployment["spec"]["template"]["spec"]
+containers = []
+for container in pod_spec.get("containers", []):
+    if container["name"] == sidecar_name:
+        continue
+    if container["name"] == inference_name:
+        container["env"] = [
+            entry for entry in container.get("env", [])
+            if not entry["name"].startswith("KVC_BURST_")
+        ]
+        container["volumeMounts"] = [
+            mount for mount in container.get("volumeMounts", [])
+            if mount["name"] != "kvc-burst-control"
+        ]
+    containers.append(container)
+volumes = [
+    volume for volume in pod_spec.get("volumes", [])
+    if volume["name"] != "kvc-burst-control"
+]
+patch = {"spec": {"template": {
+    "metadata": {"annotations": {"pairec.io/f14-kvc-burst-generation": None}},
+    "spec": {"containers": containers, "volumes": volumes},
+}}}
+output.write_text(json.dumps(patch))
 PY
-  kubectl -n "$NAMESPACE" replace --force -f "$restore_file"
-  rm -f "$restore_file"
+  kubectl -n "$NAMESPACE" patch deployment "$DEPLOYMENT" \
+    --type=merge --patch "$(cat "$restore_patch")"
+  rm -f "$current_file" "$restore_patch"
   wait_rollout
   rm -f "$BACKUP_FILE"
+  pod=$(current_pod)
+  containers=$(kubectl -n "$NAMESPACE" get pod "$pod" \
+    -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{end}')
+  if grep -Fxq "$SIDECAR_CONTAINER" <<<"$containers"; then
+    die "F14 sidecar remains after restore in pod $pod"
+  fi
   echo "F14_KVC_BURST_OVERLAY_RESTORE_OK"
 }
 
