@@ -151,6 +151,9 @@ lower = evidence.lower()
 if reason == "OOMKilled" or exit_code == 137:
     classification = "KVC_BURST_SIDECAR_OOM"
     next_action = "inspect the sidecar memory limit and prefill allocation before increasing it"
+elif "basic_string::substr" in lower and "which is 4" in lower and "which is 0" in lower:
+    classification = "KVC_BURST_DATASYSTEM_GPU_RUNTIME_PRELOAD_FAILURE"
+    next_action = "restore the inference DataSystem LD_PRELOAD/LD_LIBRARY_PATH chain in the sidecar environment"
 elif re.search(r"error while loading shared libraries|cannot open shared object|\.so[^\n]*=>\s*not found", lower):
     classification = "KVC_BURST_SIDECAR_DYNAMIC_LIBRARY_FAILURE"
     next_action = "fix LD_LIBRARY_PATH/rpath or mount the missing DataSystem runtime library"

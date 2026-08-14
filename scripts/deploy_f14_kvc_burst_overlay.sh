@@ -83,6 +83,22 @@ deployment = json.loads(pathlib.Path(deployment_path).read_text())
 inference = next(c for c in deployment["spec"]["template"]["spec"]["containers"]
                  if c["name"] == inference_name)
 image = inference["image"]
+runtime_env_names = {
+    "HOST_IP",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "NVIDIA_DRIVER_CAPABILITIES",
+}
+sidecar_env = [
+    entry for entry in inference.get("env", [])
+    if entry["name"] in runtime_env_names or entry["name"].startswith("DATASYSTEM_")
+]
+preload = next((entry.get("value", "") for entry in sidecar_env
+                if entry["name"] == "LD_PRELOAD"), "")
+if not preload:
+    raise RuntimeError(
+        "inference LD_PRELOAD is empty; KVC sidecar requires the DataSystem ARM GPU runtime preload chain"
+    )
 patch = {"spec": {"template": {"metadata": {"annotations": {
     "pairec.io/f14-kvc-burst-generation": str(__import__("time").time_ns())
 }}, "spec": {
@@ -101,7 +117,7 @@ patch = {"spec": {"template": {"metadata": {"annotations": {
                   f"--object_size={object_size}", f"--barrier_timeout_ms={barrier_timeout}",
                   "--prefix=PairecKvcBurstV2", "--control_path=/run/pairec-kvc-burst/control",
                   "--ready_file=/run/pairec-kvc-burst/ready", "--cleanup_keys=true"],
-         "env": [{"name": "LD_PRELOAD", "value": ""}],
+         "env": sidecar_env,
          "resources": {"requests": {"cpu": "4", "memory": "1Gi"},
                        "limits": {"memory": "4Gi"}},
          "volumeMounts": [
