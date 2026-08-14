@@ -149,14 +149,6 @@ func (s *BRPCRecommendSession) HealthCheckWithPayload(ctx context.Context, paylo
 	return healthResponseFromProto(&responsePB), nil
 }
 
-func (s *BRPCRecommendSession) HealthCheckWithAttachment(ctx context.Context, payload []byte) (*brpcHealthResponse, error) {
-	var responsePB healthResponsePB
-	if err := s.callWithAttachment(ctx, "Health", &healthRequestPB{}, payload, &responsePB); err != nil {
-		return nil, err
-	}
-	return healthResponseFromProto(&responsePB), nil
-}
-
 func (s *BRPCRecommendSession) Recommend(ctx context.Context, req *RecommendRequest, requestID string) (*RecommendResponse, error) {
 	requestPB := recommendRequestToProto(req, requestID)
 	var responsePB recommendResponsePB
@@ -171,10 +163,6 @@ func (s *BRPCRecommendSession) Recommend(ctx context.Context, req *RecommendRequ
 }
 
 func (s *BRPCRecommendSession) call(ctx context.Context, method string, request proto.Message, response proto.Message) error {
-	return s.callWithAttachment(ctx, method, request, nil, response)
-}
-
-func (s *BRPCRecommendSession) callWithAttachment(ctx context.Context, method string, request proto.Message, attachment []byte, response proto.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -186,7 +174,7 @@ func (s *BRPCRecommendSession) callWithAttachment(ctx context.Context, method st
 			s.conn, lastErr = dialer.DialContext(attemptCtx, "tcp", s.client.endpoint)
 		}
 		if lastErr == nil {
-			lastErr = s.client.callOnConnWithAttachment(attemptCtx, s.conn, method, request, attachment, response)
+			lastErr = s.client.callOnConn(attemptCtx, s.conn, method, request, response)
 		}
 		cancel()
 		if lastErr == nil {
@@ -252,10 +240,6 @@ func (c *BRPCRecommendClient) callOnce(ctx context.Context, method string, reque
 }
 
 func (c *BRPCRecommendClient) callOnConn(ctx context.Context, conn net.Conn, method string, request proto.Message, response proto.Message) error {
-	return c.callOnConnWithAttachment(ctx, conn, method, request, nil, response)
-}
-
-func (c *BRPCRecommendClient) callOnConnWithAttachment(ctx context.Context, conn net.Conn, method string, request proto.Message, attachment []byte, response proto.Message) error {
 	payload, err := proto.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("marshal %s request failed: %w", method, err)
@@ -265,7 +249,7 @@ func (c *BRPCRecommendClient) callOnConnWithAttachment(ctx context.Context, conn
 	meta := &brpcRPCMeta{
 		CompressType:   proto.Int32(brpcNoCompression),
 		CorrelationID:  proto.Int64(correlationID),
-		AttachmentSize: proto.Int32(int32(len(attachment))),
+		AttachmentSize: proto.Int32(0),
 		ContentType:    proto.Int32(brpcContentTypePB),
 		ChecksumType:   proto.Int32(brpcChecksumNone),
 		Request: &brpcRequestMeta{
@@ -279,7 +263,7 @@ func (c *BRPCRecommendClient) callOnConnWithAttachment(ctx context.Context, conn
 		return fmt.Errorf("marshal brpc meta failed: %w", err)
 	}
 
-	prefix, err := buildBRPCFramePrefix(metaBytes, payload, len(attachment))
+	frame, err := buildBRPCFrame(metaBytes, payload)
 	if err != nil {
 		return err
 	}
@@ -290,17 +274,8 @@ func (c *BRPCRecommendClient) callOnConnWithAttachment(ctx context.Context, conn
 		}
 	}
 
-	buffers := net.Buffers{prefix}
-	if len(attachment) > 0 {
-		buffers = append(buffers, attachment)
-	}
-	written, err := buffers.WriteTo(conn)
-	if err != nil {
+	if _, err := conn.Write(frame); err != nil {
 		return fmt.Errorf("write brpc frame failed: %w", err)
-	}
-	expected := int64(len(prefix) + len(attachment))
-	if written != expected {
-		return fmt.Errorf("short brpc frame write: wrote=%d want=%d", written, expected)
 	}
 
 	responsePayload, err := readBRPCResponse(conn, correlationID)
@@ -314,19 +289,11 @@ func (c *BRPCRecommendClient) callOnConnWithAttachment(ctx context.Context, conn
 }
 
 func buildBRPCFrame(metaBytes, payload []byte) ([]byte, error) {
-	prefix, err := buildBRPCFramePrefix(metaBytes, payload, 0)
-	if err != nil {
-		return nil, err
-	}
-	return prefix, nil
-}
-
-func buildBRPCFramePrefix(metaBytes, payload []byte, attachmentBytes int) ([]byte, error) {
-	bodySize := len(metaBytes) + len(payload) + attachmentBytes
+	bodySize := len(metaBytes) + len(payload)
 	if bodySize > brpcMaxBodySize {
 		return nil, fmt.Errorf("brpc request body too large: %d", bodySize)
 	}
-	frame := make([]byte, brpcHeaderSize+len(metaBytes)+len(payload))
+	frame := make([]byte, brpcHeaderSize+bodySize)
 	copy(frame[:4], brpcMagic)
 	binary.BigEndian.PutUint32(frame[4:8], uint32(bodySize))
 	binary.BigEndian.PutUint32(frame[8:12], uint32(len(metaBytes)))

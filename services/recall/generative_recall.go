@@ -93,7 +93,6 @@ type recallConfigJSON struct {
 	BRPCBurstActiveConnections int                 `json:"brpc_burst_active_connections"`
 	BRPCBurstCPUShards         []int               `json:"brpc_burst_cpu_shards"`
 	BRPCBurstPayloadBytes      int                 `json:"brpc_burst_payload_bytes"`
-	BRPCBurstPayloadTransport  string              `json:"brpc_burst_payload_transport"`
 	BRPCBurstPreconnect        bool                `json:"brpc_burst_preconnect"`
 	BRPCBurstPressureTimeoutMs int                 `json:"brpc_burst_pressure_timeout_ms"`
 	TimeoutMs                  int                 `json:"timeout_ms"`
@@ -127,35 +126,34 @@ func NewGenerativeRecall(conf recconf.RecallConfig) *GenerativeRecall {
 			writeDebugLog(" Parsed RecallAlgo: protocol=%s, server_url=%s, brpc_endpoint=%s, history_feature_name=%s\n",
 				algoConf.Protocol, algoConf.ServerURL, algoConf.BRPCEndpoint, algoConf.HistoryFeatureName)
 			genConfig = &config.GenerativeRecallConfig{
-				ServerURL:                 algoConf.ServerURL,
-				Protocol:                  algoConf.Protocol,
-				BRPCEndpoint:              algoConf.BRPCEndpoint,
-				BRPCServiceName:           algoConf.BRPCServiceName,
-				BRPCFallbackToHTTP:        brpcFallback,
-				BRPCPayloadBytes:          algoConf.BRPCPayloadBytes,
-				BRPCBurstEnabled:          algoConf.BRPCBurstEnabled,
-				BRPCBurstConcurrency:      algoConf.BRPCBurstConcurrency,
-				BRPCBurstPoolSize:         algoConf.BRPCBurstPoolSize,
-				BRPCBurstActive:           algoConf.BRPCBurstActiveConnections,
-				BRPCBurstCPUShards:        algoConf.BRPCBurstCPUShards,
-				BRPCBurstPayloadBytes:     algoConf.BRPCBurstPayloadBytes,
-				BRPCBurstPayloadTransport: algoConf.BRPCBurstPayloadTransport,
-				BRPCBurstPreconnect:       algoConf.BRPCBurstPreconnect,
-				BRPCBurstPressureTimeout:  time.Duration(algoConf.BRPCBurstPressureTimeoutMs) * time.Millisecond,
-				Timeout:                   time.Duration(algoConf.TimeoutMs) * time.Millisecond,
-				MaxRetries:                algoConf.MaxRetries,
-				TopK:                      algoConf.TopK,
-				Temperature:               algoConf.Temperature,
-				BeamWidth:                 algoConf.BeamWidth,
-				HistoryFrom:               algoConf.HistoryFrom,
-				HistoryFeatureName:        algoConf.HistoryFeatureName,
-				HistoryDelimiter:          algoConf.HistoryDelimiter,
-				HistoryMaxLength:          algoConf.HistoryMaxLength,
-				FeatureSource:             algoConf.FeatureSource,
-				KafkaConfig:               algoConf.KafkaConfig,
-				CacheEnable:               conf.CacheAdapter != "",
-				CacheTime:                 conf.CacheTime,
-				CachePrefix:               conf.CachePrefix,
+				ServerURL:                algoConf.ServerURL,
+				Protocol:                 algoConf.Protocol,
+				BRPCEndpoint:             algoConf.BRPCEndpoint,
+				BRPCServiceName:          algoConf.BRPCServiceName,
+				BRPCFallbackToHTTP:       brpcFallback,
+				BRPCPayloadBytes:         algoConf.BRPCPayloadBytes,
+				BRPCBurstEnabled:         algoConf.BRPCBurstEnabled,
+				BRPCBurstConcurrency:     algoConf.BRPCBurstConcurrency,
+				BRPCBurstPoolSize:        algoConf.BRPCBurstPoolSize,
+				BRPCBurstActive:          algoConf.BRPCBurstActiveConnections,
+				BRPCBurstCPUShards:       algoConf.BRPCBurstCPUShards,
+				BRPCBurstPayloadBytes:    algoConf.BRPCBurstPayloadBytes,
+				BRPCBurstPreconnect:      algoConf.BRPCBurstPreconnect,
+				BRPCBurstPressureTimeout: time.Duration(algoConf.BRPCBurstPressureTimeoutMs) * time.Millisecond,
+				Timeout:                  time.Duration(algoConf.TimeoutMs) * time.Millisecond,
+				MaxRetries:               algoConf.MaxRetries,
+				TopK:                     algoConf.TopK,
+				Temperature:              algoConf.Temperature,
+				BeamWidth:                algoConf.BeamWidth,
+				HistoryFrom:              algoConf.HistoryFrom,
+				HistoryFeatureName:       algoConf.HistoryFeatureName,
+				HistoryDelimiter:         algoConf.HistoryDelimiter,
+				HistoryMaxLength:         algoConf.HistoryMaxLength,
+				FeatureSource:            algoConf.FeatureSource,
+				KafkaConfig:              algoConf.KafkaConfig,
+				CacheEnable:              conf.CacheAdapter != "",
+				CacheTime:                conf.CacheTime,
+				CachePrefix:              conf.CachePrefix,
 			}
 		}
 	}

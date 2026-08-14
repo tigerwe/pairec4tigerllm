@@ -113,13 +113,12 @@ func NewTRTLLMClient(cfg *config.GenerativeRecallConfig) (*TRTLLMClient, error) 
 		brpcClient = client
 		if cfg.BRPCBurstEnabled {
 			burst, err = NewBRPCBurstCoordinator(client, BRPCBurstConfig{
-				Concurrency:      cfg.BRPCBurstConcurrency,
-				PoolSize:         cfg.BRPCBurstPoolSize,
-				Active:           cfg.BRPCBurstActive,
-				CPUShards:        cfg.BRPCBurstCPUShards,
-				PayloadBytes:     cfg.BRPCBurstPayloadBytes,
-				PayloadTransport: cfg.BRPCBurstPayloadTransport,
-				PressureTimeout:  cfg.BRPCBurstPressureTimeout,
+				Concurrency:     cfg.BRPCBurstConcurrency,
+				PoolSize:        cfg.BRPCBurstPoolSize,
+				Active:          cfg.BRPCBurstActive,
+				CPUShards:       cfg.BRPCBurstCPUShards,
+				PayloadBytes:    cfg.BRPCBurstPayloadBytes,
+				PressureTimeout: cfg.BRPCBurstPressureTimeout,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("create brpc burst coordinator failed: %w", err)

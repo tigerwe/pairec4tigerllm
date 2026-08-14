@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,40 +13,36 @@ import (
 )
 
 type BRPCBurstConfig struct {
-	Concurrency      int
-	PoolSize         int
-	Active           int
-	CPUShards        []int
-	PayloadBytes     int
-	PayloadTransport string
-	PressureTimeout  time.Duration
+	Concurrency     int
+	PoolSize        int
+	Active          int
+	CPUShards       []int
+	PayloadBytes    int
+	PressureTimeout time.Duration
 }
 
 type brpcBurstSession interface {
 	Connect(context.Context) error
 	Recommend(context.Context, *RecommendRequest, string) (*RecommendResponse, error)
 	HealthCheckWithPayload(context.Context, int) (*brpcHealthResponse, error)
-	HealthCheckWithAttachment(context.Context, []byte) (*brpcHealthResponse, error)
 	Close() error
 }
 
 type BRPCBurstCoordinator struct {
-	sessions         []brpcBurstSession
-	concurrency      int
-	poolSize         int
-	active           int
-	cpuShards        []int
-	shardSessions    [][]int
-	poolCursor       int
-	workers          []chan brpcBurstJob
-	payloadBytes     int
-	payloadTransport string
-	sharedPayload    []byte
-	pressureTimeout  time.Duration
-	stride           int
-	sequence         uint64
-	slot             chan struct{}
-	logEvent         func(any)
+	sessions        []brpcBurstSession
+	concurrency     int
+	poolSize        int
+	active          int
+	cpuShards       []int
+	shardSessions   [][]int
+	poolCursor      int
+	workers         []chan brpcBurstJob
+	payloadBytes    int
+	pressureTimeout time.Duration
+	stride          int
+	sequence        uint64
+	slot            chan struct{}
+	logEvent        func(any)
 }
 
 type brpcBurstJob struct {
@@ -80,7 +75,6 @@ type brpcBurstStartEvent struct {
 	Concurrency       int     `json:"concurrency"`
 	BusinessLane      int     `json:"business_lane"`
 	PayloadBytes      int     `json:"pressure_payload_bytes"`
-	PayloadTransport  string  `json:"pressure_payload_transport"`
 	ConnectedSessions int     `json:"connected_sessions"`
 	SelectedSessions  int     `json:"selected_sessions"`
 	PreflightMs       float64 `json:"preflight_ms"`
@@ -131,7 +125,6 @@ type brpcBurstCompleteEvent struct {
 	ShardRequests        []int   `json:"shard_requests"`
 	ShardSuccess         []int   `json:"shard_success"`
 	ShardBytes           []int64 `json:"shard_bytes"`
-	PayloadTransport     string  `json:"pressure_payload_transport"`
 }
 
 func NewBRPCBurstCoordinator(client *BRPCRecommendClient, cfg BRPCBurstConfig) (*BRPCBurstCoordinator, error) {
@@ -183,13 +176,6 @@ func newBRPCBurstCoordinator(sessions []brpcBurstSession, cfg BRPCBurstConfig, l
 	if cfg.PayloadBytes < 0 || cfg.PayloadBytes > 1<<20 {
 		return nil, fmt.Errorf("payload bytes must be in [0,1048576]")
 	}
-	cfg.PayloadTransport = strings.ToLower(strings.TrimSpace(cfg.PayloadTransport))
-	if cfg.PayloadTransport == "" {
-		cfg.PayloadTransport = "protobuf"
-	}
-	if cfg.PayloadTransport != "protobuf" && cfg.PayloadTransport != "attachment" {
-		return nil, fmt.Errorf("payload transport must be protobuf or attachment")
-	}
 	if cfg.PressureTimeout <= 0 {
 		return nil, fmt.Errorf("pressure timeout must be positive")
 	}
@@ -198,20 +184,16 @@ func newBRPCBurstCoordinator(sessions []brpcBurstSession, cfg BRPCBurstConfig, l
 	}
 
 	c := &BRPCBurstCoordinator{
-		sessions:         sessions,
-		concurrency:      cfg.Active,
-		poolSize:         cfg.PoolSize,
-		active:           cfg.Active,
-		cpuShards:        cpuShards,
-		payloadBytes:     cfg.PayloadBytes,
-		payloadTransport: cfg.PayloadTransport,
-		pressureTimeout:  cfg.PressureTimeout,
-		stride:           coprimeStride(cfg.Concurrency),
-		slot:             make(chan struct{}, 1),
-		logEvent:         logger,
-	}
-	if cfg.PayloadTransport == "attachment" && cfg.PayloadBytes > 0 {
-		c.sharedPayload = make([]byte, cfg.PayloadBytes)
+		sessions:        sessions,
+		concurrency:     cfg.Active,
+		poolSize:        cfg.PoolSize,
+		active:          cfg.Active,
+		cpuShards:       cpuShards,
+		payloadBytes:    cfg.PayloadBytes,
+		pressureTimeout: cfg.PressureTimeout,
+		stride:          coprimeStride(cfg.Concurrency),
+		slot:            make(chan struct{}, 1),
+		logEvent:        logger,
 	}
 	c.shardSessions = make([][]int, len(cpuShards))
 	c.workers = make([]chan brpcBurstJob, cfg.PoolSize)
@@ -237,7 +219,6 @@ func newBRPCBurstCoordinator(sessions []brpcBurstSession, cfg BRPCBurstConfig, l
 		"cpu_shards":           c.cpuShards,
 		"shard_connections":    shardLengths(c.shardSessions),
 		"payload_bytes":        c.payloadBytes,
-		"payload_transport":    c.payloadTransport,
 		"business_lane_stride": c.stride,
 	})
 	return c, nil
@@ -274,7 +255,6 @@ func (c *BRPCBurstCoordinator) Recommend(req *RecommendRequest, requestID string
 		Concurrency:       c.concurrency,
 		BusinessLane:      businessLane,
 		PayloadBytes:      c.payloadBytes,
-		PayloadTransport:  c.payloadTransport,
 		ConnectedSessions: c.poolSize,
 		SelectedSessions:  len(selected),
 		PreflightMs:       preflightMs,
@@ -297,7 +277,7 @@ func (c *BRPCBurstCoordinator) Recommend(req *RecommendRequest, requestID string
 		c.logEvent(makeBRPCBurstCompleteEvent(
 			requestID, c.active, businessLane, releasedAt,
 			atomic.LoadInt64(&maxActive), businessEvent, results,
-			c.poolSize, c.payloadBytes, c.payloadTransport, c.cpuShards,
+			c.poolSize, c.payloadBytes, c.cpuShards,
 		))
 		c.slot <- struct{}{}
 	}()
@@ -322,19 +302,7 @@ func (c *BRPCBurstCoordinator) runSessionWorker(sessionIndex, shard int, jobs <-
 		if job.business {
 			result.response, result.err = c.sessions[sessionIndex].Recommend(ctx, job.req, job.requestID)
 		} else {
-			if c.payloadTransport == "attachment" {
-				var health *brpcHealthResponse
-				health, result.err = c.sessions[sessionIndex].HealthCheckWithAttachment(ctx, c.sharedPayload)
-				if result.err == nil && c.payloadBytes > 0 && health.Backend != "brpc_burst_wrapper_attachment" {
-					result.err = fmt.Errorf("Wrapper did not observe attachment payload: backend=%s", health.Backend)
-				}
-			} else {
-				var health *brpcHealthResponse
-				health, result.err = c.sessions[sessionIndex].HealthCheckWithPayload(ctx, c.payloadBytes)
-				if result.err == nil && c.payloadBytes > 0 && health.Backend != "brpc_burst_wrapper_protobuf" {
-					result.err = fmt.Errorf("Wrapper did not observe protobuf payload: backend=%s", health.Backend)
-				}
-			}
+			_, result.err = c.sessions[sessionIndex].HealthCheckWithPayload(ctx, c.payloadBytes)
 		}
 		cancel()
 		atomic.AddInt64(job.active, -1)
@@ -450,7 +418,6 @@ func makeBRPCBurstCompleteEvent(
 	results <-chan brpcBurstLaneResult,
 	poolSize int,
 	payloadBytes int,
-	payloadTransport string,
 	cpuShards []int,
 ) brpcBurstCompleteEvent {
 	pressureLatencies := make([]int64, 0, concurrency-1)
@@ -500,7 +467,6 @@ func makeBRPCBurstCompleteEvent(
 		ShardRequests:        shardRequests,
 		ShardSuccess:         shardSuccess,
 		ShardBytes:           shardBytes,
-		PayloadTransport:     payloadTransport,
 	}
 }
 
