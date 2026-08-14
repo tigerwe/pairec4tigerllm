@@ -38,10 +38,10 @@ struct Config
     std::string host{"127.0.0.1"};
     int port{18482};
     uint32_t concurrency{100};
-    uint64_t objectSize{1792ULL * 1024ULL};
+    uint64_t objectSize{3670016ULL};
     uint32_t barrierTimeoutMs{10};
     uint64_t seed{20260804};
-    std::string prefix{"PairecKvcBurst"};
+    std::string prefix{"PairecKvcBurstV2"};
     std::string controlPath{"/run/pairec-kvc-burst/control"};
     std::string readyFile{"/run/pairec-kvc-burst/ready"};
     std::string statsFile;
@@ -381,6 +381,12 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
            << ",\"object_size_bytes\":" << config.objectSize << ",\"shuffle_seed\":"
            << control.shuffle_seed << ",\"barrier_wait_ms\":"
            << static_cast<double>(control.business_barrier_wait_us) / 1000.0
+           << ",\"trigger_us\":" << control.business_trigger_us
+           << ",\"business_api\":\""
+           << pairec::kvc_burst::BusinessApiName(
+                  static_cast<pairec::kvc_burst::BusinessApi>(control.business_api))
+           << "\",\"business_key_count\":" << control.business_key_count
+           << ",\"business_bytes\":" << control.business_bytes
            << ",\"business_get_ms\":" << static_cast<double>(result.businessGetUs) / 1000.0
            << ",\"pressure_get_avg_ms\":" << static_cast<double>(result.pressureAvgUs) / 1000.0
            << ",\"pressure_get_p95_ms\":" << static_cast<double>(result.pressureP95Us) / 1000.0
@@ -416,6 +422,15 @@ void ResetGeneration(SharedControl& control, uint32_t generation, uint64_t shuff
     pairec::kvc_burst::Store(&control.pressure_success, 0U);
     pairec::kvc_burst::Store(&control.pressure_errors, 0U);
     pairec::kvc_burst::Store(&control.business_barrier_wait_us, uint64_t{0});
+    pairec::kvc_burst::Store(&control.business_trigger_us, uint64_t{0});
+    pairec::kvc_burst::Store(&control.business_bytes, uint64_t{0});
+    pairec::kvc_burst::Store(&control.trigger_started_ns, uint64_t{0});
+    pairec::kvc_burst::Store(&control.trigger_completed_ns, uint64_t{0});
+    pairec::kvc_burst::Store(
+        &control.business_api, static_cast<uint32_t>(pairec::kvc_burst::BusinessApi::kUnknown));
+    pairec::kvc_burst::Store(&control.business_key_count, 0U);
+    pairec::kvc_burst::Store(
+        &control.business_trigger_status, static_cast<uint32_t>(pairec::kvc_burst::TriggerStatus::kNone));
     pairec::kvc_burst::Store(&control.claim_started_ns, uint64_t{0});
     pairec::kvc_burst::Store(&control.business_start_ns, uint64_t{0});
     pairec::kvc_burst::Store(&control.business_end_ns, uint64_t{0});
@@ -489,6 +504,7 @@ int main(int argc, char** argv)
     auto controlClient = CreateClient(config, false);
     if (!controlClient) return 1;
     if (!PrefillAndVerify(*controlClient, keys, value)) return 1;
+    pairec::kvc_burst::Store(&control.keys_verified, pressureLanes);
 
     std::vector<std::unique_ptr<datasystem::KVClient>> clients;
     clients.reserve(pressureLanes);
@@ -498,6 +514,7 @@ int main(int argc, char** argv)
         if (!client) return 1;
         clients.emplace_back(std::move(client));
     }
+    pairec::kvc_burst::Store(&control.clients_connected, pressureLanes);
 
     std::vector<uint32_t> permutation(pressureLanes);
     std::iota(permutation.begin(), permutation.end(), 0U);
@@ -533,7 +550,7 @@ int main(int argc, char** argv)
               << pressureLanes << " keys_verified=" << pressureLanes << " clients_connected=" << pressureLanes
               << " armed_workers=" << pressureLanes << '\n';
     }
-    WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"concurrency\":" + std::to_string(config.concurrency)
+    WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":2,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
             + ",\"pressure_lanes\":" + std::to_string(pressureLanes) + ",\"object_size_bytes\":"
             + std::to_string(config.objectSize) + ",\"clients_connected\":" + std::to_string(pressureLanes)
             + ",\"keys_verified\":" + std::to_string(pressureLanes) + "}");
@@ -580,11 +597,14 @@ int main(int argc, char** argv)
         pairec::kvc_burst::Store(&control.result_pressure_p95_us, result.pressureP95Us);
         pairec::kvc_burst::Store(&control.result_pressure_p99_us, result.pressureP99Us);
         pairec::kvc_burst::Store(&control.result_pressure_max_us, result.pressureMaxUs);
-        WriteLine(config, JsonResult(config, control, runningGeneration, result));
+        auto resultJson = JsonResult(config, control, runningGeneration, result);
+        auto marker = std::string{"\"event\":\"kvc_burst_result\""};
+        resultJson.replace(resultJson.find(marker), marker.size(), "\"event\":\"kvc_burst_complete\"");
+        WriteLine(config, resultJson);
         pairec::kvc_burst::Store(&control.result_generation, runningGeneration);
         pairec::kvc_burst::FutexWake(&control.result_generation);
 
-        if (result.failure == Failure::kBarrierTimeout)
+        if (result.failure == Failure::kBarrierTimeout || result.failure == Failure::kPressureGetFailed)
         {
             pairec::kvc_burst::Store(&control.state, static_cast<uint32_t>(State::kFailed));
             if (!config.readyFile.empty()) std::remove(config.readyFile.c_str());

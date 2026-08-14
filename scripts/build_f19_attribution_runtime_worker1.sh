@@ -15,6 +15,7 @@ TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-}"
 GATEWAY_BUILD_IMAGE="${GATEWAY_BUILD_IMAGE:-}"
 SHOW_HISTORY="${SHOW_HISTORY:-1}"
 APPLY_PATCH="${APPLY_PATCH:-1}"
+APPLY_KVC_BURST_PROXY="${APPLY_KVC_BURST_PROXY:-0}"
 BUILD_TRTLLM="${BUILD_TRTLLM:-1}"
 TRT_CMAKE_BUILD_TYPE="${TRT_CMAKE_BUILD_TYPE:-Release}"
 
@@ -26,6 +27,8 @@ done
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
 [[ "$SHOW_HISTORY" = 0 || "$SHOW_HISTORY" = 1 ]] || die "SHOW_HISTORY must be 0 or 1"
 [[ "$APPLY_PATCH" = 0 || "$APPLY_PATCH" = 1 ]] || die "APPLY_PATCH must be 0 or 1"
+[[ "$APPLY_KVC_BURST_PROXY" = 0 || "$APPLY_KVC_BURST_PROXY" = 1 ]] \
+  || die "APPLY_KVC_BURST_PROXY must be 0 or 1"
 [[ "$BUILD_TRTLLM" = 0 || "$BUILD_TRTLLM" = 1 ]] || die "BUILD_TRTLLM must be 0 or 1"
 [[ "$TRT_CMAKE_BUILD_TYPE" = Release ]] \
   || die "TRT_CMAKE_BUILD_TYPE must be Release for the production inference runtime"
@@ -36,6 +39,12 @@ if [[ "$APPLY_PATCH" = 1 ]]; then
   echo "== Apply current F19 attribution patch idempotently =="
   TRTLLM_DIR="$TRTLLM_DIR" \
     bash "$REPO_DIR/scripts/apply_trtllm_datasystem_request_attribution_patch.sh"
+fi
+
+if [[ "$APPLY_KVC_BURST_PROXY" = 1 ]]; then
+  echo "== Apply F14 in-process KVC burst proxy patch idempotently =="
+  TRTLLM_DIR="$TRTLLM_DIR" \
+    bash "$REPO_DIR/scripts/apply_trtllm_kvc_burst_proxy_patch.sh"
 fi
 
 grep -Fq PAIREC_DATASYSTEM_REQUEST_ATTRIBUTION_ZERO_INTRUSION_DISABLED_V2 \
@@ -386,6 +395,15 @@ docker run --rm \
       exit 1
     fi
     install -m 0755 "$gateway" /out/bin/brpc_inference_server
+
+    kvc_build=/tmp/f14-kvc-burst-build
+    cmake -E remove_directory "$kvc_build"
+    cmake -S "$REPO_DIR/cpp/kvc_burst" -B "$kvc_build" \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DDATASYSTEM_INCLUDE_DIR="$ds_include" \
+      -DDATASYSTEM_LIBRARY="$ds_library"
+    cmake --build "$kvc_build" --target kvc_burst_wrapper -j"$JOBS"
+    install -m 0755 "$kvc_build/kvc_burst_wrapper" /out/bin/kvc_burst_wrapper
   '
 
 echo "== Publish verified F19 V2 runtime =="
@@ -393,6 +411,8 @@ test -x "$staging_dir/bin/brpc_inference_server" \
   || die "staged gateway is missing"
 test -f "$staging_dir/lib/libtensorrt_llm.so" \
   || die "staged TensorRT-LLM library is missing"
+test -x "$staging_dir/bin/kvc_burst_wrapper" \
+  || die "staged KVC burst sidecar is missing"
 grep -Fq output_token_count < <(strings "$staging_dir/bin/brpc_inference_server")
 grep -Fq runner_ms_per_output_token < <(strings "$staging_dir/bin/brpc_inference_server")
 grep -Fq trt_executor_request_complete < <(strings "$staging_dir/bin/brpc_inference_server")
@@ -404,12 +424,21 @@ install -m 0755 "$staging_dir/bin/brpc_inference_server" \
   "$RUNTIME_DIR/bin/brpc_inference_server"
 install -m 0755 "$staging_dir/lib/libtensorrt_llm.so" \
   "$RUNTIME_DIR/lib/libtensorrt_llm.so"
+install -m 0755 "$staging_dir/bin/kvc_burst_wrapper" \
+  "$RUNTIME_DIR/bin/kvc_burst_wrapper"
+
+if [[ "$APPLY_KVC_BURST_PROXY" = 1 ]]; then
+  grep -Fq KVC_BURST_CONTROL_PATH \
+    < <(strings "$RUNTIME_DIR/lib/libtensorrt_llm.so")
+fi
 
 ls -lh \
   "$RUNTIME_DIR/bin/brpc_inference_server" \
+  "$RUNTIME_DIR/bin/kvc_burst_wrapper" \
   "$RUNTIME_DIR/lib/libtensorrt_llm.so"
 sha256sum \
   "$RUNTIME_DIR/bin/brpc_inference_server" \
+  "$RUNTIME_DIR/bin/kvc_burst_wrapper" \
   "$RUNTIME_DIR/lib/libtensorrt_llm.so"
 grep -F -m1 output_token_count < <(strings "$RUNTIME_DIR/bin/brpc_inference_server")
 grep -F -m1 datasystem_attribution_ready < <(strings "$RUNTIME_DIR/lib/libtensorrt_llm.so")

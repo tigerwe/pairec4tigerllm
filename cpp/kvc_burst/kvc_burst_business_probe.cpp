@@ -25,8 +25,8 @@ struct Config
 {
     std::string host{"127.0.0.1"};
     int port{18482};
-    uint64_t objectSize{1792ULL * 1024ULL};
-    std::string prefix{"PairecKvcBurst"};
+    uint64_t objectSize{3670016ULL};
+    std::string prefix{"PairecKvcBurstV2"};
     std::string requestId{"kvc-burst-probe"};
     std::string controlPath{"/run/pairec-kvc-burst/control"};
     uint32_t readyTimeoutMs{30000};
@@ -247,7 +247,8 @@ int main(int argc, char** argv)
         return 1;
     }
     uint32_t expected = static_cast<uint32_t>(State::kReady);
-    pairec::kvc_burst::Store(&control.claim_started_ns, pairec::kvc_burst::MonotonicNs());
+    auto triggerStarted = pairec::kvc_burst::MonotonicNs();
+    pairec::kvc_burst::Store(&control.claim_started_ns, triggerStarted);
     if (!pairec::kvc_burst::CompareExchange(
             &control.state, &expected, static_cast<uint32_t>(State::kClaimed)))
     {
@@ -257,9 +258,19 @@ int main(int argc, char** argv)
 
     auto generation = pairec::kvc_burst::Load(&control.prepared_generation);
     pairec::kvc_burst::CopyRequestId(control.request_id, config.requestId.c_str());
+    pairec::kvc_burst::Store(
+        &control.business_api, static_cast<uint32_t>(pairec::kvc_burst::BusinessApi::kGet));
+    pairec::kvc_burst::Store(&control.business_key_count, 1U);
+    pairec::kvc_burst::Store(&control.business_bytes, config.objectSize);
+    pairec::kvc_burst::Store(&control.trigger_started_ns, triggerStarted);
+    pairec::kvc_burst::Store(&control.business_trigger_status,
+        static_cast<uint32_t>(pairec::kvc_burst::TriggerStatus::kTriggered));
     pairec::kvc_burst::Store(&control.state, static_cast<uint32_t>(State::kRunning));
     pairec::kvc_burst::Store(&control.run_generation, generation);
     pairec::kvc_burst::FutexWake(&control.run_generation);
+    auto triggerCompleted = pairec::kvc_burst::MonotonicNs();
+    pairec::kvc_burst::Store(&control.trigger_completed_ns, triggerCompleted);
+    pairec::kvc_burst::Store(&control.business_trigger_us, (triggerCompleted - triggerStarted) / 1000ULL);
 
     uint64_t barrierWaitUs = 0;
     auto released = pairec::kvc_burst::ArriveAndWait(
@@ -277,10 +288,12 @@ int main(int argc, char** argv)
     pairec::kvc_burst::Store(&control.business_done_generation, generation);
     pairec::kvc_burst::FutexWake(&control.business_done_generation);
 
-    std::cout << "{\"event\":\"kvc_burst_business_complete\",\"generation\":" << generation
+    std::cout << "{\"event\":\"kvc_proxy_business_get_complete\",\"generation\":" << generation
               << ",\"request_id\":\"" << config.requestId << "\",\"barrier_released\":"
               << (released ? "true" : "false") << ",\"barrier_wait_us\":" << barrierWaitUs
               << ",\"business_get_us\":" << (businessEnd - businessStart) / 1000ULL
+              << ",\"business_api\":\"get\",\"business_key_count\":1,\"business_bytes\":"
+              << config.objectSize << ",\"trigger_us\":" << (triggerCompleted - triggerStarted) / 1000ULL
               << ",\"business_success\":" << (success ? "true" : "false") << "}" << std::endl;
 
     bool resultValid = released && success;

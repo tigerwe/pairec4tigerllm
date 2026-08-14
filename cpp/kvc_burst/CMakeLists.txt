@@ -46,6 +46,9 @@ endif()
 
 add_executable(kvc_burst_wrapper kvc_burst_wrapper.cpp)
 add_executable(kvc_burst_business_probe kvc_burst_business_probe.cpp)
+add_executable(kvc_operation_proxy_test kvc_operation_proxy.cpp kvc_operation_proxy_test.cpp)
+target_include_directories(kvc_operation_proxy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(kvc_operation_proxy_test PRIVATE Threads::Threads)
 
 foreach(target kvc_burst_wrapper kvc_burst_business_probe)
   target_include_directories(${target} PRIVATE ${DATASYSTEM_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})

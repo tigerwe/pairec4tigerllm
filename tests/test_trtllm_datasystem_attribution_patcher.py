@@ -42,6 +42,11 @@ int main()
     setenv("TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION", "1", 1);
     registerDataSystemRequest(7, "request-7", 1);
     markDataSystemRequestExecutorEnqueued(7);
+    {
+        DataSystemRequestScope scope(7);
+        auto requestId = currentDataSystemRequestId();
+        if (!requestId || *requestId != "request-7") return 2;
+    }
     std::this_thread::sleep_for(std::chrono::microseconds(200));
     recordDataSystemRequestPhase(7, DataSystemRequestPhase::kAddSequence, 20);
     std::this_thread::sleep_for(std::chrono::microseconds(200));

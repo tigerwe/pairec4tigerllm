@@ -24,6 +24,7 @@ void Initialize(SharedControl* control, uint32_t concurrency)
     control->configured_concurrency = concurrency;
     control->pressure_lanes = concurrency - 1;
     control->barrier_timeout_ms = 100;
+    control->object_size_bytes = 3670016;
 }
 
 } // namespace
@@ -63,6 +64,10 @@ int main()
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     assert(pairec::kvc_burst::Load(&control->release_generation) == 1);
     assert(pairec::kvc_burst::Load(&control->barrier_failed) == 0);
+    assert(pairec::kvc_burst::IsCompatible(*control));
+    assert(std::string(pairec::kvc_burst::BusinessApiName(
+               pairec::kvc_burst::BusinessApi::kParallelGet))
+        == "parallel_get");
 
     Initialize(control, 2);
     assert(!pairec::kvc_burst::ArriveAndWait(control, 2, 2, &waitUs));

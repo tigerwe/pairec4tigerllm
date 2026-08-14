@@ -6,10 +6,10 @@ KVC_BURST_BUSINESS_PROBE_BIN=${KVC_BURST_BUSINESS_PROBE_BIN:-/opt/pairec-kvc-bur
 DS_ENDPOINT=${DS_ENDPOINT:-192.168.100.12:18482}
 CONCURRENCY_LEVELS=${CONCURRENCY_LEVELS:-1 10 100}
 REPEATS=${REPEATS:-3}
-OBJECT_SIZE=${OBJECT_SIZE:-1835008}
+OBJECT_SIZE=${OBJECT_SIZE:-3670016}
 BARRIER_TIMEOUT_MS=${BARRIER_TIMEOUT_MS:-10}
 SHUFFLE_SEED=${SHUFFLE_SEED:-20260804}
-PREFIX_BASE=${PREFIX_BASE:-PairecKvcBurst}
+PREFIX_BASE=${PREFIX_BASE:-PairecKvcBurstV2}
 OUT_DIR=${OUT_DIR:-/tmp/kvc-burst-wrapper/$(date +%Y%m%d-%H%M%S)-$$}
 CONTROL_DIR=${CONTROL_DIR:-$OUT_DIR/control}
 READY_TIMEOUT_SECONDS=${READY_TIMEOUT_SECONDS:-120}
@@ -136,7 +136,7 @@ for concurrency in levels:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("event") == "kvc_burst_result":
+            if event.get("event") == "kvc_burst_complete":
                 events.append(event)
     valid = len(events) == repeats and all(event.get("valid") is True for event in events)
     business = [float(event["business_get_ms"]) for event in events]

@@ -48,6 +48,7 @@ private:
 };
 
 [[nodiscard]] bool dataSystemRequestAttributionEnabled();
+[[nodiscard]] std::optional<std::string> currentDataSystemRequestId();
 void registerDataSystemRequest(
     std::uint64_t correlationId, std::string const& requestId, std::uint64_t nativeLifecycleCount);
 void finishDataSystemRequest(std::uint64_t correlationId);
@@ -432,6 +433,21 @@ public:
         return *gCorrelationId;
     }
 
+    std::optional<std::string> currentRequestId()
+    {
+        if (!gCorrelationId)
+        {
+            return std::nullopt;
+        }
+        std::lock_guard<std::mutex> lock(mMutex);
+        auto const it = mRequests.find(*gCorrelationId);
+        if (it == mRequests.end())
+        {
+            return std::nullopt;
+        }
+        return it->second.requestId;
+    }
+
     void finishOperation(std::uint64_t correlationId, DataSystemOperation operation, std::int64_t durationUs,
         bool failed)
     {
@@ -534,6 +550,15 @@ bool dataSystemRequestAttributionEnabled()
 {
     static bool const enabled = parseEnabled(std::getenv("TRTLLM_DATASYSTEM_REQUEST_ATTRIBUTION"));
     return enabled;
+}
+
+std::optional<std::string> currentDataSystemRequestId()
+{
+    if (!dataSystemRequestAttributionEnabled())
+    {
+        return std::nullopt;
+    }
+    return tracker().currentRequestId();
 }
 
 DataSystemRequestScope::DataSystemRequestScope(std::optional<std::uint64_t> correlationId)

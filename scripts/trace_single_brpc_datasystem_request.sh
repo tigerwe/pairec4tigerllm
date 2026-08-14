@@ -5,6 +5,8 @@ NAMESPACE="${NAMESPACE:-pairec}"
 PAIREC_TARGET="${PAIREC_TARGET:-deploy/pairec}"
 BRPC_TARGET="${BRPC_TARGET:-deployment/inference-brpc-trtllm}"
 BRPC_CONTAINER="${BRPC_CONTAINER:-brpc-inference}"
+KVC_BURST_CONTAINER="${KVC_BURST_CONTAINER:-}"
+KVC_BURST_REQUIRE_COMPLETE="${KVC_BURST_REQUIRE_COMPLETE:-0}"
 
 USER_ID="${USER_ID:-6312}"
 SIZE="${SIZE:-1}"
@@ -27,8 +29,10 @@ OUT_DIR="${OUT_DIR:-/tmp/pairec_single_request_trace/${RUN_ID}}"
 PORT_FORWARD_PID=""
 PAIREC_LOG_PID=""
 TRT_LOG_PID=""
+KVC_BURST_LOG_PID=""
 PAIREC_LOG="${OUT_DIR}/pairec_stdout.log"
 TRT_LOG="${OUT_DIR}/brpc_trtllm.log"
+KVC_BURST_LOG="${OUT_DIR}/kvc_burst.log"
 PAIREC_EXTRA_LOG="${OUT_DIR}/pairec_request_trace.log"
 RESPONSE_JSON="${OUT_DIR}/response.json"
 CLIENT_JSON="${OUT_DIR}/client.json"
@@ -50,6 +54,7 @@ cleanup_pid() {
 cleanup() {
   cleanup_pid "$PAIREC_LOG_PID"
   cleanup_pid "$TRT_LOG_PID"
+  cleanup_pid "$KVC_BURST_LOG_PID"
   cleanup_pid "$PORT_FORWARD_PID"
 }
 
@@ -133,6 +138,7 @@ start_log_collectors() {
   log "Start log collectors"
   : >"$PAIREC_LOG"
   : >"$TRT_LOG"
+  : >"$KVC_BURST_LOG"
 
   kubectl -n "$NAMESPACE" logs --tail=0 -f "$PAIREC_TARGET" \
     >"$PAIREC_LOG" 2>&1 &
@@ -141,6 +147,11 @@ start_log_collectors() {
   kubectl -n "$NAMESPACE" logs --tail=0 -f "$BRPC_TARGET" -c "$BRPC_CONTAINER" \
     >"$TRT_LOG" 2>&1 &
   TRT_LOG_PID="$!"
+  if [ -n "$KVC_BURST_CONTAINER" ]; then
+    kubectl -n "$NAMESPACE" logs --tail=0 -f "$BRPC_TARGET" -c "$KVC_BURST_CONTAINER" \
+      >"$KVC_BURST_LOG" 2>&1 &
+    KVC_BURST_LOG_PID="$!"
+  fi
   sleep 2
 }
 
@@ -225,13 +236,14 @@ collect_pairec_request_trace() {
 
 summarize() {
   log "Single request summary"
-  python3 - "$CLIENT_JSON" "$RESPONSE_JSON" "$PAIREC_LOG" "$PAIREC_EXTRA_LOG" "$TRT_LOG" "$SUMMARY_JSON" \
+  python3 - "$CLIENT_JSON" "$RESPONSE_JSON" "$PAIREC_LOG" "$PAIREC_EXTRA_LOG" "$TRT_LOG" \
+    "$KVC_BURST_LOG" "$SUMMARY_JSON" \
     "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" <<'PY' | tee "$SUMMARY_TXT"
 import json
 import sys
 
-client_json, response_json, pairec_log_path, pairec_extra_path, trt_log_path, summary_json = sys.argv[1:7]
-require_exact_attribution = sys.argv[7] == "1"
+client_json, response_json, pairec_log_path, pairec_extra_path, trt_log_path, kvc_log_path, summary_json = sys.argv[1:8]
+require_exact_attribution = sys.argv[8] == "1"
 
 def read_text(path):
     try:
@@ -267,6 +279,7 @@ response = read_json(response_json)
 pairec_log = read_text(pairec_log_path)
 pairec_extra = read_text(pairec_extra_path)
 trt_log = read_text(trt_log_path)
+kvc_log = read_text(kvc_log_path)
 request_id = str(client.get("request_id") or response.get("request_id") or "")
 
 pairec_lines = []
@@ -335,6 +348,17 @@ for line in trt_log.splitlines():
 offloads = [event for event in ds_events if event.get("op") == "offload"]
 onboards = [event for event in ds_events if event.get("op") == "onboard"]
 
+kvc_proxy_events = []
+for line in (trt_log + "\n" + kvc_log).splitlines():
+    if '"event":"kvc_' not in line:
+        continue
+    try:
+        candidate = json.loads(line[line.index("{"):])
+    except (ValueError, json.JSONDecodeError):
+        continue
+    if candidate.get("request_id") in (None, "", request_id):
+        kvc_proxy_events.append(candidate)
+
 summary = {
     "request_id": request_id,
     "client": client,
@@ -359,6 +383,7 @@ summary = {
     "datasystem_request_completion_count": len(datasystem_completions),
     "trt_executor_request_completions": executor_completions,
     "legacy_native_output_token_count": legacy_native_output_token_count,
+    "kvc_proxy_events": kvc_proxy_events,
 }
 
 if datasystem_completion:
@@ -556,6 +581,10 @@ require_command python3
   echo "ERROR: ATTRIBUTION_WAIT_SECONDS must be a positive integer" >&2
   exit 1
 }
+[[ "$KVC_BURST_REQUIRE_COMPLETE" = 0 || "$KVC_BURST_REQUIRE_COMPLETE" = 1 ]] || {
+  echo "ERROR: KVC_BURST_REQUIRE_COMPLETE must be 0 or 1" >&2
+  exit 1
+}
 
 log "Output directory"
 echo "$OUT_DIR"
@@ -592,10 +621,25 @@ else
   sleep 3
 fi
 
+if [[ "$KVC_BURST_REQUIRE_COMPLETE" = 1 ]]; then
+  log "Wait for KVC burst completion"
+  deadline="$((SECONDS + ATTRIBUTION_WAIT_SECONDS))"
+  while ! grep -F '"event":"kvc_burst_complete"' "$KVC_BURST_LOG" \
+      | grep -Fq "\"request_id\":\"${REQUEST_ID}\""; do
+    (( SECONDS < deadline )) || {
+      echo "ERROR: no KVC burst completion for request_id=$REQUEST_ID" >&2
+      exit 1
+    }
+    sleep 0.1
+  done
+fi
+
 cleanup_pid "$PAIREC_LOG_PID"
 cleanup_pid "$TRT_LOG_PID"
+cleanup_pid "$KVC_BURST_LOG_PID"
 PAIREC_LOG_PID=""
 TRT_LOG_PID=""
+KVC_BURST_LOG_PID=""
 
 collect_pairec_request_trace "$REQUEST_ID"
 summarize
