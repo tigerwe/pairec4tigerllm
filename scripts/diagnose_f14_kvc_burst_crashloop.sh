@@ -151,6 +151,9 @@ lower = evidence.lower()
 if reason == "OOMKilled" or exit_code == 137:
     classification = "KVC_BURST_SIDECAR_OOM"
     next_action = "inspect the sidecar memory limit and prefill allocation before increasing it"
+elif "write ready file: no space left on device" in lower:
+    classification = "KVC_BURST_CONTROL_TMPFS_TOO_SMALL"
+    next_action = "increase the kvc-burst-control emptyDir sizeLimit; 64Ki is one tmpfs block and is consumed by control"
 elif "basic_string::substr" in lower and "which is 4" in lower and "which is 0" in lower:
     classification = "KVC_BURST_DATASYSTEM_GPU_RUNTIME_PRELOAD_FAILURE"
     next_action = "restore the inference DataSystem LD_PRELOAD/LD_LIBRARY_PATH chain in the sidecar environment"

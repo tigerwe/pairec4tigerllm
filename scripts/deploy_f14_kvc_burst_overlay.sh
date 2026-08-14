@@ -144,7 +144,7 @@ patch = {"spec": {"template": {"metadata": {"annotations": {
     ],
     "volumes": [
         {"name": "f19-runtime-bin", "hostPath": {"path": f"{host_runtime}/bin", "type": "Directory"}},
-        {"name": "kvc-burst-control", "emptyDir": {"medium": "Memory", "sizeLimit": "64Ki"}},
+        {"name": "kvc-burst-control", "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"}},
     ],
 }}}}
 pathlib.Path(output_path).write_text(json.dumps(patch))
