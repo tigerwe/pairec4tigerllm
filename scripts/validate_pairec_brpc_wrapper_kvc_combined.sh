@@ -4,6 +4,7 @@ set -euo pipefail
 NAMESPACE=${NAMESPACE:-pairec}
 KVC_CONCURRENCY=${KVC_CONCURRENCY:-10}
 KVC_PRESSURE_KEY_COUNT=${KVC_PRESSURE_KEY_COUNT:-9}
+KVC_OBJECT_SIZE=${KVC_OBJECT_SIZE:-3670016}
 WRAPPER_CONCURRENCY=${WRAPPER_CONCURRENCY:-1}
 REQUESTS=${REQUESTS:-3}
 WARMUP_REQUESTS=${WARMUP_REQUESTS:-1}
@@ -25,6 +26,7 @@ mkdir -p "$OUTPUT_DIR"
 [[ "$KVC_PRESSURE_KEY_COUNT" =~ ^[0-9]+$ ]] || die "KVC_PRESSURE_KEY_COUNT must be non-negative"
 (( KVC_PRESSURE_KEY_COUNT <= KVC_CONCURRENCY - 1 )) \
   || die "KVC_PRESSURE_KEY_COUNT must not exceed KVC pressure lanes"
+[[ "$KVC_OBJECT_SIZE" =~ ^[1-9][0-9]*$ ]] || die "KVC_OBJECT_SIZE must be positive"
 [[ "$REQUESTS" =~ ^[1-9][0-9]*$ ]] || die "REQUESTS must be positive"
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
 
@@ -40,7 +42,8 @@ trap restore_kvc EXIT INT TERM
 echo "== Apply KVC c${KVC_CONCURRENCY} overlay =="
 NAMESPACE="$NAMESPACE" DEPLOYMENT=inference-brpc-trtllm \
   BACKUP_FILE="$KVC_OVERLAY_BACKUP" CONCURRENCY="$KVC_CONCURRENCY" \
-  PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" KVC_BURST_ENABLED=1 \
+  PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" OBJECT_SIZE="$KVC_OBJECT_SIZE" \
+  KVC_BURST_ENABLED=1 \
   KVC_BURST_VERBOSE=1 KVC_BURST_INITIAL_ARMED=0 \
   bash scripts/deploy_f14_kvc_burst_overlay.sh apply \
   | tee "$OUTPUT_DIR/kvc-overlay.log"
@@ -88,7 +91,7 @@ kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper \
 
 python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log" \
   "$OUTPUT_DIR/summary.json" "$WRAPPER_CONCURRENCY" "$KVC_CONCURRENCY" \
-  "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" <<'PY'
+  "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" "$KVC_OBJECT_SIZE" <<'PY'
 import json, math, pathlib, statistics, sys
 contention = json.load(open(sys.argv[1]))
 wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
@@ -96,6 +99,7 @@ wrapper_concurrency = int(sys.argv[4])
 kvc_concurrency = int(sys.argv[5])
 expected_onboards_min = int(sys.argv[6])
 expected_onboards_max = int(sys.argv[7])
+kvc_object_size = int(sys.argv[8])
 valid = contention.get("valid_repeats") == contention.get("expected_repeats")
 rows = []
 
@@ -139,6 +143,7 @@ for row in contention.get("rows", []):
     assert len(kvc_events) == 1, (request_id, kvc_events)
     kvc = kvc_events[0]
     assert kvc["concurrency"] == kvc_concurrency and kvc["valid"] is True, kvc
+    assert kvc["object_size_bytes"] == kvc_object_size, kvc
     pressure_lanes = max(kvc_concurrency - 1, 0)
     assert kvc["pressure_lanes"] == pressure_lanes, kvc
     assert kvc["pressure_success"] == pressure_lanes, kvc
@@ -192,6 +197,7 @@ result = {
                        if valid else "PAIREC_BRPC_WRAPPER_KVC_COMBINED_FAIL"),
     "wrapper_concurrency": wrapper_concurrency,
     "kvc_concurrency": kvc_concurrency,
+    "kvc_object_size_bytes": kvc_object_size,
     "expected_onboards_min": expected_onboards_min,
     "expected_onboards_max": expected_onboards_max,
     "contention": contention,

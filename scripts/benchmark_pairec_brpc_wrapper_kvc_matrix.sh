@@ -6,6 +6,7 @@ REQUESTS=${REQUESTS:-3}
 BURST_POOL_SIZE=${BURST_POOL_SIZE:-10000}
 COMBINED_KVC_CONCURRENCY=${COMBINED_KVC_CONCURRENCY:-100}
 COMBINED_KVC_PRESSURE_KEY_COUNT=${COMBINED_KVC_PRESSURE_KEY_COUNT:-4}
+COMBINED_KVC_OBJECT_SIZE=${COMBINED_KVC_OBJECT_SIZE:-3670016}
 OUTPUT_DIR=${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-kvc-matrix/$(date +%Y%m%d-%H%M%S)-n${REQUESTS}}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -13,23 +14,24 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 mkdir -p "$OUTPUT_DIR"
 
 run_case() {
-  local name=$1 wrapper_concurrency=$2 kvc_concurrency=$3 pressure_keys=$4 payload_bytes=$5
-  local onboard_min=$6 onboard_max=$7
+  local name=$1 wrapper_concurrency=$2 kvc_concurrency=$3 pressure_keys=$4 object_size=$5
+  local payload_bytes=$6 onboard_min=$7 onboard_max=$8
   echo "== Combined case=$name Wrapper=c${wrapper_concurrency} KVC=c${kvc_concurrency} =="
   NAMESPACE="$NAMESPACE" REQUESTS="$REQUESTS" \
     WRAPPER_CONCURRENCY="$wrapper_concurrency" \
     BURST_ACTIVE_CONNECTIONS="$wrapper_concurrency" \
     BURST_POOL_SIZE="$BURST_POOL_SIZE" BURST_PAYLOAD_BYTES="$payload_bytes" \
     KVC_CONCURRENCY="$kvc_concurrency" KVC_PRESSURE_KEY_COUNT="$pressure_keys" \
+    KVC_OBJECT_SIZE="$object_size" \
     EXPECTED_ONBOARDS_MIN="$onboard_min" EXPECTED_ONBOARDS_MAX="$onboard_max" \
     OUTPUT_DIR="$OUTPUT_DIR/$name" \
     bash scripts/validate_pairec_brpc_wrapper_kvc_combined.sh \
     | tee "$OUTPUT_DIR/$name.console.log"
 }
 
-run_case baseline 1 1 0 0 2 2
+run_case baseline 1 1 0 3670016 0 2 2
 run_case combined 1000 "$COMBINED_KVC_CONCURRENCY" \
-  "$COMBINED_KVC_PRESSURE_KEY_COUNT" 102400 1 2
+  "$COMBINED_KVC_PRESSURE_KEY_COUNT" "$COMBINED_KVC_OBJECT_SIZE" 102400 1 2
 
 python3 - "$OUTPUT_DIR/baseline/summary.json" "$OUTPUT_DIR/combined/summary.json" "$OUTPUT_DIR/summary.json" <<'PY'
 import json, pathlib, sys
@@ -54,6 +56,7 @@ result = {
     "classification": "PAIREC_BRPC_WRAPPER_KVC_MATRIX_OK",
     "baseline": baseline,
     "combined": combined,
+    "combined_kvc_object_size_bytes": combined["kvc_object_size_bytes"],
     "comparison": rows,
 }
 pathlib.Path(sys.argv[3]).write_text(json.dumps(result, indent=2) + "\n")

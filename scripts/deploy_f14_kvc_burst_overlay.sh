@@ -53,9 +53,12 @@ verify() {
   echo "$ready"
   grep -Fq "concurrency=$CONCURRENCY" <<<"$ready" \
     || die "sidecar concurrency mismatch"
-  kubectl -n "$NAMESPACE" logs "$pod" -c "$SIDECAR_CONTAINER" --tail=200 \
-    | grep -F '"event":"kvc_burst_ready"' | tail -1
-  echo "F14_KVC_BURST_OVERLAY_VERIFY_OK pod=$pod concurrency=$CONCURRENCY enabled=$KVC_BURST_ENABLED"
+  ready_event=$(kubectl -n "$NAMESPACE" logs "$pod" -c "$SIDECAR_CONTAINER" --tail=200 \
+    | grep -F '"event":"kvc_burst_ready"' | tail -1)
+  echo "$ready_event"
+  grep -Fq "\"object_size_bytes\":$OBJECT_SIZE" <<<"$ready_event" \
+    || die "sidecar object size mismatch: expected=$OBJECT_SIZE"
+  echo "F14_KVC_BURST_OVERLAY_VERIFY_OK pod=$pod concurrency=$CONCURRENCY object_size_bytes=$OBJECT_SIZE enabled=$KVC_BURST_ENABLED"
 }
 
 apply_overlay() {
@@ -63,6 +66,7 @@ apply_overlay() {
   [[ "$PRESSURE_KEY_COUNT" =~ ^[0-9]+$ ]] || die "PRESSURE_KEY_COUNT must be non-negative"
   (( PRESSURE_KEY_COUNT <= CONCURRENCY - 1 )) \
     || die "PRESSURE_KEY_COUNT must not exceed pressure lanes"
+  [[ "$OBJECT_SIZE" =~ ^[1-9][0-9]*$ ]] || die "OBJECT_SIZE must be positive"
   [[ "$KVC_BURST_ENABLED" = 0 || "$KVC_BURST_ENABLED" = 1 ]] \
     || die "KVC_BURST_ENABLED must be 0 or 1"
   [[ "$MEASURE_DISABLED" = 0 || "$MEASURE_DISABLED" = 1 ]] \
