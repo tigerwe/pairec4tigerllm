@@ -105,6 +105,19 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertIn('INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS="${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS:-120}"', text)
         self.assertIn('[ "$sidecar_ready" = "true" ]', text)
 
+    def test_f14_arms_burst_only_after_prime(self):
+        benchmark_text = BENCHMARK.read_text()
+        validator_text = F14_VALIDATOR.read_text()
+        disarm = benchmark_text.index('set_kvc_burst_arm "$round_dir" disarm')
+        prime = benchmark_text.index('run_prime "$round_dir"')
+        arm = benchmark_text.index('set_kvc_burst_arm "$round_dir" arm')
+        replay = benchmark_text.index('run_replay "$round_dir"')
+        self.assertLess(disarm, prime)
+        self.assertLess(prime, arm)
+        self.assertLess(arm, replay)
+        self.assertIn('KVC_BURST_INITIAL_ARMED=0', validator_text)
+        self.assertIn('export KVC_BURST_DYNAMIC_ARM="$enabled"', validator_text)
+
     def test_trace_summary_preserves_completion_multiplicity(self):
         text = TRACE.read_text()
         self.assertRegex(text, re.compile(r"datasystem_completions\.append\(candidate\)"))

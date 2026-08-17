@@ -30,11 +30,13 @@ run_case() {
   echo "== KVC Proxy case=$name concurrency=$concurrency enabled=$enabled =="
   BACKUP_FILE="$BACKUP_FILE" NAMESPACE="$NAMESPACE" DEPLOYMENT="$DEPLOYMENT" \
   CONCURRENCY="$concurrency" KVC_BURST_ENABLED="$enabled" MEASURE_DISABLED="$measure_disabled" \
+  KVC_BURST_INITIAL_ARMED=0 \
     bash scripts/deploy_f14_kvc_burst_overlay.sh apply \
     | tee "$case_dir/overlay.log"
 
   export KVC_BURST_CONTAINER=kvc-burst-wrapper
   export KVC_BURST_REQUIRE_COMPLETE="$require_complete"
+  export KVC_BURST_DYNAMIC_ARM="$enabled"
   MODE=baseline \
   REPEATS="$REPEATS" \
   STRICT_COUNTS=1 \

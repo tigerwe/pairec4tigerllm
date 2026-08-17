@@ -43,9 +43,15 @@ int main()
     control->object_size_bytes = 3670016;
     control->keys_verified = 1;
     control->clients_connected = 1;
+    control->trigger_armed = 0;
     control->state = static_cast<uint32_t>(State::kReady);
     assert(::setenv("KVC_BURST_ENABLED", "1", 1) == 0);
     assert(::setenv("KVC_BURST_CONTROL_PATH", path.c_str(), 1) == 0);
+
+    auto disarmed = pairec::kvc_burst::beginBusinessGet("request-disarmed", BusinessApi::kGet, 1);
+    assert(!disarmed.triggered());
+    assert(disarmed.status == TriggerStatus::kSkippedDisarmed);
+    control->trigger_armed = 1;
 
     auto child = ::fork();
     assert(child >= 0);

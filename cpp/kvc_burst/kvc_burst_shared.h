@@ -56,6 +56,7 @@ enum class TriggerStatus : uint32_t
     kSkippedNoRequest = 4,
     kInvalidControl = 5,
     kSkippedAlreadyTriggered = 6,
+    kSkippedDisarmed = 7,
 };
 
 // All fields use fixed-width integral types so the control block has one ABI in
@@ -98,7 +99,7 @@ struct alignas(64) SharedControl
     uint32_t keys_verified;
 
     uint32_t clients_connected;
-    uint32_t reserved_u32_0;
+    uint32_t trigger_armed;
     uint32_t reserved_u32_1;
     uint32_t reserved_u32_2;
 

@@ -62,6 +62,9 @@ NAMESPACE="${NAMESPACE:-pairec}"
 PAIREC_TARGET="${PAIREC_TARGET:-deploy/pairec}"
 BRPC_TARGET="${BRPC_TARGET:-deployment/inference-brpc-trtllm}"
 BRPC_CONTAINER="${BRPC_CONTAINER:-brpc-inference}"
+KVC_BURST_CONTAINER="${KVC_BURST_CONTAINER:-}"
+KVC_BURST_DYNAMIC_ARM="${KVC_BURST_DYNAMIC_ARM:-0}"
+KVC_BURST_CONTROL_BIN="${KVC_BURST_CONTROL_BIN:-/opt/pairec-f19/bin/kvc_burst_wrapper}"
 BRPC_LOAD_POD_SELECTOR="${BRPC_LOAD_POD_SELECTOR:-app=brpc-pressure-target}"
 BRPC_LOAD_CONTAINER="${BRPC_LOAD_CONTAINER:-brpc-pressure-target}"
 NETWORK_INTERFACE="${NETWORK_INTERFACE:-enp41s0f1}"
@@ -163,6 +166,10 @@ validate() {
   case "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" in
     0|1) ;;
     *) die "REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION must be 0 or 1" ;;
+  esac
+  case "$KVC_BURST_DYNAMIC_ARM" in
+    0|1) ;;
+    *) die "KVC_BURST_DYNAMIC_ARM must be 0 or 1" ;;
   esac
   case "$KVC_DSBENCH_SUSTAINED" in
     0|1) ;;
@@ -531,6 +538,25 @@ run_privileged() {
   else
     sudo -n "$@"
   fi
+}
+
+set_kvc_burst_arm() {
+  local round_dir="$1"
+  local action="$2"
+  if [ "$KVC_BURST_DYNAMIC_ARM" != "1" ]; then
+    return
+  fi
+  [ -n "$KVC_BURST_CONTAINER" ] || die "KVC_BURST_CONTAINER is required for dynamic arm"
+  local pod
+  pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1].metadata.name}')"
+  [ -n "$pod" ] || die "inference pod not found for KVC burst ${action}"
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$KVC_BURST_CONTAINER" -- \
+    "$KVC_BURST_CONTROL_BIN" \
+    "--control_action=${action}" \
+    "--control_path=/run/pairec-kvc-burst/control" \
+    >>"${round_dir}/kvc-burst-control.log" 2>&1
 }
 if command -v crictl >/dev/null 2>&1; then
   run_privileged crictl stop --timeout 0 "$container_id"
@@ -1121,6 +1147,7 @@ reset_inference_mode=${RESET_INFERENCE_MODE}
 inference_rollout_timeout_seconds=${INFERENCE_ROLLOUT_TIMEOUT_SECONDS}
 inference_container_restart_timeout_seconds=${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS}
 inference_runtime_ssh_host=${INFERENCE_RUNTIME_SSH_HOST:-auto-node-internal-ip}
+kvc_burst_dynamic_arm=${KVC_BURST_DYNAMIC_ARM}
 EOF
 
 log "Experiment configuration"
@@ -1148,6 +1175,18 @@ for round in $(seq 1 "$REPEATS"); do
   fi
 
   set +e
+  set_kvc_burst_arm "$round_dir" disarm
+  arm_code="$?"
+  set -e
+  if [ "$arm_code" -ne 0 ]; then
+    echo "$arm_code" >"${round_dir}/kvc-burst-disarm.exit_code"
+    overall_code=1
+    echo "ERROR: round ${round} failed to disarm KVC burst before prime" >&2
+    stop_loads
+    break
+  fi
+
+  set +e
   run_prime "$round_dir"
   prime_code="$?"
   set -e
@@ -1155,6 +1194,18 @@ for round in $(seq 1 "$REPEATS"); do
     echo "$prime_code" >"${round_dir}/prime.exit_code"
     overall_code=1
     echo "ERROR: round ${round} prime failed after ${PRIME_MAX_ATTEMPTS} attempts" >&2
+    stop_loads
+    break
+  fi
+
+  set +e
+  set_kvc_burst_arm "$round_dir" arm
+  arm_code="$?"
+  set -e
+  if [ "$arm_code" -ne 0 ]; then
+    echo "$arm_code" >"${round_dir}/kvc-burst-arm.exit_code"
+    overall_code=1
+    echo "ERROR: round ${round} failed to arm KVC burst before replay" >&2
     stop_loads
     break
   fi
@@ -1184,9 +1235,15 @@ for round in $(seq 1 "$REPEATS"); do
   set +e
   run_replay "$round_dir"
   replay_code="$?"
+  set_kvc_burst_arm "$round_dir" disarm
+  disarm_code="$?"
   set -e
   echo "$replay_code" >"${round_dir}/replay.exit_code"
   [ "$replay_code" -eq 0 ] || overall_code=1
+  if [ "$disarm_code" -ne 0 ]; then
+    echo "$disarm_code" >"${round_dir}/kvc-burst-disarm-after-replay.exit_code"
+    overall_code=1
+  fi
   capture_inference_state "$round_dir" after
   capture_brpc_pressure_cpu_stat "$round_dir" after
 

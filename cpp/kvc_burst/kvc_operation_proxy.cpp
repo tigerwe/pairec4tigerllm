@@ -198,7 +198,19 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
         return token;
     }
     auto* control = mapping().get();
-    if (control == nullptr || Load(&control->keys_verified) != Load(&control->pressure_lanes)
+    if (control == nullptr)
+    {
+        token.status = TriggerStatus::kInvalidControl;
+        emitSkipped(requestId, token.status);
+        return token;
+    }
+    if (Load(&control->trigger_armed) == 0)
+    {
+        token.status = TriggerStatus::kSkippedDisarmed;
+        emitSkipped(requestId, token.status);
+        return token;
+    }
+    if (Load(&control->keys_verified) != Load(&control->pressure_lanes)
         || Load(&control->clients_connected) != Load(&control->pressure_lanes))
     {
         token.status = TriggerStatus::kInvalidControl;

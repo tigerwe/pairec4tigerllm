@@ -48,6 +48,8 @@ struct Config
     std::string readyFile{"/run/pairec-kvc-burst/ready"};
     std::string statsFile;
     bool cleanupKeys{true};
+    bool initiallyArmed{true};
+    std::string controlAction;
 };
 
 struct Mapping
@@ -146,6 +148,11 @@ bool ParseArgs(int argc, char** argv, Config* config)
         else if (name == "control_path") config->controlPath = value;
         else if (name == "ready_file") config->readyFile = value;
         else if (name == "stats_file") config->statsFile = value;
+        else if (name == "control_action") config->controlAction = value;
+        else if (name == "initially_armed")
+        {
+            if (!ParseBool(value, &config->initiallyArmed)) return false;
+        }
         else if (name == "cleanup_keys")
         {
             if (!ParseBool(value, &config->cleanupKeys)) return false;
@@ -255,9 +262,51 @@ bool CreateMapping(const Config& config, Mapping* mapping)
     mapping->control->pressure_lanes = config.concurrency - 1;
     mapping->control->barrier_timeout_ms = config.barrierTimeoutMs;
     mapping->control->object_size_bytes = config.objectSize;
+    pairec::kvc_burst::Store(&mapping->control->trigger_armed, config.initiallyArmed ? 1U : 0U);
     pairec::kvc_burst::Store(&mapping->control->state, static_cast<uint32_t>(State::kStarting));
     pairec::kvc_burst::Store(&mapping->control->magic, pairec::kvc_burst::kMagic);
     return true;
+}
+
+bool OpenExistingMapping(const Config& config, Mapping* mapping)
+{
+    mapping->fd = ::open(config.controlPath.c_str(), O_RDWR);
+    if (mapping->fd < 0)
+    {
+        std::perror("open existing control path");
+        return false;
+    }
+    struct stat info{};
+    if (::fstat(mapping->fd, &info) != 0 || info.st_size < static_cast<off_t>(sizeof(SharedControl)))
+    {
+        std::cerr << "existing control block is too small" << std::endl;
+        return false;
+    }
+    auto address = ::mmap(nullptr, sizeof(SharedControl), PROT_READ | PROT_WRITE, MAP_SHARED, mapping->fd, 0);
+    if (address == MAP_FAILED)
+    {
+        std::perror("mmap existing control path");
+        return false;
+    }
+    mapping->control = static_cast<SharedControl*>(address);
+    return pairec::kvc_burst::IsCompatible(*mapping->control);
+}
+
+int ApplyControlAction(const Config& config)
+{
+    Mapping mapping;
+    if (!OpenExistingMapping(config, &mapping)) return 1;
+    uint32_t armed = 0;
+    if (config.controlAction == "arm") armed = 1;
+    else if (config.controlAction != "disarm")
+    {
+        std::cerr << "control_action must be arm or disarm" << std::endl;
+        return 2;
+    }
+    pairec::kvc_burst::Store(&mapping.control->trigger_armed, armed);
+    std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"" << config.controlAction
+              << "\",\"armed\":" << (armed ? "true" : "false") << "}" << std::endl;
+    return 0;
 }
 
 uint64_t Percentile(std::vector<uint64_t> values, double percentile)
@@ -540,6 +589,7 @@ int Run(int argc, char** argv)
     gStartupStage = "parse_args";
     Config config;
     if (!ParseArgs(argc, argv, &config)) return 2;
+    if (!config.controlAction.empty()) return ApplyControlAction(config);
     std::signal(SIGINT, HandleSignal);
     std::signal(SIGTERM, HandleSignal);
 
