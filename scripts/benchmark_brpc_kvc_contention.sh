@@ -57,6 +57,7 @@ RESET_INFERENCE_MODE="${RESET_INFERENCE_MODE:-rollout}"
 INFERENCE_ROLLOUT_TIMEOUT_SECONDS="${INFERENCE_ROLLOUT_TIMEOUT_SECONDS:-600}"
 INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS="${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS:-120}"
 INFERENCE_RUNTIME_SSH_HOST="${INFERENCE_RUNTIME_SSH_HOST:-}"
+MIN_ROOT_AVAILABLE_KB="${MIN_ROOT_AVAILABLE_KB:-0}"
 
 NAMESPACE="${NAMESPACE:-pairec}"
 PAIREC_TARGET="${PAIREC_TARGET:-deploy/pairec}"
@@ -128,6 +129,7 @@ validate() {
     "$BRPC_LOAD_TIMEOUT_MS" "$BRPC_LOAD_READY_TIMEOUT_SECONDS" "$PRIME_MAX_ATTEMPTS" \
     "$PRIME_RETRY_DELAY_SECONDS" "$ROUND_COOLDOWN_SECONDS" "$KVC_LOAD_READY_TIMEOUT_SECONDS" \
     "$INFERENCE_ROLLOUT_TIMEOUT_SECONDS" "$INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS" \
+    "$MIN_ROOT_AVAILABLE_KB" \
     "$KVC_KEY_COUNT" "$KVC_GET_KEY_COUNT" \
     "$KVC_SET_KEY_COUNT" "$KVC_BATCH_NUM" "$KVC_THREAD_NUM" "$KVC_GET_CLIENTS" \
     "$KVC_SET_CLIENTS" "$KVC_LOAD_DURATION_SECONDS" "$KVC_REPORT_INTERVAL_SECONDS"; do
@@ -161,8 +163,8 @@ validate() {
     *) die "RESET_INFERENCE_BEFORE_ROUND must be 0 or 1" ;;
   esac
   case "$RESET_INFERENCE_MODE" in
-    rollout|container-runtime) ;;
-    *) die "RESET_INFERENCE_MODE must be rollout or container-runtime" ;;
+    rollout|container-runtime|pod-recreate) ;;
+    *) die "RESET_INFERENCE_MODE must be rollout, container-runtime, or pod-recreate" ;;
   esac
   case "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" in
     0|1) ;;
@@ -493,6 +495,10 @@ reset_inference() {
     reset_inference_container_runtime "$round_dir"
     return
   fi
+  if [ "$RESET_INFERENCE_MODE" = "pod-recreate" ]; then
+    reset_inference_pod_recreate "$round_dir"
+    return
+  fi
 
   kubectl -n "$NAMESPACE" rollout restart "$BRPC_TARGET" \
     >"${round_dir}/inference-rollout-restart.log" 2>&1
@@ -501,6 +507,59 @@ reset_inference() {
     >"${round_dir}/inference-rollout-status.log" 2>&1
   kubectl -n "$NAMESPACE" get pods -l app=inference-brpc-trtllm -o wide \
     >"${round_dir}/inference-pods-after-reset.txt"
+}
+
+reset_inference_pod_recreate() {
+  local round_dir="$1"
+  local pod old_uid candidate candidate_uid ready deadline
+  pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
+    --sort-by=.metadata.creationTimestamp \
+    -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' | tail -1)"
+  [ -n "$pod" ] || die "inference pod not found for pod recreation"
+  old_uid="$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.metadata.uid}')"
+  printf 'old_pod=%s old_uid=%s\n' "$pod" "$old_uid" \
+    >"${round_dir}/inference-pod-recreate.txt"
+
+  kubectl -n "$NAMESPACE" delete pod "$pod" --wait=false \
+    >"${round_dir}/inference-pod-delete.log" 2>&1
+
+  deadline="$((SECONDS + INFERENCE_ROLLOUT_TIMEOUT_SECONDS))"
+  while (( SECONDS < deadline )); do
+    candidate="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
+      --sort-by=.metadata.creationTimestamp \
+      -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | tail -1 || true)"
+    if [ -n "$candidate" ]; then
+      candidate_uid="$(kubectl -n "$NAMESPACE" get pod "$candidate" \
+        -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+      ready="$(kubectl -n "$NAMESPACE" get pod "$candidate" \
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+      if [ -n "$candidate_uid" ] && [ "$candidate_uid" != "$old_uid" ] && [ "$ready" = "True" ]; then
+        printf 'new_pod=%s new_uid=%s ready=%s\n' "$candidate" "$candidate_uid" "$ready" \
+          >>"${round_dir}/inference-pod-recreate.txt"
+        kubectl -n "$NAMESPACE" get pod "$candidate" -o wide \
+          >"${round_dir}/inference-pods-after-reset.txt"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+
+  kubectl -n "$NAMESPACE" get pods -l app=inference-brpc-trtllm -o wide \
+    >"${round_dir}/inference-pod-recreate-timeout.txt" 2>&1 || true
+  kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp \
+    >"${round_dir}/inference-pod-recreate-events.txt" 2>&1 || true
+  echo "ERROR: replacement inference pod did not become Ready" >&2
+  return 1
+}
+
+check_root_free_space() {
+  [ "$MIN_ROOT_AVAILABLE_KB" -gt 0 ] || return 0
+  local available_kb
+  available_kb="$(df -Pk / | awk 'NR == 2 { print $4 + 0 }')"
+  if [ "$available_kb" -lt "$MIN_ROOT_AVAILABLE_KB" ]; then
+    echo "ERROR: root filesystem has ${available_kb}KiB available; require at least ${MIN_ROOT_AVAILABLE_KB}KiB" >&2
+    return 1
+  fi
 }
 
 reset_inference_container_runtime() {
@@ -1185,6 +1244,7 @@ reset_inference_mode=${RESET_INFERENCE_MODE}
 inference_rollout_timeout_seconds=${INFERENCE_ROLLOUT_TIMEOUT_SECONDS}
 inference_container_restart_timeout_seconds=${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS}
 inference_runtime_ssh_host=${INFERENCE_RUNTIME_SSH_HOST:-auto-node-internal-ip}
+min_root_available_kb=${MIN_ROOT_AVAILABLE_KB}
 kvc_burst_dynamic_arm=${KVC_BURST_DYNAMIC_ARM}
 kvc_burst_pressure_key_count=${KVC_BURST_PRESSURE_KEY_COUNT}
 EOF
@@ -1198,6 +1258,12 @@ for round in $(seq 1 "$REPEATS"); do
   round_dir="${OUT_DIR}/round-${round}"
   mkdir -p "$round_dir"
   log "Round ${round}/${REPEATS}: mode=${MODE}"
+
+  if ! check_root_free_space; then
+    overall_code=1
+    echo "ERROR: round ${round} root filesystem free-space gate failed" >&2
+    break
+  fi
 
   start_kvc_load "$round" "$round_dir"
 
