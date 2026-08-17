@@ -55,6 +55,7 @@ REPLAY_TIMEOUT="${REPLAY_TIMEOUT:-30}"
 RESET_INFERENCE_BEFORE_ROUND="${RESET_INFERENCE_BEFORE_ROUND:-0}"
 RESET_INFERENCE_MODE="${RESET_INFERENCE_MODE:-rollout}"
 INFERENCE_ROLLOUT_TIMEOUT_SECONDS="${INFERENCE_ROLLOUT_TIMEOUT_SECONDS:-600}"
+INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS="${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS:-120}"
 
 NAMESPACE="${NAMESPACE:-pairec}"
 PAIREC_TARGET="${PAIREC_TARGET:-deploy/pairec}"
@@ -121,7 +122,8 @@ validate() {
     "$BRPC_LOAD_QPS" "$BRPC_LOAD_CONCURRENCY" "$BRPC_LOAD_PAYLOAD_BYTES" "$BRPC_LOAD_REQUESTS" \
     "$BRPC_LOAD_TIMEOUT_MS" "$BRPC_LOAD_READY_TIMEOUT_SECONDS" "$PRIME_MAX_ATTEMPTS" \
     "$PRIME_RETRY_DELAY_SECONDS" "$ROUND_COOLDOWN_SECONDS" "$KVC_LOAD_READY_TIMEOUT_SECONDS" \
-    "$INFERENCE_ROLLOUT_TIMEOUT_SECONDS" "$KVC_KEY_COUNT" "$KVC_GET_KEY_COUNT" \
+    "$INFERENCE_ROLLOUT_TIMEOUT_SECONDS" "$INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS" \
+    "$KVC_KEY_COUNT" "$KVC_GET_KEY_COUNT" \
     "$KVC_SET_KEY_COUNT" "$KVC_BATCH_NUM" "$KVC_THREAD_NUM" "$KVC_GET_CLIENTS" \
     "$KVC_SET_CLIENTS" "$KVC_LOAD_DURATION_SECONDS" "$KVC_REPORT_INTERVAL_SECONDS"; do
     [[ "$value" =~ ^[0-9]+$ ]] || die "repeat/count parameters must be non-negative integers"
@@ -129,6 +131,8 @@ validate() {
   [ "$REPEATS" -gt 0 ] || die "REPEATS must be positive"
   [ "$PRIME_REQUESTS" -gt 0 ] || die "PRIME_REQUESTS must be positive"
   [ "$PRIME_MAX_ATTEMPTS" -gt 0 ] || die "PRIME_MAX_ATTEMPTS must be positive"
+  [ "$INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS" -gt 0 ] \
+    || die "INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS must be positive"
   [ "$BRPC_LOAD_CONCURRENCY" -gt 0 ] || die "BRPC_LOAD_CONCURRENCY must be positive"
   [ "$BRPC_LOAD_PAYLOAD_BYTES" -gt 0 ] || die "BRPC_LOAD_PAYLOAD_BYTES must be positive"
   [ "$BRPC_LOAD_REQUESTS" -ge "$BRPC_LOAD_CONCURRENCY" ] \
@@ -505,10 +509,10 @@ reset_inference_container() {
     "$pod" "$BRPC_CONTAINER" "$before_restart" \
     >"${round_dir}/inference-container-reset.txt"
   kubectl -n "$NAMESPACE" exec "$pod" -c "$BRPC_CONTAINER" -- \
-    sh -c 'kill -KILL 1' \
+    sh -c 'kill -TERM 1' \
     >"${round_dir}/inference-container-kill.log" 2>&1 || true
 
-  deadline="$((SECONDS + INFERENCE_ROLLOUT_TIMEOUT_SECONDS))"
+  deadline="$((SECONDS + INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS))"
   while (( SECONDS < deadline )); do
     current_restart="$(kubectl -n "$NAMESPACE" get pod "$pod" \
       -o "jsonpath={.status.containerStatuses[?(@.name==\"${BRPC_CONTAINER}\")].restartCount}" \
@@ -1080,6 +1084,7 @@ require_exact_datasystem_attribution=${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION}
 reset_inference_before_round=${RESET_INFERENCE_BEFORE_ROUND}
 reset_inference_mode=${RESET_INFERENCE_MODE}
 inference_rollout_timeout_seconds=${INFERENCE_ROLLOUT_TIMEOUT_SECONDS}
+inference_container_restart_timeout_seconds=${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS}
 EOF
 
 log "Experiment configuration"

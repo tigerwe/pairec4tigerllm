@@ -98,7 +98,8 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertIn("RESET_INFERENCE_MODE=container", validator_text)
         self.assertIn('RESET_INFERENCE_MODE="${RESET_INFERENCE_MODE:-rollout}"', text)
         self.assertIn('reset_inference_container "$round_dir"', text)
-        self.assertIn("kill -KILL 1", text)
+        self.assertIn("kill -TERM 1", text)
+        self.assertIn('INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS="${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS:-120}"', text)
         self.assertIn('[ "$sidecar_ready" = "true" ]', text)
 
     def test_trace_summary_preserves_completion_multiplicity(self):
