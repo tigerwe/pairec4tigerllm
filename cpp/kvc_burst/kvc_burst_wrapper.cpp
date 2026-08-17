@@ -18,7 +18,6 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <numeric>
 #include <random>
 #include <sstream>
 #include <string>
@@ -42,6 +41,7 @@ struct Config
     std::string host{"127.0.0.1"};
     int port{18482};
     uint32_t concurrency{100};
+    uint32_t pressureKeyCount{0};
     uint64_t objectSize{3670016ULL};
     uint32_t barrierTimeoutMs{10};
     uint64_t seed{20260804};
@@ -133,6 +133,11 @@ bool ParseArgs(int argc, char** argv, Config* config)
             if (!ParseUnsigned(value, &parsed)) return false;
             config->concurrency = static_cast<uint32_t>(parsed);
         }
+        else if (name == "pressure_key_count")
+        {
+            if (!ParseUnsigned(value, &parsed)) return false;
+            config->pressureKeyCount = static_cast<uint32_t>(parsed);
+        }
         else if (name == "object_size")
         {
             if (!ParseUnsigned(value, &config->objectSize)) return false;
@@ -167,7 +172,8 @@ bool ParseArgs(int argc, char** argv, Config* config)
     }
     if (config->host.empty() || config->port <= 0 || config->port > 65535 || config->concurrency == 0
         || config->concurrency > pairec::kvc_burst::kMaxConcurrency || config->objectSize == 0
-        || config->barrierTimeoutMs == 0 || config->controlPath.empty())
+        || config->barrierTimeoutMs == 0 || config->controlPath.empty()
+        || config->pressureKeyCount > config->concurrency - 1)
     {
         std::cerr << "invalid host, port, concurrency, object size, timeout, or control path" << std::endl;
         return false;
@@ -262,6 +268,8 @@ bool CreateMapping(const Config& config, Mapping* mapping)
     mapping->control->struct_size = sizeof(SharedControl);
     mapping->control->configured_concurrency = config.concurrency;
     mapping->control->pressure_lanes = config.concurrency - 1;
+    mapping->control->pressure_key_count
+        = config.pressureKeyCount == 0 ? config.concurrency - 1 : config.pressureKeyCount;
     mapping->control->barrier_timeout_ms = config.barrierTimeoutMs;
     mapping->control->object_size_bytes = config.objectSize;
     pairec::kvc_burst::Store(&mapping->control->trigger_armed, config.initiallyArmed ? 1U : 0U);
@@ -326,10 +334,12 @@ int ApplyControlAction(const Config& config)
         return 1;
     }
     auto pressureLanes = pairec::kvc_burst::Load(&control.pressure_lanes);
+    auto pressureKeyCount = pairec::kvc_burst::Load(&control.pressure_key_count);
+    if (pressureLanes > 0 && pressureKeyCount == 0) pressureKeyCount = pressureLanes;
     Config refreshConfig = config;
     refreshConfig.concurrency = pressureLanes + 1;
     refreshConfig.objectSize = pairec::kvc_burst::Load(&control.object_size_bytes);
-    auto keys = BuildKeys(refreshConfig, pressureLanes);
+    auto keys = BuildKeys(refreshConfig, pressureKeyCount);
     std::string value(refreshConfig.objectSize, 'k');
     auto client = CreateClient(refreshConfig, false);
     if (!client || !PrefillAndVerify(*client, keys, value))
@@ -340,7 +350,7 @@ int ApplyControlAction(const Config& config)
     pairec::kvc_burst::Store(&control.keys_verified, pressureLanes);
     pairec::kvc_burst::Store(&control.trigger_armed, 1U);
     std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"refresh-and-arm\","
-              << "\"armed\":true,\"refreshed_keys\":" << pressureLanes << "}" << std::endl;
+              << "\"armed\":true,\"refreshed_keys\":" << pressureKeyCount << "}" << std::endl;
     return 0;
 }
 
@@ -464,6 +474,7 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
     output << "{\"event\":\"kvc_burst_result\",\"generation\":" << generation
            << ",\"request_id\":\"" << control.request_id << "\",\"concurrency\":"
            << control.configured_concurrency << ",\"pressure_lanes\":" << control.pressure_lanes
+           << ",\"pressure_key_count\":" << control.pressure_key_count
            << ",\"object_size_bytes\":" << config.objectSize << ",\"shuffle_seed\":"
            << control.shuffle_seed << ",\"barrier_wait_ms\":"
            << static_cast<double>(control.business_barrier_wait_us) / 1000.0
@@ -641,7 +652,8 @@ int Run(int argc, char** argv)
     if (!CreateMapping(config, &mapping)) return 1;
     auto& control = *mapping.control;
     auto pressureLanes = config.concurrency - 1;
-    auto keys = BuildKeys(config, pressureLanes);
+    auto pressureKeyCount = config.pressureKeyCount == 0 ? pressureLanes : config.pressureKeyCount;
+    auto keys = BuildKeys(config, pressureKeyCount);
     std::string value(config.objectSize, 'k');
 
     std::unique_ptr<datasystem::KVClient> controlClient;
@@ -667,7 +679,10 @@ int Run(int argc, char** argv)
     pairec::kvc_burst::Store(&control.clients_connected, pressureLanes);
 
     std::vector<uint32_t> permutation(pressureLanes);
-    std::iota(permutation.begin(), permutation.end(), 0U);
+    for (uint32_t i = 0; i < pressureLanes; ++i)
+    {
+        permutation[i] = i % pressureKeyCount;
+    }
     std::vector<std::thread> workers;
     workers.reserve(pressureLanes);
     for (uint32_t i = 0; i < pressureLanes; ++i)
@@ -699,6 +714,7 @@ int Run(int argc, char** argv)
     {
         auto ready = std::string{"pid="} + std::to_string(::getpid()) + " concurrency="
             + std::to_string(config.concurrency) + " pressure_lanes=" + std::to_string(pressureLanes)
+            + " pressure_key_count=" + std::to_string(pressureKeyCount)
             + " keys_verified=" + std::to_string(pressureLanes) + " clients_connected="
             + std::to_string(pressureLanes) + " armed_workers=" + std::to_string(pressureLanes) + "\n";
         if (!PublishReadyFile(config.readyFile, ready))
@@ -709,7 +725,8 @@ int Run(int argc, char** argv)
     }
     WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":2,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
             + ",\"pressure_lanes\":" + std::to_string(pressureLanes) + ",\"object_size_bytes\":"
-            + std::to_string(config.objectSize) + ",\"clients_connected\":" + std::to_string(pressureLanes)
+            + std::to_string(config.objectSize) + ",\"pressure_key_count\":" + std::to_string(pressureKeyCount)
+            + ",\"clients_connected\":" + std::to_string(pressureLanes)
             + ",\"keys_verified\":" + std::to_string(pressureLanes) + "}");
 
     while (!gStop.load(std::memory_order_relaxed))

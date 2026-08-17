@@ -9,6 +9,7 @@ REPEATS=${REPEATS:-3}
 PRIME_REQUESTS=${PRIME_REQUESTS:-195}
 EXPECTED_SETS=${EXPECTED_SETS:-3}
 EXPECTED_GETS=${EXPECTED_GETS:-2}
+MAX_PRESSURE_KEYS=${MAX_PRESSURE_KEYS:-9}
 OUT_DIR=${OUT_DIR:-/tmp/f14-kvc-burst-proxy/$(date +%Y%m%d-%H%M%S)-$$}
 BACKUP_FILE=${BACKUP_FILE:-$OUT_DIR/deployment-before.json}
 
@@ -25,11 +26,16 @@ trap restore_overlay EXIT INT TERM
 
 run_case() {
   local name=$1 concurrency=$2 enabled=$3 measure_disabled=$4 require_complete=$5
+  local pressure_key_count=$((concurrency - 1))
+  if [ "$pressure_key_count" -gt "$MAX_PRESSURE_KEYS" ]; then
+    pressure_key_count=$MAX_PRESSURE_KEYS
+  fi
   local case_dir="$OUT_DIR/$name"
   mkdir -p "$case_dir"
   echo "== KVC Proxy case=$name concurrency=$concurrency enabled=$enabled =="
   BACKUP_FILE="$BACKUP_FILE" NAMESPACE="$NAMESPACE" DEPLOYMENT="$DEPLOYMENT" \
-  CONCURRENCY="$concurrency" KVC_BURST_ENABLED="$enabled" MEASURE_DISABLED="$measure_disabled" \
+  CONCURRENCY="$concurrency" PRESSURE_KEY_COUNT="$pressure_key_count" \
+  KVC_BURST_ENABLED="$enabled" MEASURE_DISABLED="$measure_disabled" \
   KVC_BURST_INITIAL_ARMED=0 \
     bash scripts/deploy_f14_kvc_burst_overlay.sh apply \
     | tee "$case_dir/overlay.log"
@@ -37,6 +43,7 @@ run_case() {
   export KVC_BURST_CONTAINER=kvc-burst-wrapper
   export KVC_BURST_REQUIRE_COMPLETE="$require_complete"
   export KVC_BURST_DYNAMIC_ARM="$enabled"
+  export KVC_BURST_PRESSURE_KEY_COUNT="$pressure_key_count"
   MODE=baseline \
   REPEATS="$REPEATS" \
   STRICT_COUNTS=1 \
@@ -55,6 +62,7 @@ run_case() {
 }
 
 [[ "$REPEATS" =~ ^[1-9][0-9]*$ ]] || die "REPEATS must be positive"
+[[ "$MAX_PRESSURE_KEYS" =~ ^[1-9][0-9]*$ ]] || die "MAX_PRESSURE_KEYS must be positive"
 mkdir -p "$OUT_DIR"
 
 run_case disabled 1 0 1 0
@@ -63,7 +71,7 @@ for concurrency in $CONCURRENCY_LEVELS; do
   run_case "c$concurrency" "$concurrency" 1 0 1
 done
 
-python3 - "$OUT_DIR" "$REPEATS" "$EXPECTED_SETS" "$EXPECTED_GETS" $CONCURRENCY_LEVELS <<'PY'
+python3 - "$OUT_DIR" "$REPEATS" "$EXPECTED_SETS" "$EXPECTED_GETS" "$MAX_PRESSURE_KEYS" $CONCURRENCY_LEVELS <<'PY'
 import glob
 import json
 import math
@@ -75,7 +83,8 @@ root = pathlib.Path(sys.argv[1])
 repeats = int(sys.argv[2])
 expected_sets = int(sys.argv[3])
 expected_gets = int(sys.argv[4])
-levels = [int(value) for value in sys.argv[5:]]
+max_pressure_keys = int(sys.argv[5])
+levels = [int(value) for value in sys.argv[6:]]
 
 def percentile(values, q):
     values = sorted(values)
@@ -134,6 +143,7 @@ for concurrency in levels:
         assert burst["failure"] == 0, burst
         assert burst["pressure_success"] == concurrency - 1, burst
         assert burst["pressure_errors"] == 0, burst
+        assert burst["pressure_key_count"] == min(concurrency - 1, max_pressure_keys), burst
         required_overlap = math.ceil((concurrency - 1) * 0.95)
         assert burst["business_overlap_gets"] >= required_overlap, burst
         barrier_ms = float(burst["barrier_wait_ms"])

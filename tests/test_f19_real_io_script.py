@@ -138,6 +138,8 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertLess(refresh, arm)
         self.assertIn("pressure Get failed generation=", text)
         self.assertIn("detail=\" << status.ToString()", text)
+        self.assertIn("pressure_key_count", text)
+        self.assertIn("permutation[i] = i % pressureKeyCount", text)
 
     def test_trace_summary_preserves_completion_multiplicity(self):
         text = TRACE.read_text()

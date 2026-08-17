@@ -64,6 +64,7 @@ BRPC_TARGET="${BRPC_TARGET:-deployment/inference-brpc-trtllm}"
 BRPC_CONTAINER="${BRPC_CONTAINER:-brpc-inference}"
 KVC_BURST_CONTAINER="${KVC_BURST_CONTAINER:-}"
 KVC_BURST_DYNAMIC_ARM="${KVC_BURST_DYNAMIC_ARM:-0}"
+KVC_BURST_PRESSURE_KEY_COUNT="${KVC_BURST_PRESSURE_KEY_COUNT:-0}"
 KVC_BURST_CONTROL_BIN="${KVC_BURST_CONTROL_BIN:-/opt/pairec-f19/bin/kvc_burst_wrapper}"
 BRPC_LOAD_POD_SELECTOR="${BRPC_LOAD_POD_SELECTOR:-app=brpc-pressure-target}"
 BRPC_LOAD_CONTAINER="${BRPC_LOAD_CONTAINER:-brpc-pressure-target}"
@@ -1157,6 +1158,7 @@ inference_rollout_timeout_seconds=${INFERENCE_ROLLOUT_TIMEOUT_SECONDS}
 inference_container_restart_timeout_seconds=${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS}
 inference_runtime_ssh_host=${INFERENCE_RUNTIME_SSH_HOST:-auto-node-internal-ip}
 kvc_burst_dynamic_arm=${KVC_BURST_DYNAMIC_ARM}
+kvc_burst_pressure_key_count=${KVC_BURST_PRESSURE_KEY_COUNT}
 EOF
 
 log "Experiment configuration"

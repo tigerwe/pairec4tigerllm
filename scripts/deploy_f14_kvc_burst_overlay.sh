@@ -10,6 +10,7 @@ APP_LABEL=${APP_LABEL:-app=inference-brpc-trtllm}
 HOST_RUNTIME_DIR=${HOST_RUNTIME_DIR:-/home/zcx/pairec-f19-runtime}
 POD_RUNTIME_DIR=${POD_RUNTIME_DIR:-/opt/pairec-f19}
 CONCURRENCY=${CONCURRENCY:-1}
+PRESSURE_KEY_COUNT=${PRESSURE_KEY_COUNT:-0}
 OBJECT_SIZE=${OBJECT_SIZE:-3670016}
 BARRIER_TIMEOUT_MS=${BARRIER_TIMEOUT_MS:-5}
 DS_ENDPOINT=${DS_ENDPOINT:-192.168.100.12:18482}
@@ -58,6 +59,9 @@ verify() {
 
 apply_overlay() {
   [[ "$CONCURRENCY" =~ ^(1|10|100)$ ]] || die "CONCURRENCY must be 1, 10, or 100"
+  [[ "$PRESSURE_KEY_COUNT" =~ ^[0-9]+$ ]] || die "PRESSURE_KEY_COUNT must be non-negative"
+  (( PRESSURE_KEY_COUNT <= CONCURRENCY - 1 )) \
+    || die "PRESSURE_KEY_COUNT must not exceed pressure lanes"
   [[ "$KVC_BURST_ENABLED" = 0 || "$KVC_BURST_ENABLED" = 1 ]] \
     || die "KVC_BURST_ENABLED must be 0 or 1"
   [[ "$MEASURE_DISABLED" = 0 || "$MEASURE_DISABLED" = 1 ]] \
@@ -76,12 +80,12 @@ apply_overlay() {
   patch_json=$(mktemp /tmp/f14-kvc-patch.XXXXXX.json)
   kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o json >"$deployment_json"
   python3 - "$deployment_json" "$patch_json" "$INFERENCE_CONTAINER" "$SIDECAR_CONTAINER" \
-      "$HOST_RUNTIME_DIR" "$POD_RUNTIME_DIR" "$CONCURRENCY" "$OBJECT_SIZE" \
+      "$HOST_RUNTIME_DIR" "$POD_RUNTIME_DIR" "$CONCURRENCY" "$PRESSURE_KEY_COUNT" "$OBJECT_SIZE" \
       "$BARRIER_TIMEOUT_MS" "$ds_host" "$ds_port" "$KVC_BURST_ENABLED" "$MEASURE_DISABLED" \
       "$KVC_BURST_INITIAL_ARMED" <<'PY'
 import json, pathlib, sys
 (deployment_path, output_path, inference_name, sidecar_name, host_runtime,
- pod_runtime, concurrency, object_size, barrier_timeout, ds_host, ds_port,
+ pod_runtime, concurrency, pressure_key_count, object_size, barrier_timeout, ds_host, ds_port,
  enabled, measure_disabled, initially_armed) = sys.argv[1:]
 deployment = json.loads(pathlib.Path(deployment_path).read_text())
 inference = next(c for c in deployment["spec"]["template"]["spec"]["containers"]
@@ -130,6 +134,7 @@ patch = {"spec": {"template": {"metadata": {"annotations": {
         {"name": sidecar_name, "image": image, "imagePullPolicy": "IfNotPresent",
          "command": [f"{pod_runtime}/bin/kvc_burst_wrapper"],
          "args": [f"--host={ds_host}", f"--port={ds_port}", f"--concurrency={concurrency}",
+                  f"--pressure_key_count={pressure_key_count}",
                   f"--object_size={object_size}", f"--barrier_timeout_ms={barrier_timeout}",
                   "--prefix=PairecKvcBurstV2", "--control_path=/run/pairec-kvc-burst/control",
                   "--ready_file=/run/pairec-kvc-burst/ready", "--cleanup_keys=true",

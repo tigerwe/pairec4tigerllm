@@ -100,7 +100,7 @@ struct alignas(64) SharedControl
 
     uint32_t clients_connected;
     uint32_t trigger_armed;
-    uint32_t reserved_u32_1;
+    uint32_t pressure_key_count;
     uint32_t reserved_u32_2;
 
     uint64_t object_size_bytes;
