@@ -100,6 +100,8 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertIn('reset_inference_container_runtime "$round_dir"', text)
         self.assertIn("crictl stop --timeout 0", text)
         self.assertIn("ctr -n k8s.io tasks kill --signal SIGKILL", text)
+        self.assertIn("InternalIP", text)
+        self.assertIn('ssh "$runtime_host"', text)
         self.assertIn('INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS="${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS:-120}"', text)
         self.assertIn('[ "$sidecar_ready" = "true" ]', text)
 

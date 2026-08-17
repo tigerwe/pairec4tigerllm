@@ -56,6 +56,7 @@ RESET_INFERENCE_BEFORE_ROUND="${RESET_INFERENCE_BEFORE_ROUND:-0}"
 RESET_INFERENCE_MODE="${RESET_INFERENCE_MODE:-rollout}"
 INFERENCE_ROLLOUT_TIMEOUT_SECONDS="${INFERENCE_ROLLOUT_TIMEOUT_SECONDS:-600}"
 INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS="${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS:-120}"
+INFERENCE_RUNTIME_SSH_HOST="${INFERENCE_RUNTIME_SSH_HOST:-}"
 
 NAMESPACE="${NAMESPACE:-pairec}"
 PAIREC_TARGET="${PAIREC_TARGET:-deploy/pairec}"
@@ -496,7 +497,7 @@ reset_inference() {
 
 reset_inference_container_runtime() {
   local round_dir="$1"
-  local pod node container_id before_restart current_restart main_ready sidecar_ready deadline
+  local pod node runtime_host container_id before_restart current_restart main_ready sidecar_ready deadline
   pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
     --sort-by=.metadata.creationTimestamp \
     -o jsonpath='{.items[-1].metadata.name}')"
@@ -510,11 +511,17 @@ reset_inference_container_runtime() {
   container_id="${container_id#*://}"
   [ -n "$node" ] || die "cannot read inference node name"
   [[ "$container_id" =~ ^[a-f0-9]+$ ]] || die "cannot read ${BRPC_CONTAINER} runtime container ID"
+  runtime_host="$INFERENCE_RUNTIME_SSH_HOST"
+  if [ -z "$runtime_host" ]; then
+    runtime_host="$(kubectl get node "$node" \
+      -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')"
+  fi
+  [ -n "$runtime_host" ] || die "cannot resolve runtime SSH host for node ${node}"
 
-  printf 'pod=%s node=%s container=%s container_id=%s restart_before=%s\n' \
-    "$pod" "$node" "$BRPC_CONTAINER" "$container_id" "$before_restart" \
+  printf 'pod=%s node=%s runtime_host=%s container=%s container_id=%s restart_before=%s\n' \
+    "$pod" "$node" "$runtime_host" "$BRPC_CONTAINER" "$container_id" "$before_restart" \
     >"${round_dir}/inference-container-reset.txt"
-  if ! ssh "$node" sh -s -- "$container_id" \
+  if ! ssh "$runtime_host" sh -s -- "$container_id" \
       >"${round_dir}/inference-container-runtime-stop.log" 2>&1 <<'SH'
 set -eu
 container_id="$1"
@@ -1113,6 +1120,7 @@ reset_inference_before_round=${RESET_INFERENCE_BEFORE_ROUND}
 reset_inference_mode=${RESET_INFERENCE_MODE}
 inference_rollout_timeout_seconds=${INFERENCE_ROLLOUT_TIMEOUT_SECONDS}
 inference_container_restart_timeout_seconds=${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS}
+inference_runtime_ssh_host=${INFERENCE_RUNTIME_SSH_HOST:-auto-node-internal-ip}
 EOF
 
 log "Experiment configuration"
