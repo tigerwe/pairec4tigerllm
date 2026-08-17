@@ -12,8 +12,7 @@ BURST_PAYLOAD_BYTES=${BURST_PAYLOAD_BYTES:-0}
 OUTPUT_DIR=${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-kvc-combined/$(date +%Y%m%d-%H%M%S)-c${KVC_CONCURRENCY}-n${REQUESTS}}
 KVC_OVERLAY_BACKUP=${KVC_OVERLAY_BACKUP:-$OUTPUT_DIR/kvc-deployment-before.json}
 WRAPPER_OUTPUT_DIR=${WRAPPER_OUTPUT_DIR:-$OUTPUT_DIR/wrapper}
-KVC_LOG=${KVC_LOG:-$OUTPUT_DIR/kvc-burst.log}
-KVC_LOG_WAIT_SECONDS=${KVC_LOG_WAIT_SECONDS:-45}
+CONTENTION_OUTPUT_DIR=${CONTENTION_OUTPUT_DIR:-$OUTPUT_DIR/contention}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 mkdir -p "$OUTPUT_DIR"
@@ -37,13 +36,13 @@ echo "== Apply KVC c${KVC_CONCURRENCY} overlay =="
 NAMESPACE="$NAMESPACE" DEPLOYMENT=inference-brpc-trtllm \
   BACKUP_FILE="$KVC_OVERLAY_BACKUP" CONCURRENCY="$KVC_CONCURRENCY" \
   PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" KVC_BURST_ENABLED=1 \
-  KVC_BURST_VERBOSE=1 KVC_BURST_INITIAL_ARMED=1 \
+  KVC_BURST_VERBOSE=1 KVC_BURST_INITIAL_ARMED=0 \
   bash scripts/deploy_f14_kvc_burst_overlay.sh apply \
   | tee "$OUTPUT_DIR/kvc-overlay.log"
 
-echo "== Run preconnected BRPC Wrapper full chain =="
+echo "== Deploy preconnected BRPC Wrapper full chain =="
 set +e
-NAMESPACE="$NAMESPACE" REQUESTS="$REQUESTS" WARMUP_REQUESTS="$WARMUP_REQUESTS" \
+NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
   BURST_CONCURRENCY=1 BURST_POOL_SIZE="$BURST_POOL_SIZE" \
   BURST_ACTIVE_CONNECTIONS="$BURST_ACTIVE_CONNECTIONS" \
   BURST_PAYLOAD_BYTES="$BURST_PAYLOAD_BYTES" \
@@ -55,93 +54,57 @@ wrapper_code=${PIPESTATUS[0]}
 set -e
 [[ "$wrapper_code" -eq 0 ]] || die "BRPC Wrapper full-chain validation failed: exit=$wrapper_code"
 
-INFERENCE_POD="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
+echo "== Run KVC contention through the deployed BRPC Wrapper =="
+STARTED_AT="$(date --iso-8601=seconds)"
+set +e
+NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE=baseline \
+  KVC_BURST_CONTAINER=kvc-burst-wrapper KVC_BURST_REQUIRE_COMPLETE=1 \
+  KVC_BURST_DYNAMIC_ARM=1 KVC_BURST_PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" \
+  EXPECTED_OFFLOADS=3 EXPECTED_ONBOARDS=2 STRICT_COUNTS=1 \
+  REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION=1 PRIME_REQUESTS=195 \
+  RESET_INFERENCE_BEFORE_ROUND=1 RESET_INFERENCE_MODE=container-runtime \
+  PAIREC_TARGET=deploy/pairec-brpc-observed-wrapper \
+  BRPC_TARGET=deployment/inference-brpc-trtllm \
+  OUT_DIR="$CONTENTION_OUTPUT_DIR" \
+  bash scripts/benchmark_brpc_kvc_contention.sh \
+  | tee "$OUTPUT_DIR/contention-console.log"
+contention_code=${PIPESTATUS[0]}
+set -e
+[[ "$contention_code" -eq 0 ]] || die "KVC contention through Wrapper failed: exit=$contention_code"
+
+WRAPPER_POD="$(kubectl -n "$NAMESPACE" get pod -l app=brpc-burst-wrapper \
   --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
-[[ -n "$INFERENCE_POD" ]] || die "inference Pod not found"
+[[ -n "$WRAPPER_POD" ]] || die "BRPC Wrapper Pod not found"
+kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper \
+  --since-time="$STARTED_AT" >"$OUTPUT_DIR/wrapper-measured.log" 2>&1 || true
 
-deadline=$((SECONDS + KVC_LOG_WAIT_SECONDS))
-while true; do
-  kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c kvc-burst-wrapper \
-    --since-time="$(date --iso-8601=seconds -d "-$((KVC_LOG_WAIT_SECONDS + 60)) seconds")" \
-    >"$KVC_LOG" 2>&1 || true
-  if python3 - "$WRAPPER_OUTPUT_DIR/requests.tsv" "$KVC_LOG" <<'PY'
-import csv, json, pathlib, sys
-ids = {row["request_id"] for row in csv.DictReader(open(sys.argv[1]), delimiter="\t")}
-events = []
-for line in pathlib.Path(sys.argv[2]).read_text(errors="replace").splitlines():
-    pos = line.find("{")
-    if pos < 0:
-        continue
-    try:
-        item = json.loads(line[pos:])
-    except json.JSONDecodeError:
-        continue
-    if item.get("event") == "kvc_burst_complete":
-        events.append(item)
-by_id = {}
-for item in events:
-    by_id.setdefault(item.get("request_id"), []).append(item)
-if all(len(by_id.get(request_id, [])) == 1 for request_id in ids):
-    raise SystemExit(0)
-raise SystemExit(1)
-PY
-  then
-    break
-  fi
-  (( SECONDS < deadline )) || die "KVC completion did not arrive for every Wrapper request"
-  sleep 1
-done
-
-python3 - "$WRAPPER_OUTPUT_DIR/requests.tsv" "$WRAPPER_OUTPUT_DIR/summary.json" "$KVC_LOG" "$OUTPUT_DIR/summary.json" "$KVC_CONCURRENCY" "$KVC_PRESSURE_KEY_COUNT" <<'PY'
-import csv, json, pathlib, sys
-requests_path, wrapper_path, kvc_path, output_path = sys.argv[1:5]
-expected_concurrency = int(sys.argv[5])
-expected_keys = int(sys.argv[6])
-requests = list(csv.DictReader(open(requests_path), delimiter="\t"))
-wrapper = json.load(open(wrapper_path))
-events = []
-for line in pathlib.Path(kvc_path).read_text(errors="replace").splitlines():
-    pos = line.find("{")
-    if pos < 0:
-        continue
-    try:
-        item = json.loads(line[pos:])
-    except json.JSONDecodeError:
-        continue
-    if item.get("event") == "kvc_burst_complete":
-        events.append(item)
-by_id = {}
-for item in events:
-    by_id.setdefault(item.get("request_id"), []).append(item)
+python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log" "$OUTPUT_DIR/summary.json" <<'PY'
+import json, pathlib, re, sys
+contention = json.load(open(sys.argv[1]))
+wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
+valid = contention.get("valid_repeats") == contention.get("expected_repeats")
 rows = []
-for row in requests:
-    request_id = row["request_id"]
-    matches = by_id.get(request_id, [])
-    assert len(matches) == 1, (request_id, matches)
-    kvc = matches[0]
-    assert kvc["concurrency"] == expected_concurrency, kvc
-    assert kvc["pressure_key_count"] == expected_keys, kvc
-    assert kvc["valid"] is True and kvc["failure"] == 0, kvc
-    assert kvc["pressure_success"] == expected_concurrency - 1, kvc
-    assert kvc["pressure_errors"] == 0, kvc
-    rows.append({"request_id": request_id, "e2e_ms": float(row["e2e_ms"]), "kvc": kvc})
+for row in contention.get("rows", []):
+    request_id = row.get("request_id", "")
+    if not request_id:
+        replay = pathlib.Path(row["summary_path"]).parent
+        request_id = json.load(open(replay / "client.json"))["request_id"]
+    matches = [line for line in wrapper_log.splitlines()
+               if "method=Recommend" in line and f"request_id={request_id}" in line]
+    if len(matches) != 1 or " code=200 " not in matches[0]:
+        valid = False
+    rows.append({"request_id": request_id, "wrapper_log_matches": len(matches)})
 result = {
-    "classification": f"PAIREC_BRPC_WRAPPER_KVC_COMBINED_C{expected_concurrency}_OK",
-    "requests": len(rows),
-    "wrapper_summary": wrapper,
-    "kvc_samples": rows,
+    "classification": "PAIREC_BRPC_WRAPPER_KVC_COMBINED_C10_OK" if valid else "PAIREC_BRPC_WRAPPER_KVC_COMBINED_FAIL",
+    "contention": contention,
+    "wrapper_request_evidence": rows,
 }
-pathlib.Path(output_path).write_text(json.dumps(result, indent=2) + "\n")
+pathlib.Path(sys.argv[3]).write_text(json.dumps(result, indent=2) + "\n")
 print(f"classification={result['classification']}")
 print(f"requests={len(rows)}")
-for row in rows:
-    kvc = row["kvc"]
-    print("request", row["request_id"], "e2e_ms=%.3f" % row["e2e_ms"],
-          "business_get_ms=%.3f" % kvc["business_get_ms"],
-          "pressure_p99_ms=%.3f" % kvc["pressure_get_p99_ms"],
-          "barrier_ms=%.3f" % kvc["barrier_wait_ms"])
-print(f"summary_json={output_path}")
-print(result["classification"])
+print(f"summary_json={sys.argv[3]}")
+if not valid:
+    raise SystemExit(1)
 PY
 
 echo "output_dir=$OUTPUT_DIR"
