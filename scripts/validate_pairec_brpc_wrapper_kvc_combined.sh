@@ -4,10 +4,11 @@ set -euo pipefail
 NAMESPACE=${NAMESPACE:-pairec}
 KVC_CONCURRENCY=${KVC_CONCURRENCY:-10}
 KVC_PRESSURE_KEY_COUNT=${KVC_PRESSURE_KEY_COUNT:-9}
+WRAPPER_CONCURRENCY=${WRAPPER_CONCURRENCY:-1}
 REQUESTS=${REQUESTS:-3}
 WARMUP_REQUESTS=${WARMUP_REQUESTS:-1}
 BURST_POOL_SIZE=${BURST_POOL_SIZE:-10000}
-BURST_ACTIVE_CONNECTIONS=${BURST_ACTIVE_CONNECTIONS:-1}
+BURST_ACTIVE_CONNECTIONS=${BURST_ACTIVE_CONNECTIONS:-$WRAPPER_CONCURRENCY}
 BURST_PAYLOAD_BYTES=${BURST_PAYLOAD_BYTES:-0}
 OUTPUT_DIR=${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-kvc-combined/$(date +%Y%m%d-%H%M%S)-c${KVC_CONCURRENCY}-n${REQUESTS}}
 KVC_OVERLAY_BACKUP=${KVC_OVERLAY_BACKUP:-$OUTPUT_DIR/kvc-deployment-before.json}
@@ -17,6 +18,7 @@ CONTENTION_OUTPUT_DIR=${CONTENTION_OUTPUT_DIR:-$OUTPUT_DIR/contention}
 die() { echo "ERROR: $*" >&2; exit 1; }
 mkdir -p "$OUTPUT_DIR"
 [[ "$KVC_CONCURRENCY" =~ ^(1|10|100)$ ]] || die "KVC_CONCURRENCY must be 1, 10, or 100"
+[[ "$WRAPPER_CONCURRENCY" =~ ^(1|1000)$ ]] || die "WRAPPER_CONCURRENCY must be 1 or 1000"
 [[ "$KVC_PRESSURE_KEY_COUNT" =~ ^[0-9]+$ ]] || die "KVC_PRESSURE_KEY_COUNT must be non-negative"
 (( KVC_PRESSURE_KEY_COUNT <= KVC_CONCURRENCY - 1 )) \
   || die "KVC_PRESSURE_KEY_COUNT must not exceed KVC pressure lanes"
@@ -43,7 +45,7 @@ NAMESPACE="$NAMESPACE" DEPLOYMENT=inference-brpc-trtllm \
 echo "== Deploy preconnected BRPC Wrapper full chain =="
 set +e
 NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
-  BURST_CONCURRENCY=1 BURST_POOL_SIZE="$BURST_POOL_SIZE" \
+  BURST_CONCURRENCY="$WRAPPER_CONCURRENCY" BURST_POOL_SIZE="$BURST_POOL_SIZE" \
   BURST_ACTIVE_CONNECTIONS="$BURST_ACTIVE_CONNECTIONS" \
   BURST_PAYLOAD_BYTES="$BURST_PAYLOAD_BYTES" \
   BUILD_PAIREC_IMAGE=0 IMPORT_PAIREC_IMAGE=0 \
@@ -78,30 +80,115 @@ WRAPPER_POD="$(kubectl -n "$NAMESPACE" get pod -l app=brpc-burst-wrapper \
 kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper \
   --since-time="$STARTED_AT" >"$OUTPUT_DIR/wrapper-measured.log" 2>&1 || true
 
-python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log" "$OUTPUT_DIR/summary.json" <<'PY'
-import json, pathlib, re, sys
+python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log" \
+  "$OUTPUT_DIR/summary.json" "$WRAPPER_CONCURRENCY" "$KVC_CONCURRENCY" <<'PY'
+import json, math, pathlib, statistics, sys
 contention = json.load(open(sys.argv[1]))
 wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
+wrapper_concurrency = int(sys.argv[4])
+kvc_concurrency = int(sys.argv[5])
 valid = contention.get("valid_repeats") == contention.get("expected_repeats")
 rows = []
+
+def json_events(path):
+    events = []
+    for line in pathlib.Path(path).read_text(errors="replace").splitlines():
+        pos = line.find("{")
+        if pos < 0:
+            continue
+        try:
+            events.append(json.loads(line[pos:]))
+        except json.JSONDecodeError:
+            pass
+    return events
+
+def one(events, name, request_id):
+    values = [event for event in events
+              if event.get("event") == name and event.get("request_id") == request_id]
+    assert len(values) == 1, (request_id, name, values)
+    return values[0]
+
 for row in contention.get("rows", []):
-    request_id = row.get("request_id", "")
-    if not request_id:
-        replay = pathlib.Path(row["summary_path"]).parent
-        request_id = json.load(open(replay / "client.json"))["request_id"]
+    replay = pathlib.Path(row["summary_path"]).parent
+    trace = json.load(open(replay / "summary.json"))
+    request_id = trace["request_id"]
+    pairec_events = json_events(replay / "pairec_stdout.log")
+    pipeline = one(pairec_events, "pipeline_trace_complete", request_id)
+    business = one(pairec_events, "pairec_brpc_burst_business_complete", request_id)
+    wrapper_burst = one(pairec_events, "pairec_brpc_burst_complete", request_id)
+    assert pipeline["status"] == "ok" and pipeline["valid"] is True, pipeline
+    spans = {span["name"]: span for span in pipeline["spans"]}
+    for name in ("vector_recall", "generative_recall", "deepfm_rank", "rerank"):
+        assert spans[name]["status"] == "ok", (name, spans[name])
+    for name in ("vector_recall", "generative_recall", "deepfm_rank"):
+        assert spans[name]["protocol"] == "brpc", (name, spans[name])
+    assert business["concurrency"] == wrapper_concurrency and business["business_success"], business
+    assert wrapper_burst["concurrency"] == wrapper_concurrency and wrapper_burst["burst_valid"], wrapper_burst
+    kvc_events = [event for event in trace["kvc_proxy_events"]
+                  if event.get("event") == "kvc_burst_complete"
+                  and event.get("request_id") == request_id]
+    assert len(kvc_events) == 1, (request_id, kvc_events)
+    kvc = kvc_events[0]
+    assert kvc["concurrency"] == kvc_concurrency and kvc["valid"] is True, kvc
+    exact = trace["datasystem_request_complete"]
+    executor = trace["trt_executor_request_completions"]
+    assert exact["get_count"] == 2 and exact["set_count"] == 3, exact
+    assert len(executor) == 1, executor
     matches = [line for line in wrapper_log.splitlines()
                if "method=Recommend" in line and f"request_id={request_id}" in line]
     if len(matches) != 1 or " code=200 " not in matches[0]:
         valid = False
-    rows.append({"request_id": request_id, "wrapper_log_matches": len(matches)})
+    rows.append({
+        "request_id": request_id,
+        "client_e2e_ms": float(trace["client"]["client_e2e_ms"]),
+        "pairec_total_ms": pipeline["pairec_total_us"] / 1000.0,
+        "vector_recall_ms": spans["vector_recall"]["duration_us"] / 1000.0,
+        "generative_recall_ms": spans["generative_recall"]["duration_us"] / 1000.0,
+        "deepfm_rank_ms": spans["deepfm_rank"]["duration_us"] / 1000.0,
+        "rerank_ms": spans["rerank"]["duration_us"] / 1000.0,
+        "front_brpc_ms": business["business_front_brpc_ms"],
+        "wrapper_total_ms": business["wrapper_total_ms"],
+        "backend_brpc_ms": business["wrapper_backend_brpc_ms"],
+        "runner_ms": executor[0]["runner_us"] / 1000.0,
+        "kvc_business_get_ms": kvc["business_get_ms"],
+        "kvc_pressure_p99_ms": kvc["pressure_get_p99_ms"],
+        "kvc_barrier_ms": kvc["barrier_wait_ms"],
+        "datasystem_get_ms": exact["get_us"] / 1000.0,
+        "datasystem_set_ms": exact["set_us"] / 1000.0,
+        "wrapper_pressure_p95_ms": wrapper_burst["pressure_latency_p95_ms"],
+        "wrapper_max_active": wrapper_burst["max_active_workers"],
+        "wrapper_log_matches": len(matches),
+    })
+
+def percentile(values, q):
+    values = sorted(values)
+    pos = (len(values) - 1) * q
+    low, high = math.floor(pos), math.ceil(pos)
+    return values[low] if low == high else values[low] + (values[high] - values[low]) * (pos - low)
+
+metric_names = [name for name in rows[0] if name not in {"request_id", "wrapper_log_matches"}]
+metrics = {}
+for name in metric_names:
+    values = [float(row[name]) for row in rows]
+    metrics[name] = {"avg": statistics.fmean(values), "p50": percentile(values, .5),
+                     "p95": percentile(values, .95), "p99": percentile(values, .99),
+                     "max": max(values)}
 result = {
-    "classification": "PAIREC_BRPC_WRAPPER_KVC_COMBINED_C10_OK" if valid else "PAIREC_BRPC_WRAPPER_KVC_COMBINED_FAIL",
+    "classification": (f"PAIREC_BRPC_WRAPPER_C{wrapper_concurrency}_KVC_C{kvc_concurrency}_OK"
+                       if valid else "PAIREC_BRPC_WRAPPER_KVC_COMBINED_FAIL"),
+    "wrapper_concurrency": wrapper_concurrency,
+    "kvc_concurrency": kvc_concurrency,
     "contention": contention,
-    "wrapper_request_evidence": rows,
+    "samples": rows,
+    "metrics": metrics,
 }
 pathlib.Path(sys.argv[3]).write_text(json.dumps(result, indent=2) + "\n")
 print(f"classification={result['classification']}")
 print(f"requests={len(rows)}")
+print("metric avg_ms p50_ms p95_ms p99_ms max_ms")
+for name in metric_names:
+    item = metrics[name]
+    print(f"{name} {item['avg']:.3f} {item['p50']:.3f} {item['p95']:.3f} {item['p99']:.3f} {item['max']:.3f}")
 print(f"summary_json={sys.argv[3]}")
 if not valid:
     raise SystemExit(1)
