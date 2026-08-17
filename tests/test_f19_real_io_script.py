@@ -114,6 +114,8 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertIn("\nset_kvc_burst_arm() {\n", benchmark_text)
         self.assertIn("control_action=refresh-and-arm", benchmark_text)
         self.assertIn('"--host=${ds_host}"', benchmark_text)
+        self.assertIn('capture_kvc_burst_failure "$round_dir"', benchmark_text)
+        self.assertIn("kvc-burst-failure-sidecar.log", benchmark_text)
         disarm = benchmark_text.index('set_kvc_burst_arm "$round_dir" disarm')
         prime = benchmark_text.index('run_prime "$round_dir"')
         arm = benchmark_text.index('set_kvc_burst_arm "$round_dir" arm')

@@ -619,6 +619,31 @@ set_kvc_burst_arm() {
     >>"${round_dir}/kvc-burst-control.log" 2>&1
 }
 
+capture_kvc_burst_failure() {
+  local round_dir="$1"
+  [ -n "$KVC_BURST_CONTAINER" ] || return 0
+  local pod
+  pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null || true)"
+  [ -n "$pod" ] || return 0
+  kubectl -n "$NAMESPACE" get pod "$pod" -o json \
+    >"${round_dir}/kvc-burst-failure-pod.json" 2>&1 || true
+  kubectl -n "$NAMESPACE" get pod "$pod" -o wide \
+    >"${round_dir}/kvc-burst-failure-pod.txt" 2>&1 || true
+  kubectl -n "$NAMESPACE" logs "$pod" -c "$KVC_BURST_CONTAINER" \
+    --timestamps --tail=2000 \
+    >"${round_dir}/kvc-burst-failure-sidecar.log" 2>&1 || true
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$KVC_BURST_CONTAINER" -- sh -c '
+    echo "== ready =="
+    cat /run/pairec-kvc-burst/ready 2>&1 || true
+    echo "== control u32 =="
+    od -An -t u4 -N 128 /run/pairec-kvc-burst/control 2>&1 || true
+    echo "== process =="
+    grep -E "^(Name|State|Pid|Threads):" /proc/1/status 2>&1 || true
+  ' >"${round_dir}/kvc-burst-failure-control.txt" 2>&1 || true
+}
+
 run_prime() {
   local round_dir="$1"
   local attempt
@@ -1215,6 +1240,7 @@ for round in $(seq 1 "$REPEATS"); do
   set -e
   if [ "$arm_code" -ne 0 ]; then
     echo "$arm_code" >"${round_dir}/kvc-burst-arm.exit_code"
+    capture_kvc_burst_failure "$round_dir"
     overall_code=1
     echo "ERROR: round ${round} failed to arm KVC burst before replay" >&2
     stop_loads
