@@ -409,6 +409,7 @@ trap terminate INT TERM
 
 run_prime_once() {
   local attempt_dir="$1"
+  local script_code=0
   ENDPOINT="$BRPC_ENDPOINT" \
   REQUESTS="$PRIME_REQUESTS" \
   CONCURRENCY=1 \
@@ -423,7 +424,44 @@ run_prime_once() {
   VARY_USER_ID=true \
   OUT_DIR="$attempt_dir" \
     bash scripts/benchmark_go_brpc_probe_kvc_latency.sh \
-    >"${attempt_dir}.console.log" 2>&1
+    >"${attempt_dir}.console.log" 2>&1 || script_code="$?"
+
+  if [ "$script_code" -eq 0 ]; then
+    return 0
+  fi
+
+  # The prime workload is complete once both the client and server observed every
+  # request. Do not repeat 195 requests for a post-processing/cleanup exit code.
+  if python3 - "$attempt_dir" "$PRIME_REQUESTS" <<'PY'
+import json
+import pathlib
+import sys
+
+attempt_dir = pathlib.Path(sys.argv[1])
+expected = int(sys.argv[2])
+
+try:
+    probe_code = int((attempt_dir / "probe.exit_code").read_text().strip())
+    summary = json.loads((attempt_dir / "summary.json").read_text())
+except (FileNotFoundError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+counts = summary.get("counts") or {}
+valid = (
+    probe_code == 0
+    and int(counts.get("probe_recommend_events", -1)) == expected
+    and int(counts.get("brpc_server_events", -1)) == expected
+)
+raise SystemExit(0 if valid else 1)
+PY
+  then
+    echo "$script_code" >"${attempt_dir}.postprocess_exit_code"
+    echo "WARN: prime request workload completed despite benchmark script exit=${script_code}; accepting semantic evidence" \
+      >>"${attempt_dir}.console.log"
+    return 0
+  fi
+
+  return "$script_code"
 }
 
 reset_inference() {
