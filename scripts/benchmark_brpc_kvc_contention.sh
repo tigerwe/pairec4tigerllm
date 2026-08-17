@@ -539,25 +539,6 @@ run_privileged() {
     sudo -n "$@"
   fi
 }
-
-set_kvc_burst_arm() {
-  local round_dir="$1"
-  local action="$2"
-  if [ "$KVC_BURST_DYNAMIC_ARM" != "1" ]; then
-    return
-  fi
-  [ -n "$KVC_BURST_CONTAINER" ] || die "KVC_BURST_CONTAINER is required for dynamic arm"
-  local pod
-  pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
-    --sort-by=.metadata.creationTimestamp \
-    -o jsonpath='{.items[-1].metadata.name}')"
-  [ -n "$pod" ] || die "inference pod not found for KVC burst ${action}"
-  kubectl -n "$NAMESPACE" exec "$pod" -c "$KVC_BURST_CONTAINER" -- \
-    "$KVC_BURST_CONTROL_BIN" \
-    "--control_action=${action}" \
-    "--control_path=/run/pairec-kvc-burst/control" \
-    >>"${round_dir}/kvc-burst-control.log" 2>&1
-}
 if command -v crictl >/dev/null 2>&1; then
   run_privileged crictl stop --timeout 0 "$container_id"
 elif command -v ctr >/dev/null 2>&1; then
@@ -607,6 +588,25 @@ SH
     >"${round_dir}/inference-container-reset-timeout.log" 2>&1 || true
   echo "ERROR: runtime-stopped inference container did not restart Ready while sidecar remained Ready" >&2
   return 1
+}
+
+set_kvc_burst_arm() {
+  local round_dir="$1"
+  local action="$2"
+  if [ "$KVC_BURST_DYNAMIC_ARM" != "1" ]; then
+    return
+  fi
+  [ -n "$KVC_BURST_CONTAINER" ] || die "KVC_BURST_CONTAINER is required for dynamic arm"
+  local pod
+  pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1].metadata.name}')"
+  [ -n "$pod" ] || die "inference pod not found for KVC burst ${action}"
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$KVC_BURST_CONTAINER" -- \
+    "$KVC_BURST_CONTROL_BIN" \
+    "--control_action=${action}" \
+    "--control_path=/run/pairec-kvc-burst/control" \
+    >>"${round_dir}/kvc-burst-control.log" 2>&1
 }
 
 run_prime() {

@@ -108,6 +108,9 @@ class F19RealIoScriptTest(unittest.TestCase):
     def test_f14_arms_burst_only_after_prime(self):
         benchmark_text = BENCHMARK.read_text()
         validator_text = F14_VALIDATOR.read_text()
+        runtime_heredoc = benchmark_text.split("<<'SH'\n", 1)[1].split("\nSH\n", 1)[0]
+        self.assertNotIn("set_kvc_burst_arm()", runtime_heredoc)
+        self.assertIn("\nset_kvc_burst_arm() {\n", benchmark_text)
         disarm = benchmark_text.index('set_kvc_burst_arm "$round_dir" disarm')
         prime = benchmark_text.index('run_prime "$round_dir"')
         arm = benchmark_text.index('set_kvc_burst_arm "$round_dir" arm')
