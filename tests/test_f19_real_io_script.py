@@ -116,6 +116,15 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertIn('"--host=${ds_host}"', benchmark_text)
         self.assertIn('capture_kvc_burst_failure "$round_dir"', benchmark_text)
         self.assertIn("kvc-burst-failure-sidecar.log", benchmark_text)
+        self.assertIn("kvc-burst-failure-inference.log", benchmark_text)
+        replay = benchmark_text.index('run_replay "$round_dir"')
+        replay_failure_capture = benchmark_text.index(
+            'capture_kvc_burst_failure "$round_dir"', replay
+        )
+        disarm_after_replay = benchmark_text.index(
+            'set_kvc_burst_arm "$round_dir" disarm', replay
+        )
+        self.assertLess(replay_failure_capture, disarm_after_replay)
         disarm = benchmark_text.index('set_kvc_burst_arm "$round_dir" disarm')
         prime = benchmark_text.index('run_prime "$round_dir"')
         arm = benchmark_text.index('set_kvc_burst_arm "$round_dir" arm')
@@ -125,6 +134,7 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertLess(arm, replay)
         self.assertIn('KVC_BURST_INITIAL_ARMED=0', validator_text)
         self.assertIn('export KVC_BURST_DYNAMIC_ARM="$enabled"', validator_text)
+        self.assertIn('KVC_BURST_VERBOSE="$enabled"', validator_text)
 
     def test_f14_refreshes_pressure_keys_before_arming(self):
         text = KVC_BURST_WRAPPER.read_text()

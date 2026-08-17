@@ -36,6 +36,7 @@ run_case() {
   BACKUP_FILE="$BACKUP_FILE" NAMESPACE="$NAMESPACE" DEPLOYMENT="$DEPLOYMENT" \
   CONCURRENCY="$concurrency" PRESSURE_KEY_COUNT="$pressure_key_count" \
   KVC_BURST_ENABLED="$enabled" MEASURE_DISABLED="$measure_disabled" \
+  KVC_BURST_VERBOSE="$enabled" \
   KVC_BURST_INITIAL_ARMED=0 \
     bash scripts/deploy_f14_kvc_burst_overlay.sh apply \
     | tee "$case_dir/overlay.log"

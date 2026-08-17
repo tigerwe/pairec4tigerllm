@@ -16,6 +16,7 @@ BARRIER_TIMEOUT_MS=${BARRIER_TIMEOUT_MS:-5}
 DS_ENDPOINT=${DS_ENDPOINT:-192.168.100.12:18482}
 KVC_BURST_ENABLED=${KVC_BURST_ENABLED:-1}
 MEASURE_DISABLED=${MEASURE_DISABLED:-0}
+KVC_BURST_VERBOSE=${KVC_BURST_VERBOSE:-0}
 KVC_BURST_INITIAL_ARMED=${KVC_BURST_INITIAL_ARMED:-1}
 BACKUP_FILE=${BACKUP_FILE:-/tmp/f14-kvc-burst-deployment-before.json}
 ROLLOUT_TIMEOUT=${ROLLOUT_TIMEOUT:-10m}
@@ -66,6 +67,8 @@ apply_overlay() {
     || die "KVC_BURST_ENABLED must be 0 or 1"
   [[ "$MEASURE_DISABLED" = 0 || "$MEASURE_DISABLED" = 1 ]] \
     || die "MEASURE_DISABLED must be 0 or 1"
+  [[ "$KVC_BURST_VERBOSE" = 0 || "$KVC_BURST_VERBOSE" = 1 ]] \
+    || die "KVC_BURST_VERBOSE must be 0 or 1"
   [[ "$KVC_BURST_INITIAL_ARMED" = 0 || "$KVC_BURST_INITIAL_ARMED" = 1 ]] \
     || die "KVC_BURST_INITIAL_ARMED must be 0 or 1"
   [[ "$DS_ENDPOINT" == *:* ]] || die "DS_ENDPOINT must be host:port"
@@ -82,11 +85,11 @@ apply_overlay() {
   python3 - "$deployment_json" "$patch_json" "$INFERENCE_CONTAINER" "$SIDECAR_CONTAINER" \
       "$HOST_RUNTIME_DIR" "$POD_RUNTIME_DIR" "$CONCURRENCY" "$PRESSURE_KEY_COUNT" "$OBJECT_SIZE" \
       "$BARRIER_TIMEOUT_MS" "$ds_host" "$ds_port" "$KVC_BURST_ENABLED" "$MEASURE_DISABLED" \
-      "$KVC_BURST_INITIAL_ARMED" <<'PY'
+      "$KVC_BURST_VERBOSE" "$KVC_BURST_INITIAL_ARMED" <<'PY'
 import json, pathlib, sys
 (deployment_path, output_path, inference_name, sidecar_name, host_runtime,
  pod_runtime, concurrency, pressure_key_count, object_size, barrier_timeout, ds_host, ds_port,
- enabled, measure_disabled, initially_armed) = sys.argv[1:]
+ enabled, measure_disabled, verbose, initially_armed) = sys.argv[1:]
 deployment = json.loads(pathlib.Path(deployment_path).read_text())
 inference = next(c for c in deployment["spec"]["template"]["spec"]["containers"]
                  if c["name"] == inference_name)
@@ -127,7 +130,7 @@ patch = {"spec": {"template": {"metadata": {"annotations": {
          "env": [
              {"name": "KVC_BURST_ENABLED", "value": enabled},
              {"name": "KVC_BURST_MEASURE_DISABLED", "value": measure_disabled},
-             {"name": "KVC_BURST_VERBOSE", "value": "0"},
+             {"name": "KVC_BURST_VERBOSE", "value": verbose},
              {"name": "KVC_BURST_CONTROL_PATH", "value": "/run/pairec-kvc-burst/control"},
          ],
          "volumeMounts": [{"name": "kvc-burst-control", "mountPath": "/run/pairec-kvc-burst"}]},

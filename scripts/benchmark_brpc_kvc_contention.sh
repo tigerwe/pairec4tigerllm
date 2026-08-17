@@ -634,6 +634,9 @@ capture_kvc_burst_failure() {
   kubectl -n "$NAMESPACE" logs "$pod" -c "$KVC_BURST_CONTAINER" \
     --timestamps --tail=2000 \
     >"${round_dir}/kvc-burst-failure-sidecar.log" 2>&1 || true
+  kubectl -n "$NAMESPACE" logs "$pod" -c "$BRPC_CONTAINER" \
+    --timestamps --tail=4000 \
+    >"${round_dir}/kvc-burst-failure-inference.log" 2>&1 || true
   kubectl -n "$NAMESPACE" exec "$pod" -c "$KVC_BURST_CONTAINER" -- sh -c '
     echo "== ready =="
     cat /run/pairec-kvc-burst/ready 2>&1 || true
@@ -1272,6 +1275,10 @@ for round in $(seq 1 "$REPEATS"); do
   set +e
   run_replay "$round_dir"
   replay_code="$?"
+  if [ "$replay_code" -ne 0 ] && [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ]; then
+    # Preserve the armed control state and Proxy skip reason before disarm.
+    capture_kvc_burst_failure "$round_dir"
+  fi
   set_kvc_burst_arm "$round_dir" disarm
   disarm_code="$?"
   set -e
