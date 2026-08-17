@@ -11,6 +11,7 @@ VALIDATOR = ROOT / "scripts" / "validate_f19_datasystem_real_io.sh"
 F14_VALIDATOR = ROOT / "scripts" / "validate_f14_kvc_burst_proxy.sh"
 BENCHMARK = ROOT / "scripts" / "benchmark_brpc_kvc_contention.sh"
 TRACE = ROOT / "scripts" / "trace_single_brpc_datasystem_request.sh"
+KVC_BURST_WRAPPER = ROOT / "cpp" / "kvc_burst" / "kvc_burst_wrapper.cpp"
 
 
 class F19RealIoScriptTest(unittest.TestCase):
@@ -111,6 +112,8 @@ class F19RealIoScriptTest(unittest.TestCase):
         runtime_heredoc = benchmark_text.split("<<'SH'\n", 1)[1].split("\nSH\n", 1)[0]
         self.assertNotIn("set_kvc_burst_arm()", runtime_heredoc)
         self.assertIn("\nset_kvc_burst_arm() {\n", benchmark_text)
+        self.assertIn("control_action=refresh-and-arm", benchmark_text)
+        self.assertIn('"--host=${ds_host}"', benchmark_text)
         disarm = benchmark_text.index('set_kvc_burst_arm "$round_dir" disarm')
         prime = benchmark_text.index('run_prime "$round_dir"')
         arm = benchmark_text.index('set_kvc_burst_arm "$round_dir" arm')
@@ -120,6 +123,21 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertLess(arm, replay)
         self.assertIn('KVC_BURST_INITIAL_ARMED=0', validator_text)
         self.assertIn('export KVC_BURST_DYNAMIC_ARM="$enabled"', validator_text)
+
+    def test_f14_refreshes_pressure_keys_before_arming(self):
+        text = KVC_BURST_WRAPPER.read_text()
+        start = text.index('if (config.controlAction != "refresh-and-arm")')
+        end = text.index("\n    return 0;\n}", start)
+        action = text[start:end]
+        disarm = action.index("Store(&control.trigger_armed, 0U)")
+        ready = action.index("State::kReady")
+        refresh = action.index("PrefillAndVerify")
+        arm = action.index("Store(&control.trigger_armed, 1U)")
+        self.assertLess(disarm, ready)
+        self.assertLess(ready, refresh)
+        self.assertLess(refresh, arm)
+        self.assertIn("pressure Get failed generation=", text)
+        self.assertIn("detail=\" << status.ToString()", text)
 
     def test_trace_summary_preserves_completion_multiplicity(self):
         text = TRACE.read_text()

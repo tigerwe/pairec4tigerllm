@@ -598,13 +598,22 @@ set_kvc_burst_arm() {
   fi
   [ -n "$KVC_BURST_CONTAINER" ] || die "KVC_BURST_CONTAINER is required for dynamic arm"
   local pod
+  local control_action="$action"
+  if [ "$action" = "arm" ]; then
+    control_action=refresh-and-arm
+  fi
+  local ds_host="${KVC_DS_ENDPOINT%:*}"
+  local ds_port="${KVC_DS_ENDPOINT##*:}"
   pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
     --sort-by=.metadata.creationTimestamp \
     -o jsonpath='{.items[-1].metadata.name}')"
   [ -n "$pod" ] || die "inference pod not found for KVC burst ${action}"
   kubectl -n "$NAMESPACE" exec "$pod" -c "$KVC_BURST_CONTAINER" -- \
     "$KVC_BURST_CONTROL_BIN" \
-    "--control_action=${action}" \
+    "--control_action=${control_action}" \
+    "--host=${ds_host}" \
+    "--port=${ds_port}" \
+    "--prefix=PairecKvcBurstV2" \
     "--control_path=/run/pairec-kvc-burst/control" \
     >>"${round_dir}/kvc-burst-control.log" 2>&1
 }

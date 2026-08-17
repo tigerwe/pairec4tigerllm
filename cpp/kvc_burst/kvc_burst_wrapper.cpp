@@ -17,6 +17,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -33,6 +34,7 @@ using pairec::kvc_burst::SharedControl;
 using pairec::kvc_burst::State;
 
 std::atomic<bool> gStop{false};
+std::mutex gPressureErrorMutex;
 const char* gStartupStage{"process_start"};
 
 struct Config
@@ -296,16 +298,49 @@ int ApplyControlAction(const Config& config)
 {
     Mapping mapping;
     if (!OpenExistingMapping(config, &mapping)) return 1;
-    uint32_t armed = 0;
-    if (config.controlAction == "arm") armed = 1;
-    else if (config.controlAction != "disarm")
+    auto& control = *mapping.control;
+    if (config.controlAction == "disarm")
     {
-        std::cerr << "control_action must be arm or disarm" << std::endl;
+        pairec::kvc_burst::Store(&control.trigger_armed, 0U);
+        std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"disarm\",\"armed\":false}"
+                  << std::endl;
+        return 0;
+    }
+    if (config.controlAction == "arm")
+    {
+        pairec::kvc_burst::Store(&control.trigger_armed, 1U);
+        std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"arm\",\"armed\":true}"
+                  << std::endl;
+        return 0;
+    }
+    if (config.controlAction != "refresh-and-arm")
+    {
+        std::cerr << "control_action must be arm, disarm, or refresh-and-arm" << std::endl;
         return 2;
     }
-    pairec::kvc_burst::Store(&mapping.control->trigger_armed, armed);
-    std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"" << config.controlAction
-              << "\",\"armed\":" << (armed ? "true" : "false") << "}" << std::endl;
+
+    pairec::kvc_burst::Store(&control.trigger_armed, 0U);
+    if (pairec::kvc_burst::Load(&control.state) != static_cast<uint32_t>(State::kReady))
+    {
+        std::cerr << "cannot refresh pressure keys unless burst state is ready" << std::endl;
+        return 1;
+    }
+    auto pressureLanes = pairec::kvc_burst::Load(&control.pressure_lanes);
+    Config refreshConfig = config;
+    refreshConfig.concurrency = pressureLanes + 1;
+    refreshConfig.objectSize = pairec::kvc_burst::Load(&control.object_size_bytes);
+    auto keys = BuildKeys(refreshConfig, pressureLanes);
+    std::string value(refreshConfig.objectSize, 'k');
+    auto client = CreateClient(refreshConfig, false);
+    if (!client || !PrefillAndVerify(*client, keys, value))
+    {
+        std::cerr << "refresh pressure keys failed; burst remains disarmed" << std::endl;
+        return 1;
+    }
+    pairec::kvc_burst::Store(&control.keys_verified, pressureLanes);
+    pairec::kvc_burst::Store(&control.trigger_armed, 1U);
+    std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"refresh-and-arm\","
+              << "\"armed\":true,\"refreshed_keys\":" << pressureLanes << "}" << std::endl;
     return 0;
 }
 
@@ -573,6 +608,14 @@ void PressureWorker(uint32_t lane, SharedControl* control, datasystem::KVClient*
             datasystem::Optional<datasystem::Buffer> buffer;
             auto status = client->Get((*keys)[(*permutation)[lane]], buffer, 0);
             ok = !status.IsError() && static_cast<bool>(buffer);
+            if (!ok)
+            {
+                std::lock_guard<std::mutex> lock(gPressureErrorMutex);
+                std::cerr << "pressure Get failed generation=" << generation << " lane=" << lane
+                          << " key=" << (*keys)[(*permutation)[lane]]
+                          << " has_buffer=" << (buffer ? "true" : "false")
+                          << " detail=" << status.ToString() << std::endl;
+            }
             pairec::kvc_burst::Store(&control->pressure_end_ns[lane], pairec::kvc_burst::MonotonicNs());
         }
         pairec::kvc_burst::Store(&control->pressure_ok[lane], ok ? 1U : 0U);
