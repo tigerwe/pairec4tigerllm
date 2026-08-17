@@ -53,6 +53,7 @@ REPLAY_USER_ID="${REPLAY_USER_ID:-5}"
 REPLAY_SIZE="${REPLAY_SIZE:-1}"
 REPLAY_TIMEOUT="${REPLAY_TIMEOUT:-30}"
 RESET_INFERENCE_BEFORE_ROUND="${RESET_INFERENCE_BEFORE_ROUND:-0}"
+RESET_INFERENCE_MODE="${RESET_INFERENCE_MODE:-rollout}"
 INFERENCE_ROLLOUT_TIMEOUT_SECONDS="${INFERENCE_ROLLOUT_TIMEOUT_SECONDS:-600}"
 
 NAMESPACE="${NAMESPACE:-pairec}"
@@ -149,6 +150,10 @@ validate() {
   case "$RESET_INFERENCE_BEFORE_ROUND" in
     0|1) ;;
     *) die "RESET_INFERENCE_BEFORE_ROUND must be 0 or 1" ;;
+  esac
+  case "$RESET_INFERENCE_MODE" in
+    rollout|container) ;;
+    *) die "RESET_INFERENCE_MODE must be rollout or container" ;;
   esac
   case "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" in
     0|1) ;;
@@ -471,6 +476,11 @@ reset_inference() {
   fi
 
   log "Reset inference cache state"
+  if [ "$RESET_INFERENCE_MODE" = "container" ]; then
+    reset_inference_container "$round_dir"
+    return
+  fi
+
   kubectl -n "$NAMESPACE" rollout restart "$BRPC_TARGET" \
     >"${round_dir}/inference-rollout-restart.log" 2>&1
   kubectl -n "$NAMESPACE" rollout status "$BRPC_TARGET" \
@@ -478,6 +488,60 @@ reset_inference() {
     >"${round_dir}/inference-rollout-status.log" 2>&1
   kubectl -n "$NAMESPACE" get pods -l app=inference-brpc-trtllm -o wide \
     >"${round_dir}/inference-pods-after-reset.txt"
+}
+
+reset_inference_container() {
+  local round_dir="$1"
+  local pod before_restart current_restart main_ready sidecar_ready deadline
+  pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1].metadata.name}')"
+  [ -n "$pod" ] || die "inference pod not found"
+  before_restart="$(kubectl -n "$NAMESPACE" get pod "$pod" \
+    -o "jsonpath={.status.containerStatuses[?(@.name==\"${BRPC_CONTAINER}\")].restartCount}")"
+  [[ "$before_restart" =~ ^[0-9]+$ ]] || die "cannot read ${BRPC_CONTAINER} restart count"
+
+  printf 'pod=%s container=%s restart_before=%s\n' \
+    "$pod" "$BRPC_CONTAINER" "$before_restart" \
+    >"${round_dir}/inference-container-reset.txt"
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$BRPC_CONTAINER" -- \
+    sh -c 'kill -KILL 1' \
+    >"${round_dir}/inference-container-kill.log" 2>&1 || true
+
+  deadline="$((SECONDS + INFERENCE_ROLLOUT_TIMEOUT_SECONDS))"
+  while (( SECONDS < deadline )); do
+    current_restart="$(kubectl -n "$NAMESPACE" get pod "$pod" \
+      -o "jsonpath={.status.containerStatuses[?(@.name==\"${BRPC_CONTAINER}\")].restartCount}" \
+      2>/dev/null || true)"
+    main_ready="$(kubectl -n "$NAMESPACE" get pod "$pod" \
+      -o "jsonpath={.status.containerStatuses[?(@.name==\"${BRPC_CONTAINER}\")].ready}" \
+      2>/dev/null || true)"
+    sidecar_ready=true
+    if [ -n "${KVC_BURST_CONTAINER:-}" ]; then
+      sidecar_ready="$(kubectl -n "$NAMESPACE" get pod "$pod" \
+        -o "jsonpath={.status.containerStatuses[?(@.name==\"${KVC_BURST_CONTAINER}\")].ready}" \
+        2>/dev/null || true)"
+    fi
+    if [[ "$current_restart" =~ ^[0-9]+$ ]] \
+        && [ "$current_restart" -gt "$before_restart" ] \
+        && [ "$main_ready" = "true" ] \
+        && [ "$sidecar_ready" = "true" ]; then
+      printf 'restart_after=%s main_ready=%s sidecar_ready=%s\n' \
+        "$current_restart" "$main_ready" "$sidecar_ready" \
+        >>"${round_dir}/inference-container-reset.txt"
+      kubectl -n "$NAMESPACE" get pod "$pod" -o wide \
+        >"${round_dir}/inference-pods-after-reset.txt"
+      return 0
+    fi
+    sleep 1
+  done
+
+  kubectl -n "$NAMESPACE" get pod "$pod" -o yaml \
+    >"${round_dir}/inference-container-reset-timeout.yaml" 2>/dev/null || true
+  kubectl -n "$NAMESPACE" logs "$pod" -c "$BRPC_CONTAINER" --tail=200 \
+    >"${round_dir}/inference-container-reset-timeout.log" 2>&1 || true
+  echo "ERROR: inference container did not restart Ready while sidecar remained Ready" >&2
+  return 1
 }
 
 run_prime() {
@@ -1014,6 +1078,7 @@ expected_onboards=${EXPECTED_ONBOARDS}
 strict_counts=${STRICT_COUNTS}
 require_exact_datasystem_attribution=${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION}
 reset_inference_before_round=${RESET_INFERENCE_BEFORE_ROUND}
+reset_inference_mode=${RESET_INFERENCE_MODE}
 inference_rollout_timeout_seconds=${INFERENCE_ROLLOUT_TIMEOUT_SECONDS}
 EOF
 

@@ -8,6 +8,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VALIDATOR = ROOT / "scripts" / "validate_f19_datasystem_real_io.sh"
+F14_VALIDATOR = ROOT / "scripts" / "validate_f14_kvc_burst_proxy.sh"
 BENCHMARK = ROOT / "scripts" / "benchmark_brpc_kvc_contention.sh"
 TRACE = ROOT / "scripts" / "trace_single_brpc_datasystem_request.sh"
 
@@ -90,6 +91,15 @@ class F19RealIoScriptTest(unittest.TestCase):
             'exact.get("unknown_count")',
         ):
             self.assertIn(field, text)
+
+    def test_f14_container_reset_preserves_ready_sidecar(self):
+        text = BENCHMARK.read_text()
+        validator_text = F14_VALIDATOR.read_text()
+        self.assertIn("RESET_INFERENCE_MODE=container", validator_text)
+        self.assertIn('RESET_INFERENCE_MODE="${RESET_INFERENCE_MODE:-rollout}"', text)
+        self.assertIn('reset_inference_container "$round_dir"', text)
+        self.assertIn("kill -KILL 1", text)
+        self.assertIn('[ "$sidecar_ready" = "true" ]', text)
 
     def test_trace_summary_preserves_completion_multiplicity(self):
         text = TRACE.read_text()
