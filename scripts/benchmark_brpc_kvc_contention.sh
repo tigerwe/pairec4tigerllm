@@ -156,8 +156,8 @@ validate() {
     *) die "RESET_INFERENCE_BEFORE_ROUND must be 0 or 1" ;;
   esac
   case "$RESET_INFERENCE_MODE" in
-    rollout|container) ;;
-    *) die "RESET_INFERENCE_MODE must be rollout or container" ;;
+    rollout|container-runtime) ;;
+    *) die "RESET_INFERENCE_MODE must be rollout or container-runtime" ;;
   esac
   case "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" in
     0|1) ;;
@@ -480,8 +480,8 @@ reset_inference() {
   fi
 
   log "Reset inference cache state"
-  if [ "$RESET_INFERENCE_MODE" = "container" ]; then
-    reset_inference_container "$round_dir"
+  if [ "$RESET_INFERENCE_MODE" = "container-runtime" ]; then
+    reset_inference_container_runtime "$round_dir"
     return
   fi
 
@@ -494,9 +494,9 @@ reset_inference() {
     >"${round_dir}/inference-pods-after-reset.txt"
 }
 
-reset_inference_container() {
+reset_inference_container_runtime() {
   local round_dir="$1"
-  local pod before_restart current_restart main_ready sidecar_ready deadline
+  local pod node container_id before_restart current_restart main_ready sidecar_ready deadline
   pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
     --sort-by=.metadata.creationTimestamp \
     -o jsonpath='{.items[-1].metadata.name}')"
@@ -504,13 +504,41 @@ reset_inference_container() {
   before_restart="$(kubectl -n "$NAMESPACE" get pod "$pod" \
     -o "jsonpath={.status.containerStatuses[?(@.name==\"${BRPC_CONTAINER}\")].restartCount}")"
   [[ "$before_restart" =~ ^[0-9]+$ ]] || die "cannot read ${BRPC_CONTAINER} restart count"
+  node="$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.spec.nodeName}')"
+  container_id="$(kubectl -n "$NAMESPACE" get pod "$pod" \
+    -o "jsonpath={.status.containerStatuses[?(@.name==\"${BRPC_CONTAINER}\")].containerID}")"
+  container_id="${container_id#*://}"
+  [ -n "$node" ] || die "cannot read inference node name"
+  [[ "$container_id" =~ ^[a-f0-9]+$ ]] || die "cannot read ${BRPC_CONTAINER} runtime container ID"
 
-  printf 'pod=%s container=%s restart_before=%s\n' \
-    "$pod" "$BRPC_CONTAINER" "$before_restart" \
+  printf 'pod=%s node=%s container=%s container_id=%s restart_before=%s\n' \
+    "$pod" "$node" "$BRPC_CONTAINER" "$container_id" "$before_restart" \
     >"${round_dir}/inference-container-reset.txt"
-  kubectl -n "$NAMESPACE" exec "$pod" -c "$BRPC_CONTAINER" -- \
-    sh -c 'kill -TERM 1' \
-    >"${round_dir}/inference-container-kill.log" 2>&1 || true
+  if ! ssh "$node" sh -s -- "$container_id" \
+      >"${round_dir}/inference-container-runtime-stop.log" 2>&1 <<'SH'
+set -eu
+container_id="$1"
+run_privileged() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo -n "$@"
+  fi
+}
+if command -v crictl >/dev/null 2>&1; then
+  run_privileged crictl stop --timeout 0 "$container_id"
+elif command -v ctr >/dev/null 2>&1; then
+  run_privileged ctr -n k8s.io tasks kill --signal SIGKILL "$container_id"
+else
+  echo "ERROR: worker node has neither crictl nor ctr" >&2
+  exit 1
+fi
+SH
+  then
+    cat "${round_dir}/inference-container-runtime-stop.log" >&2 || true
+    echo "ERROR: failed to stop inference container through worker runtime" >&2
+    return 1
+  fi
 
   deadline="$((SECONDS + INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS))"
   while (( SECONDS < deadline )); do
@@ -544,7 +572,7 @@ reset_inference_container() {
     >"${round_dir}/inference-container-reset-timeout.yaml" 2>/dev/null || true
   kubectl -n "$NAMESPACE" logs "$pod" -c "$BRPC_CONTAINER" --tail=200 \
     >"${round_dir}/inference-container-reset-timeout.log" 2>&1 || true
-  echo "ERROR: inference container did not restart Ready while sidecar remained Ready" >&2
+  echo "ERROR: runtime-stopped inference container did not restart Ready while sidecar remained Ready" >&2
   return 1
 }
 

@@ -92,13 +92,14 @@ class F19RealIoScriptTest(unittest.TestCase):
         ):
             self.assertIn(field, text)
 
-    def test_f14_container_reset_preserves_ready_sidecar(self):
+    def test_f14_container_runtime_reset_preserves_ready_sidecar(self):
         text = BENCHMARK.read_text()
         validator_text = F14_VALIDATOR.read_text()
-        self.assertIn("RESET_INFERENCE_MODE=container", validator_text)
+        self.assertIn("RESET_INFERENCE_MODE=container-runtime", validator_text)
         self.assertIn('RESET_INFERENCE_MODE="${RESET_INFERENCE_MODE:-rollout}"', text)
-        self.assertIn('reset_inference_container "$round_dir"', text)
-        self.assertIn("kill -TERM 1", text)
+        self.assertIn('reset_inference_container_runtime "$round_dir"', text)
+        self.assertIn("crictl stop --timeout 0", text)
+        self.assertIn("ctr -n k8s.io tasks kill --signal SIGKILL", text)
         self.assertIn('INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS="${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS:-120}"', text)
         self.assertIn('[ "$sidecar_ready" = "true" ]', text)
 
