@@ -29,6 +29,7 @@ namespace
 {
 
 using pairec::kvc_burst::Failure;
+using pairec::kvc_burst::RefreshState;
 using pairec::kvc_burst::SharedControl;
 using pairec::kvc_burst::State;
 
@@ -209,6 +210,13 @@ std::vector<std::string> BuildKeys(const Config& config, uint32_t count)
     return keys;
 }
 
+std::vector<std::string> BuildGenerationKeys(const Config& config, uint32_t count, uint32_t generation)
+{
+    Config generationConfig = config;
+    generationConfig.prefix += "_g" + std::to_string(generation);
+    return BuildKeys(generationConfig, count);
+}
+
 bool PrefillAndVerify(datasystem::KVClient& client, const std::vector<std::string>& keys, const std::string& value)
 {
     datasystem::SetParam param;
@@ -333,21 +341,24 @@ int ApplyControlAction(const Config& config)
         std::cerr << "cannot refresh pressure keys unless burst state is ready" << std::endl;
         return 1;
     }
-    auto pressureLanes = pairec::kvc_burst::Load(&control.pressure_lanes);
     auto pressureKeyCount = pairec::kvc_burst::Load(&control.pressure_key_count);
-    if (pressureLanes > 0 && pressureKeyCount == 0) pressureKeyCount = pressureLanes;
-    Config refreshConfig = config;
-    refreshConfig.concurrency = pressureLanes + 1;
-    refreshConfig.objectSize = pairec::kvc_burst::Load(&control.object_size_bytes);
-    auto keys = BuildKeys(refreshConfig, pressureKeyCount);
-    std::string value(refreshConfig.objectSize, 'k');
-    auto client = CreateClient(refreshConfig, false);
-    if (!client || !PrefillAndVerify(*client, keys, value))
+    pairec::kvc_burst::Store(
+        &control.refresh_state, static_cast<uint32_t>(RefreshState::kRequested));
+    pairec::kvc_burst::FutexWake(&control.refresh_state);
+    auto deadline = pairec::kvc_burst::DeadlineNs(30000);
+    uint32_t refreshState = static_cast<uint32_t>(RefreshState::kRequested);
+    while (pairec::kvc_burst::MonotonicNs() < deadline)
     {
-        std::cerr << "refresh pressure keys failed; burst remains disarmed" << std::endl;
+        refreshState = pairec::kvc_burst::Load(&control.refresh_state);
+        if (refreshState != static_cast<uint32_t>(RefreshState::kRequested)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (refreshState != static_cast<uint32_t>(RefreshState::kSucceeded))
+    {
+        std::cerr << "sidecar pressure key refresh failed or timed out; burst remains disarmed"
+                  << std::endl;
         return 1;
     }
-    pairec::kvc_burst::Store(&control.keys_verified, pressureLanes);
     pairec::kvc_burst::Store(&control.trigger_armed, 1U);
     std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"refresh-and-arm\","
               << "\"armed\":true,\"refreshed_keys\":" << pressureKeyCount << "}" << std::endl;
@@ -653,7 +664,8 @@ int Run(int argc, char** argv)
     auto& control = *mapping.control;
     auto pressureLanes = config.concurrency - 1;
     auto pressureKeyCount = config.pressureKeyCount == 0 ? pressureLanes : config.pressureKeyCount;
-    auto keys = BuildKeys(config, pressureKeyCount);
+    uint32_t pressureKeyGeneration = 0;
+    auto keys = BuildGenerationKeys(config, pressureKeyCount, pressureKeyGeneration);
     std::string value(config.objectSize, 'k');
 
     std::unique_ptr<datasystem::KVClient> controlClient;
@@ -733,6 +745,32 @@ int Run(int argc, char** argv)
     {
         pairec::kvc_burst::Store(&control.heartbeat_ns, pairec::kvc_burst::MonotonicNs());
         auto state = pairec::kvc_burst::Load(&control.state);
+        auto refreshState = pairec::kvc_burst::Load(&control.refresh_state);
+        if (state == static_cast<uint32_t>(State::kReady)
+            && refreshState == static_cast<uint32_t>(RefreshState::kRequested))
+        {
+            ++pressureKeyGeneration;
+            auto refreshed = pressureKeyCount == 0;
+            std::vector<std::string> refreshedKeys;
+            if (pressureKeyCount > 0)
+            {
+                DeleteKeys(*controlClient, keys);
+                refreshedKeys = BuildGenerationKeys(config, pressureKeyCount, pressureKeyGeneration);
+                refreshed = PrefillAndVerify(*controlClient, refreshedKeys, value);
+                if (!refreshed) DeleteKeys(*controlClient, refreshedKeys);
+            }
+            if (refreshed)
+            {
+                keys = std::move(refreshedKeys);
+                std::cout << "{\"event\":\"kvc_burst_keys_refreshed\",\"generation\":"
+                          << pressureKeyGeneration << ",\"pressure_key_count\":"
+                          << pressureKeyCount << "}" << std::endl;
+            }
+            pairec::kvc_burst::Store(&control.refresh_state,
+                static_cast<uint32_t>(refreshed ? RefreshState::kSucceeded : RefreshState::kFailed));
+            pairec::kvc_burst::FutexWake(&control.refresh_state);
+            continue;
+        }
         if (state == static_cast<uint32_t>(State::kClaimed))
         {
             auto claimedAt = pairec::kvc_burst::Load(&control.claim_started_ns);

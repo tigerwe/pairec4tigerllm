@@ -59,6 +59,14 @@ enum class TriggerStatus : uint32_t
     kSkippedDisarmed = 7,
 };
 
+enum class RefreshState : uint32_t
+{
+    kIdle = 0,
+    kRequested = 1,
+    kSucceeded = 2,
+    kFailed = 3,
+};
+
 // All fields use fixed-width integral types so the control block has one ABI in
 // both containers. Shared synchronization uses __atomic builtins, not
 // process-local std::atomic objects.
@@ -101,7 +109,7 @@ struct alignas(64) SharedControl
     uint32_t clients_connected;
     uint32_t trigger_armed;
     uint32_t pressure_key_count;
-    uint32_t reserved_u32_2;
+    uint32_t refresh_state;
 
     uint64_t object_size_bytes;
     uint64_t shuffle_seed;
