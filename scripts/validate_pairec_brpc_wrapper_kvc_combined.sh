@@ -15,6 +15,8 @@ KVC_OVERLAY_BACKUP=${KVC_OVERLAY_BACKUP:-$OUTPUT_DIR/kvc-deployment-before.json}
 WRAPPER_OUTPUT_DIR=${WRAPPER_OUTPUT_DIR:-$OUTPUT_DIR/wrapper}
 CONTENTION_OUTPUT_DIR=${CONTENTION_OUTPUT_DIR:-$OUTPUT_DIR/contention}
 MIN_ROOT_AVAILABLE_KB=${MIN_ROOT_AVAILABLE_KB:-5242880}
+EXPECTED_ONBOARDS_MIN=${EXPECTED_ONBOARDS_MIN:-2}
+EXPECTED_ONBOARDS_MAX=${EXPECTED_ONBOARDS_MAX:-2}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 mkdir -p "$OUTPUT_DIR"
@@ -64,6 +66,8 @@ NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE=baseline \
   KVC_BURST_CONTAINER=kvc-burst-wrapper KVC_BURST_REQUIRE_COMPLETE=1 \
   KVC_BURST_DYNAMIC_ARM=1 KVC_BURST_PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" \
   EXPECTED_OFFLOADS=3 EXPECTED_ONBOARDS=2 STRICT_COUNTS=1 \
+  EXPECTED_ONBOARDS_MIN="$EXPECTED_ONBOARDS_MIN" \
+  EXPECTED_ONBOARDS_MAX="$EXPECTED_ONBOARDS_MAX" \
   REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION=1 PRIME_REQUESTS=195 \
   RESET_INFERENCE_BEFORE_ROUND=1 RESET_INFERENCE_MODE=pod-recreate \
   MIN_ROOT_AVAILABLE_KB="$MIN_ROOT_AVAILABLE_KB" \
@@ -83,12 +87,15 @@ kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper \
   --since-time="$STARTED_AT" >"$OUTPUT_DIR/wrapper-measured.log" 2>&1 || true
 
 python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log" \
-  "$OUTPUT_DIR/summary.json" "$WRAPPER_CONCURRENCY" "$KVC_CONCURRENCY" <<'PY'
+  "$OUTPUT_DIR/summary.json" "$WRAPPER_CONCURRENCY" "$KVC_CONCURRENCY" \
+  "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" <<'PY'
 import json, math, pathlib, statistics, sys
 contention = json.load(open(sys.argv[1]))
 wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
 wrapper_concurrency = int(sys.argv[4])
 kvc_concurrency = int(sys.argv[5])
+expected_onboards_min = int(sys.argv[6])
+expected_onboards_max = int(sys.argv[7])
 valid = contention.get("valid_repeats") == contention.get("expected_repeats")
 rows = []
 
@@ -132,9 +139,14 @@ for row in contention.get("rows", []):
     assert len(kvc_events) == 1, (request_id, kvc_events)
     kvc = kvc_events[0]
     assert kvc["concurrency"] == kvc_concurrency and kvc["valid"] is True, kvc
+    pressure_lanes = max(kvc_concurrency - 1, 0)
+    assert kvc["pressure_lanes"] == pressure_lanes, kvc
+    assert kvc["pressure_success"] == pressure_lanes, kvc
+    assert kvc["pressure_errors"] == 0, kvc
     exact = trace["datasystem_request_complete"]
     executor = trace["trt_executor_request_completions"]
-    assert exact["get_count"] == 2 and exact["set_count"] == 3, exact
+    assert exact["set_count"] == 3, exact
+    assert expected_onboards_min <= exact["get_count"] <= expected_onboards_max, exact
     assert len(executor) == 1, executor
     matches = [line for line in wrapper_log.splitlines()
                if "method=Recommend" in line and f"request_id={request_id}" in line]
@@ -180,6 +192,8 @@ result = {
                        if valid else "PAIREC_BRPC_WRAPPER_KVC_COMBINED_FAIL"),
     "wrapper_concurrency": wrapper_concurrency,
     "kvc_concurrency": kvc_concurrency,
+    "expected_onboards_min": expected_onboards_min,
+    "expected_onboards_max": expected_onboards_max,
     "contention": contention,
     "samples": rows,
     "metrics": metrics,

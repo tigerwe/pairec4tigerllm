@@ -15,7 +15,14 @@ KVC_BURST_WRAPPER = ROOT / "cpp" / "kvc_burst" / "kvc_burst_wrapper.cpp"
 
 
 class F19RealIoScriptTest(unittest.TestCase):
-    def run_summary(self, get_count=2, set_count=3):
+    def run_summary(
+        self,
+        get_count=2,
+        set_count=3,
+        onboard_events=2,
+        onboard_min=2,
+        onboard_max=2,
+    ):
         text = BENCHMARK.read_text()
         blocks = re.findall(r"<<'PY' \| tee \"\$SUMMARY_TXT\"\n(.*?)\nPY", text, re.DOTALL)
         self.assertEqual(1, len(blocks))
@@ -33,7 +40,7 @@ class F19RealIoScriptTest(unittest.TestCase):
             "pairec_generative_trace": {"rpc_ms": 112},
             "kvc_access": {
                 "offload_events": [{"total_ms": 2}] * 3,
-                "onboard_events": [{"total_ms": 3}] * 2,
+                "onboard_events": [{"total_ms": 3}] * onboard_events,
             },
             "datasystem_request_completion_count": 1,
             "datasystem_request_complete": {
@@ -63,7 +70,8 @@ class F19RealIoScriptTest(unittest.TestCase):
         try:
             sys.argv = [
                 "embedded-summary", str(root), "baseline", "1", "3", "2",
-                "1", str(result), "dsbench", "4", "6", "0", "10", "1",
+                str(onboard_min), str(onboard_max), "1", str(result),
+                "dsbench", "4", "6", "0", "10", "1",
             ]
             with self.assertRaises(SystemExit) as exit_context:
                 exec(compile(blocks[0], "embedded-contention-summary", "exec"), {})
@@ -187,6 +195,23 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertEqual("FAIL", result["status"])
         self.assertTrue(result["rows"][0]["count_ok"])
         self.assertFalse(result["rows"][0]["exact_attribution_ok"])
+
+    def test_onboard_range_is_explicit_and_default_remains_exact(self):
+        strict_code, strict_result = self.run_summary(
+            get_count=1, onboard_events=1
+        )
+        self.assertEqual(1, strict_code)
+        self.assertEqual("FAIL", strict_result["status"])
+
+        range_code, range_result = self.run_summary(
+            get_count=1,
+            onboard_events=1,
+            onboard_min=1,
+            onboard_max=2,
+        )
+        self.assertEqual(0, range_code)
+        self.assertEqual("PASS", range_result["status"])
+        self.assertTrue(range_result["rows"][0]["exact_attribution_ok"])
 
 
 if __name__ == "__main__":

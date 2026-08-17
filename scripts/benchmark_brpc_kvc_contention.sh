@@ -6,6 +6,8 @@ REPEATS="${REPEATS:-3}"
 STRICT_COUNTS="${STRICT_COUNTS:-1}"
 EXPECTED_OFFLOADS="${EXPECTED_OFFLOADS:-3}"
 EXPECTED_ONBOARDS="${EXPECTED_ONBOARDS:-2}"
+EXPECTED_ONBOARDS_MIN="${EXPECTED_ONBOARDS_MIN:-$EXPECTED_ONBOARDS}"
+EXPECTED_ONBOARDS_MAX="${EXPECTED_ONBOARDS_MAX:-$EXPECTED_ONBOARDS}"
 REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION="${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION:-0}"
 
 BRPC_ENDPOINT="${BRPC_ENDPOINT:-192.168.100.11:18100}"
@@ -124,7 +126,8 @@ validate() {
     *) die "MODE must be baseline, brpc, kvc-get, kvc-set, kvc-mixed, or combined" ;;
   esac
   local value
-  for value in "$REPEATS" "$EXPECTED_OFFLOADS" "$EXPECTED_ONBOARDS" "$PRIME_REQUESTS" \
+  for value in "$REPEATS" "$EXPECTED_OFFLOADS" "$EXPECTED_ONBOARDS" \
+    "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" "$PRIME_REQUESTS" \
     "$BRPC_LOAD_QPS" "$BRPC_LOAD_CONCURRENCY" "$BRPC_LOAD_PAYLOAD_BYTES" "$BRPC_LOAD_REQUESTS" \
     "$BRPC_LOAD_TIMEOUT_MS" "$BRPC_LOAD_READY_TIMEOUT_SECONDS" "$PRIME_MAX_ATTEMPTS" \
     "$PRIME_RETRY_DELAY_SECONDS" "$ROUND_COOLDOWN_SECONDS" "$KVC_LOAD_READY_TIMEOUT_SECONDS" \
@@ -136,6 +139,8 @@ validate() {
     [[ "$value" =~ ^[0-9]+$ ]] || die "repeat/count parameters must be non-negative integers"
   done
   [ "$REPEATS" -gt 0 ] || die "REPEATS must be positive"
+  [ "$EXPECTED_ONBOARDS_MIN" -le "$EXPECTED_ONBOARDS_MAX" ] \
+    || die "EXPECTED_ONBOARDS_MIN must not exceed EXPECTED_ONBOARDS_MAX"
   [ "$PRIME_REQUESTS" -gt 0 ] || die "PRIME_REQUESTS must be positive"
   [ "$PRIME_MAX_ATTEMPTS" -gt 0 ] || die "PRIME_MAX_ATTEMPTS must be positive"
   [ "$INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS" -gt 0 ] \
@@ -745,6 +750,7 @@ run_replay() {
 
 summarize() {
   python3 - "$OUT_DIR" "$MODE" "$REPEATS" "$EXPECTED_OFFLOADS" "$EXPECTED_ONBOARDS" \
+    "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" \
     "$STRICT_COUNTS" "$RESULT_JSON" "$KVC_PRESSURE_ENGINE" "$KVC_GET_CLIENTS" "$KVC_SET_CLIENTS" \
     "$KVC_DSBENCH_SUSTAINED" "$BRPC_LOAD_CONCURRENCY" "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" \
     <<'PY' | tee "$SUMMARY_TXT"
@@ -756,13 +762,16 @@ import statistics
 import sys
 
 (
-    out_dir, mode, repeats, expected_offloads, expected_onboards, strict_counts, result_path,
+    out_dir, mode, repeats, expected_offloads, expected_onboards,
+    expected_onboards_min, expected_onboards_max, strict_counts, result_path,
     pressure_engine, get_clients, set_clients, dsbench_sustained, brpc_load_concurrency,
     require_exact_attribution,
-) = sys.argv[1:14]
+) = sys.argv[1:16]
 repeats = int(repeats)
 expected_offloads = int(expected_offloads)
 expected_onboards = int(expected_onboards)
+expected_onboards_min = int(expected_onboards_min)
+expected_onboards_max = int(expected_onboards_max)
 strict_counts = strict_counts == "1"
 get_clients = int(get_clients)
 set_clients = int(set_clients)
@@ -948,13 +957,14 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
         and pod_before_name == pod_after_name
         and crash_markers == 0
     )
-    count_ok = len(offloads) == expected_offloads and len(onboards) == expected_onboards
+    onboard_count_ok = expected_onboards_min <= len(onboards) <= expected_onboards_max
+    count_ok = len(offloads) == expected_offloads and onboard_count_ok
     exact_count_ok = (
         exact_completion_count == 1
         and exact.get("request_id") == raw.get("request_id")
         and exact.get("attribution_complete") is True
         and int(number(exact.get("set_count"))) == expected_offloads
-        and int(number(exact.get("get_count"))) == expected_onboards
+        and expected_onboards_min <= int(number(exact.get("get_count"))) <= expected_onboards_max
         and int(number(exact.get("get_failed_count"))) == 0
         and int(number(exact.get("set_failed_count"))) == 0
         and int(number(exact.get("pending_count"))) == 0
@@ -1141,7 +1151,12 @@ result = {
     "status": status,
     "expected_repeats": repeats,
     "valid_repeats": len(valid),
-    "expected_counts": {"offload": expected_offloads, "onboard": expected_onboards},
+    "expected_counts": {
+        "offload": expected_offloads,
+        "onboard": expected_onboards,
+        "onboard_min": expected_onboards_min,
+        "onboard_max": expected_onboards_max,
+    },
     "strict_counts": strict_counts,
     "require_exact_datasystem_attribution": require_exact_attribution,
     "pressure_engine": pressure_engine,
@@ -1237,6 +1252,8 @@ kvc_load_ready_timeout_seconds=${KVC_LOAD_READY_TIMEOUT_SECONDS}
 kvc_dsbench_sustained=${KVC_DSBENCH_SUSTAINED}
 expected_offloads=${EXPECTED_OFFLOADS}
 expected_onboards=${EXPECTED_ONBOARDS}
+expected_onboards_min=${EXPECTED_ONBOARDS_MIN}
+expected_onboards_max=${EXPECTED_ONBOARDS_MAX}
 strict_counts=${STRICT_COUNTS}
 require_exact_datasystem_attribution=${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION}
 reset_inference_before_round=${RESET_INFERENCE_BEFORE_ROUND}
