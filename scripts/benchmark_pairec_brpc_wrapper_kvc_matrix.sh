@@ -57,6 +57,7 @@ result = {
     "baseline": baseline,
     "combined": combined,
     "combined_kvc_object_size_bytes": combined["kvc_object_size_bytes"],
+    "combined_kvc_pressure_key_count": combined["kvc_pressure_key_count"],
     "comparison": rows,
 }
 pathlib.Path(sys.argv[3]).write_text(json.dumps(result, indent=2) + "\n")

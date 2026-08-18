@@ -91,7 +91,8 @@ kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper \
 
 python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log" \
   "$OUTPUT_DIR/summary.json" "$WRAPPER_CONCURRENCY" "$KVC_CONCURRENCY" \
-  "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" "$KVC_OBJECT_SIZE" <<'PY'
+  "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" "$KVC_OBJECT_SIZE" \
+  "$KVC_PRESSURE_KEY_COUNT" <<'PY'
 import json, math, pathlib, statistics, sys
 contention = json.load(open(sys.argv[1]))
 wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
@@ -100,6 +101,7 @@ kvc_concurrency = int(sys.argv[5])
 expected_onboards_min = int(sys.argv[6])
 expected_onboards_max = int(sys.argv[7])
 kvc_object_size = int(sys.argv[8])
+kvc_pressure_key_count = int(sys.argv[9])
 valid = contention.get("valid_repeats") == contention.get("expected_repeats")
 rows = []
 
@@ -144,6 +146,7 @@ for row in contention.get("rows", []):
     kvc = kvc_events[0]
     assert kvc["concurrency"] == kvc_concurrency and kvc["valid"] is True, kvc
     assert kvc["object_size_bytes"] == kvc_object_size, kvc
+    assert kvc["pressure_key_count"] == kvc_pressure_key_count, kvc
     pressure_lanes = max(kvc_concurrency - 1, 0)
     assert kvc["pressure_lanes"] == pressure_lanes, kvc
     assert kvc["pressure_success"] == pressure_lanes, kvc
@@ -198,6 +201,7 @@ result = {
     "wrapper_concurrency": wrapper_concurrency,
     "kvc_concurrency": kvc_concurrency,
     "kvc_object_size_bytes": kvc_object_size,
+    "kvc_pressure_key_count": kvc_pressure_key_count,
     "expected_onboards_min": expected_onboards_min,
     "expected_onboards_max": expected_onboards_max,
     "contention": contention,
