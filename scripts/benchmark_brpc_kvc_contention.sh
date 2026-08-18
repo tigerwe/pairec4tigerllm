@@ -73,6 +73,9 @@ BRPC_LOAD_POD_SELECTOR="${BRPC_LOAD_POD_SELECTOR:-app=brpc-pressure-target}"
 BRPC_LOAD_CONTAINER="${BRPC_LOAD_CONTAINER:-brpc-pressure-target}"
 NETWORK_INTERFACE="${NETWORK_INTERFACE:-enp41s0f1}"
 REMOTE_NETWORK_INTERFACE="${REMOTE_NETWORK_INTERFACE:-enp41s0f1}"
+DS_WORKER_METRICS="${DS_WORKER_METRICS:-1}"
+DS_WORKER_POD_SELECTOR="${DS_WORKER_POD_SELECTOR:-app=datasystem-25g-master}"
+DS_WORKER_CONTAINER="${DS_WORKER_CONTAINER:-datasystem-worker}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT_DIR="${OUT_DIR:-/tmp/brpc-kvc-contention/${RUN_ID}-${MODE}}"
@@ -226,6 +229,32 @@ capture_inference_state() {
     -o jsonpath='{.status.containerStatuses[?(@.name=="brpc-inference")].restartCount}' \
     >"${round_dir}/inference-restarts.${phase}"
   printf '\n' >>"${round_dir}/inference-restarts.${phase}"
+}
+
+capture_datasystem_worker_metrics() {
+  local round_dir="$1"
+  local phase="$2"
+  [ "$DS_WORKER_METRICS" = "1" ] || return 0
+  # Metrics are observational: a collection failure is recorded as an artifact
+  # but never fails the round itself.
+  if ! DS_WORKER_POD_SELECTOR="$DS_WORKER_POD_SELECTOR" \
+       DS_WORKER_CONTAINER="$DS_WORKER_CONTAINER" NAMESPACE="$NAMESPACE" \
+       bash scripts/collect_datasystem_worker_metrics.sh snapshot \
+         "${round_dir}/datasystem-worker-metrics.${phase}.json" \
+         >"${round_dir}/datasystem-worker-metrics.${phase}.log" 2>&1; then
+    echo "snapshot phase=${phase} failed; see ${round_dir}/datasystem-worker-metrics.${phase}.log" \
+      >"${round_dir}/datasystem-worker-metrics.error"
+    return 0
+  fi
+  if [ "$phase" = "after" ] && [ -f "${round_dir}/datasystem-worker-metrics.before.json" ]; then
+    if ! bash scripts/collect_datasystem_worker_metrics.sh delta \
+        "${round_dir}/datasystem-worker-metrics.before.json" \
+        "${round_dir}/datasystem-worker-metrics.after.json" \
+        "${round_dir}/datasystem-worker-metrics.json" \
+        >>"${round_dir}/datasystem-worker-metrics.${phase}.log" 2>&1; then
+      echo "delta computation failed" >"${round_dir}/datasystem-worker-metrics.error"
+    fi
+  fi
 }
 
 capture_brpc_pressure_cpu_stat() {
@@ -1335,6 +1364,7 @@ for round in $(seq 1 "$REPEATS"); do
 
   capture_inference_state "$round_dir" before
   capture_brpc_pressure_cpu_stat "$round_dir" before
+  capture_datasystem_worker_metrics "$round_dir" before
 
   read_counter "$NETWORK_INTERFACE" rx_bytes >"${round_dir}/local-rx.before"
   read_counter "$NETWORK_INTERFACE" tx_bytes >"${round_dir}/local-tx.before"
@@ -1373,6 +1403,7 @@ for round in $(seq 1 "$REPEATS"); do
   fi
   capture_inference_state "$round_dir" after
   capture_brpc_pressure_cpu_stat "$round_dir" after
+  capture_datasystem_worker_metrics "$round_dir" after
 
   read_counter "$NETWORK_INTERFACE" rx_bytes >"${round_dir}/local-rx.after"
   read_counter "$NETWORK_INTERFACE" tx_bytes >"${round_dir}/local-tx.after"

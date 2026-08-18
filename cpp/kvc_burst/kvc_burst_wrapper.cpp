@@ -53,6 +53,9 @@ struct Config
     bool cleanupKeys{true};
     bool initiallyArmed{true};
     std::string controlAction;
+    bool sustainedPressure{false};
+    uint32_t sustainedMaxDurationMs{1000};
+    uint32_t sustainedMaxLoops{100};
 };
 
 struct Mapping
@@ -157,6 +160,20 @@ bool ParseArgs(int argc, char** argv, Config* config)
         else if (name == "ready_file") config->readyFile = value;
         else if (name == "stats_file") config->statsFile = value;
         else if (name == "control_action") config->controlAction = value;
+        else if (name == "sustained_pressure")
+        {
+            if (!ParseBool(value, &config->sustainedPressure)) return false;
+        }
+        else if (name == "sustained_max_duration_ms")
+        {
+            if (!ParseUnsigned(value, &parsed) || parsed > UINT32_MAX) return false;
+            config->sustainedMaxDurationMs = static_cast<uint32_t>(parsed);
+        }
+        else if (name == "sustained_max_loops")
+        {
+            if (!ParseUnsigned(value, &parsed) || parsed > UINT32_MAX) return false;
+            config->sustainedMaxLoops = static_cast<uint32_t>(parsed);
+        }
         else if (name == "initially_armed")
         {
             if (!ParseBool(value, &config->initiallyArmed)) return false;
@@ -177,6 +194,12 @@ bool ParseArgs(int argc, char** argv, Config* config)
         || config->pressureKeyCount > config->concurrency - 1)
     {
         std::cerr << "invalid host, port, concurrency, object size, timeout, or control path" << std::endl;
+        return false;
+    }
+    if (config->sustainedPressure
+        && (config->sustainedMaxDurationMs == 0 || config->sustainedMaxLoops == 0))
+    {
+        std::cerr << "sustained pressure requires positive max duration and max loops" << std::endl;
         return false;
     }
     return true;
@@ -373,6 +396,33 @@ uint64_t Percentile(std::vector<uint64_t> values, double percentile)
     return values[std::min(index, values.size() - 1)];
 }
 
+// Process-local per-lane sustained pressure statistics. These do not need to
+// live in SharedControl because the workers and the aggregator are threads of
+// the same process; each lane only writes its own slot and the aggregator
+// reads them after completed_pressure_lanes reaches the lane count.
+struct SustainedLaneStats
+{
+    uint32_t loops{0};
+    uint32_t errors{0};
+    uint64_t lastEndNs{0};
+    uint32_t stopReason{0};
+};
+
+struct SustainedReport
+{
+    bool enabled{false};
+    uint32_t maxDurationMs{0};
+    uint32_t maxLoops{0};
+    uint64_t loopGets{0};
+    uint64_t errors{0};
+    uint32_t minLaneLoops{0};
+    uint32_t maxLaneLoops{0};
+    uint32_t stopBusiness{0};
+    uint32_t stopMaxDuration{0};
+    uint32_t stopMaxLoops{0};
+    uint64_t windowUs{0};
+};
+
 struct Aggregate
 {
     bool valid{false};
@@ -381,6 +431,7 @@ struct Aggregate
     uint32_t businessOverlap{0};
     uint64_t startSkewUs{0};
     uint64_t businessGetUs{0};
+    uint32_t businessSubmitRank{0};
     uint64_t pressureAvgUs{0};
     uint64_t pressureP95Us{0};
     uint64_t pressureP99Us{0};
@@ -394,6 +445,7 @@ Aggregate AggregateResult(SharedControl& control)
     auto businessStart = pairec::kvc_burst::Load(&control.business_start_ns);
     auto businessEnd = pairec::kvc_burst::Load(&control.business_end_ns);
     result.businessGetUs = businessEnd > businessStart ? (businessEnd - businessStart) / 1000ULL : 0;
+    result.businessSubmitRank = pairec::kvc_burst::BusinessSubmitRank(control);
 
     std::vector<uint64_t> starts;
     std::vector<uint64_t> pressureLatencies;
@@ -478,7 +530,62 @@ Aggregate AggregateResult(SharedControl& control)
     return result;
 }
 
-std::string JsonResult(const Config& config, const SharedControl& control, uint32_t generation, const Aggregate& result)
+SustainedReport SummarizeSustained(const Config& config, const SharedControl& control,
+    const std::vector<SustainedLaneStats>& lanes)
+{
+    SustainedReport report;
+    report.enabled = config.sustainedPressure;
+    report.maxDurationMs = config.sustainedMaxDurationMs;
+    report.maxLoops = config.sustainedMaxLoops;
+    if (!config.sustainedPressure)
+    {
+        return report;
+    }
+    auto pressureLanes = pairec::kvc_burst::Load(&control.pressure_lanes);
+    bool haveLane = false;
+    uint64_t minStart = 0;
+    uint64_t maxEnd = 0;
+    for (uint32_t i = 0; i < pressureLanes && i < lanes.size(); ++i)
+    {
+        const auto& lane = lanes[i];
+        report.loopGets += lane.loops;
+        report.errors += lane.errors;
+        if (!haveLane)
+        {
+            report.minLaneLoops = lane.loops;
+            report.maxLaneLoops = lane.loops;
+            haveLane = true;
+        }
+        else
+        {
+            report.minLaneLoops = std::min(report.minLaneLoops, lane.loops);
+            report.maxLaneLoops = std::max(report.maxLaneLoops, lane.loops);
+        }
+        switch (static_cast<pairec::kvc_burst::SustainedStop>(lane.stopReason))
+        {
+        case pairec::kvc_burst::SustainedStop::kBusinessDone: ++report.stopBusiness; break;
+        case pairec::kvc_burst::SustainedStop::kMaxDuration: ++report.stopMaxDuration; break;
+        case pairec::kvc_burst::SustainedStop::kMaxLoops: ++report.stopMaxLoops; break;
+        default: break;
+        }
+        auto laneStart = pairec::kvc_burst::Load(&control.pressure_start_ns[i]);
+        auto laneEnd = lane.lastEndNs != 0
+            ? lane.lastEndNs : pairec::kvc_burst::Load(&control.pressure_end_ns[i]);
+        if (laneStart > 0 && laneEnd >= laneStart)
+        {
+            minStart = minStart == 0 ? laneStart : std::min(minStart, laneStart);
+            maxEnd = std::max(maxEnd, laneEnd);
+        }
+    }
+    if (minStart > 0 && maxEnd > minStart)
+    {
+        report.windowUs = (maxEnd - minStart) / 1000ULL;
+    }
+    return report;
+}
+
+std::string JsonResult(const Config& config, const SharedControl& control, uint32_t generation,
+    const Aggregate& result, const SustainedReport& sustained)
 {
     std::ostringstream output;
     output << std::fixed << std::setprecision(3);
@@ -502,6 +609,47 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
            << ",\"pressure_get_max_ms\":" << static_cast<double>(result.pressureMaxUs) / 1000.0
            << ",\"start_skew_us\":" << result.startSkewUs << ",\"max_active_all_gets\":"
            << result.maxActiveAll << ",\"business_overlap_gets\":" << result.businessOverlap
+           << ",\"business_submit_rank\":" << result.businessSubmitRank;
+    {
+        auto businessStart = pairec::kvc_burst::Load(&control.business_start_ns);
+        auto pressureLanes = pairec::kvc_burst::Load(&control.pressure_lanes);
+        output << ",\"pressure_start_offsets_us\":";
+        bool firstOffset = true;
+        output << '[';
+        for (uint32_t i = 0; i < pressureLanes; ++i)
+        {
+            if (!firstOffset) output << ',';
+            firstOffset = false;
+            auto start = pairec::kvc_burst::Load(&control.pressure_start_ns[i]);
+            if (start == 0 || businessStart == 0) output << "null";
+            else if (start >= businessStart) output << static_cast<long long>(start - businessStart) / 1000LL;
+            else output << -static_cast<long long>(businessStart - start) / 1000LL;
+        }
+        output << "],\"pressure_end_offsets_us\":";
+        firstOffset = true;
+        output << '[';
+        for (uint32_t i = 0; i < pressureLanes; ++i)
+        {
+            if (!firstOffset) output << ',';
+            firstOffset = false;
+            auto end = pairec::kvc_burst::Load(&control.pressure_end_ns[i]);
+            if (end == 0 || businessStart == 0) output << "null";
+            else if (end >= businessStart) output << static_cast<long long>(end - businessStart) / 1000LL;
+            else output << -static_cast<long long>(businessStart - end) / 1000LL;
+        }
+        output << ']';
+    }
+    output << ",\"sustained_enabled\":" << (sustained.enabled ? "true" : "false")
+           << ",\"sustained_max_duration_ms\":" << sustained.maxDurationMs
+           << ",\"sustained_max_loops_config\":" << sustained.maxLoops
+           << ",\"sustained_loop_gets\":" << sustained.loopGets
+           << ",\"sustained_errors\":" << sustained.errors
+           << ",\"sustained_min_lane_loops\":" << sustained.minLaneLoops
+           << ",\"sustained_max_lane_loops\":" << sustained.maxLaneLoops
+           << ",\"sustained_stop_business\":" << sustained.stopBusiness
+           << ",\"sustained_stop_max_duration\":" << sustained.stopMaxDuration
+           << ",\"sustained_stop_max_loops\":" << sustained.stopMaxLoops
+           << ",\"sustained_window_ms\":" << static_cast<double>(sustained.windowUs) / 1000.0
            << ",\"pressure_success\":" << control.pressure_success << ",\"pressure_errors\":"
            << control.pressure_errors << ",\"business_success\":"
            << (control.business_success ? "true" : "false") << ",\"valid\":"
@@ -600,7 +748,8 @@ void ResetGeneration(SharedControl& control, uint32_t generation, uint64_t shuff
 }
 
 void PressureWorker(uint32_t lane, SharedControl* control, datasystem::KVClient* client,
-    const std::vector<std::string>* keys, const std::vector<uint32_t>* permutation)
+    const std::vector<std::string>* keys, const std::vector<uint32_t>* permutation,
+    const Config* config, SustainedLaneStats* sustainedStats)
 {
     uint32_t previousGeneration = 0;
     while (!gStop.load(std::memory_order_relaxed))
@@ -639,6 +788,42 @@ void PressureWorker(uint32_t lane, SharedControl* control, datasystem::KVClient*
                           << " detail=" << status.ToString() << std::endl;
             }
             pairec::kvc_burst::Store(&control->pressure_end_ns[lane], pairec::kvc_burst::MonotonicNs());
+        }
+        if (released && config->sustainedPressure)
+        {
+            // Keep issuing Gets on this lane's key until the business Get for
+            // this generation completes. The loop and duration budgets bound
+            // the burst when the business request fails or crashes.
+            auto loopStarted = pairec::kvc_burst::MonotonicNs();
+            auto stop = pairec::kvc_burst::SustainedStop::kNone;
+            bool errorLogged = false;
+            while (!gStop.load(std::memory_order_relaxed))
+            {
+                stop = pairec::kvc_burst::SustainedStopReason(*control, generation, loopStarted,
+                    sustainedStats->loops, config->sustainedMaxDurationMs, config->sustainedMaxLoops);
+                if (stop != pairec::kvc_burst::SustainedStop::kNone)
+                {
+                    break;
+                }
+                datasystem::Optional<datasystem::Buffer> buffer;
+                auto status = client->Get((*keys)[(*permutation)[lane]], buffer, 0);
+                bool sustainedOk = !status.IsError() && static_cast<bool>(buffer);
+                sustainedStats->loops += 1;
+                if (!sustainedOk)
+                {
+                    sustainedStats->errors += 1;
+                    if (!errorLogged)
+                    {
+                        errorLogged = true;
+                        std::lock_guard<std::mutex> lock(gPressureErrorMutex);
+                        std::cerr << "sustained pressure Get failed generation=" << generation
+                                  << " lane=" << lane << " key=" << (*keys)[(*permutation)[lane]]
+                                  << " detail=" << status.ToString() << std::endl;
+                    }
+                }
+                sustainedStats->lastEndNs = pairec::kvc_burst::MonotonicNs();
+            }
+            sustainedStats->stopReason = static_cast<uint32_t>(stop);
         }
         pairec::kvc_burst::Store(&control->pressure_ok[lane], ok ? 1U : 0U);
         pairec::kvc_burst::FetchAdd(ok ? &control->pressure_success : &control->pressure_errors, 1U);
@@ -695,12 +880,14 @@ int Run(int argc, char** argv)
     {
         permutation[i] = i % pressureKeyCount;
     }
+    std::vector<SustainedLaneStats> sustainedStats(pressureLanes);
     std::vector<std::thread> workers;
     workers.reserve(pressureLanes);
     for (uint32_t i = 0; i < pressureLanes; ++i)
     {
         gStartupStage = "start_pressure_workers";
-        workers.emplace_back(PressureWorker, i, &control, clients[i].get(), &keys, &permutation);
+        workers.emplace_back(PressureWorker, i, &control, clients[i].get(), &keys, &permutation,
+            &config, &sustainedStats[i]);
     }
 
     while (!gStop.load(std::memory_order_relaxed)
@@ -739,7 +926,10 @@ int Run(int argc, char** argv)
             + ",\"pressure_lanes\":" + std::to_string(pressureLanes) + ",\"object_size_bytes\":"
             + std::to_string(config.objectSize) + ",\"pressure_key_count\":" + std::to_string(pressureKeyCount)
             + ",\"clients_connected\":" + std::to_string(pressureLanes)
-            + ",\"keys_verified\":" + std::to_string(pressureLanes) + "}");
+            + ",\"keys_verified\":" + std::to_string(pressureLanes)
+            + ",\"sustained_pressure\":" + (config.sustainedPressure ? "true" : "false")
+            + ",\"sustained_max_duration_ms\":" + std::to_string(config.sustainedMaxDurationMs)
+            + ",\"sustained_max_loops\":" + std::to_string(config.sustainedMaxLoops) + "}");
 
     while (!gStop.load(std::memory_order_relaxed))
     {
@@ -799,6 +989,7 @@ int Run(int argc, char** argv)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         auto result = AggregateResult(control);
+        auto sustainedReport = SummarizeSustained(config, control, sustainedStats);
         pairec::kvc_burst::Store(&control.result_valid, result.valid ? 1U : 0U);
         pairec::kvc_burst::Store(&control.result_failure, static_cast<uint32_t>(result.failure));
         pairec::kvc_burst::Store(&control.result_max_active_all, result.maxActiveAll);
@@ -809,7 +1000,7 @@ int Run(int argc, char** argv)
         pairec::kvc_burst::Store(&control.result_pressure_p95_us, result.pressureP95Us);
         pairec::kvc_burst::Store(&control.result_pressure_p99_us, result.pressureP99Us);
         pairec::kvc_burst::Store(&control.result_pressure_max_us, result.pressureMaxUs);
-        auto resultJson = JsonResult(config, control, runningGeneration, result);
+        auto resultJson = JsonResult(config, control, runningGeneration, result, sustainedReport);
         auto marker = std::string{"\"event\":\"kvc_burst_result\""};
         resultJson.replace(resultJson.find(marker), marker.size(), "\"event\":\"kvc_burst_complete\"");
         WriteLine(config, resultJson);

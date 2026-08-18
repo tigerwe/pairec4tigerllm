@@ -18,6 +18,9 @@ KVC_BURST_ENABLED=${KVC_BURST_ENABLED:-1}
 MEASURE_DISABLED=${MEASURE_DISABLED:-0}
 KVC_BURST_VERBOSE=${KVC_BURST_VERBOSE:-0}
 KVC_BURST_INITIAL_ARMED=${KVC_BURST_INITIAL_ARMED:-1}
+SUSTAINED_PRESSURE=${SUSTAINED_PRESSURE:-0}
+SUSTAINED_MAX_DURATION_MS=${SUSTAINED_MAX_DURATION_MS:-1000}
+SUSTAINED_MAX_LOOPS=${SUSTAINED_MAX_LOOPS:-100}
 BACKUP_FILE=${BACKUP_FILE:-/tmp/f14-kvc-burst-deployment-before.json}
 ROLLOUT_TIMEOUT=${ROLLOUT_TIMEOUT:-10m}
 
@@ -58,6 +61,14 @@ verify() {
   echo "$ready_event"
   grep -Fq "\"object_size_bytes\":$OBJECT_SIZE" <<<"$ready_event" \
     || die "sidecar object size mismatch: expected=$OBJECT_SIZE"
+  if [[ "$SUSTAINED_PRESSURE" = 1 ]]; then
+    grep -Fq '"sustained_pressure":true' <<<"$ready_event" \
+      || die "sidecar sustained pressure mismatch: expected enabled"
+    grep -Fq "\"sustained_max_duration_ms\":$SUSTAINED_MAX_DURATION_MS" <<<"$ready_event" \
+      || die "sidecar sustained max duration mismatch: expected=$SUSTAINED_MAX_DURATION_MS"
+    grep -Fq "\"sustained_max_loops\":$SUSTAINED_MAX_LOOPS" <<<"$ready_event" \
+      || die "sidecar sustained max loops mismatch: expected=$SUSTAINED_MAX_LOOPS"
+  fi
   echo "F14_KVC_BURST_OVERLAY_VERIFY_OK pod=$pod concurrency=$CONCURRENCY object_size_bytes=$OBJECT_SIZE enabled=$KVC_BURST_ENABLED"
 }
 
@@ -75,6 +86,12 @@ apply_overlay() {
     || die "KVC_BURST_VERBOSE must be 0 or 1"
   [[ "$KVC_BURST_INITIAL_ARMED" = 0 || "$KVC_BURST_INITIAL_ARMED" = 1 ]] \
     || die "KVC_BURST_INITIAL_ARMED must be 0 or 1"
+  [[ "$SUSTAINED_PRESSURE" = 0 || "$SUSTAINED_PRESSURE" = 1 ]] \
+    || die "SUSTAINED_PRESSURE must be 0 or 1"
+  [[ "$SUSTAINED_MAX_DURATION_MS" =~ ^[1-9][0-9]*$ ]] \
+    || die "SUSTAINED_MAX_DURATION_MS must be positive"
+  [[ "$SUSTAINED_MAX_LOOPS" =~ ^[1-9][0-9]*$ ]] \
+    || die "SUSTAINED_MAX_LOOPS must be positive"
   [[ "$DS_ENDPOINT" == *:* ]] || die "DS_ENDPOINT must be host:port"
   ds_host=${DS_ENDPOINT%:*}
   ds_port=${DS_ENDPOINT##*:}
@@ -89,11 +106,13 @@ apply_overlay() {
   python3 - "$deployment_json" "$patch_json" "$INFERENCE_CONTAINER" "$SIDECAR_CONTAINER" \
       "$HOST_RUNTIME_DIR" "$POD_RUNTIME_DIR" "$CONCURRENCY" "$PRESSURE_KEY_COUNT" "$OBJECT_SIZE" \
       "$BARRIER_TIMEOUT_MS" "$ds_host" "$ds_port" "$KVC_BURST_ENABLED" "$MEASURE_DISABLED" \
-      "$KVC_BURST_VERBOSE" "$KVC_BURST_INITIAL_ARMED" <<'PY'
+      "$KVC_BURST_VERBOSE" "$KVC_BURST_INITIAL_ARMED" \
+      "$SUSTAINED_PRESSURE" "$SUSTAINED_MAX_DURATION_MS" "$SUSTAINED_MAX_LOOPS" <<'PY'
 import json, pathlib, sys
 (deployment_path, output_path, inference_name, sidecar_name, host_runtime,
  pod_runtime, concurrency, pressure_key_count, object_size, barrier_timeout, ds_host, ds_port,
- enabled, measure_disabled, verbose, initially_armed) = sys.argv[1:]
+ enabled, measure_disabled, verbose, initially_armed,
+ sustained_pressure, sustained_max_duration_ms, sustained_max_loops) = sys.argv[1:]
 deployment = json.loads(pathlib.Path(deployment_path).read_text())
 inference = next(c for c in deployment["spec"]["template"]["spec"]["containers"]
                  if c["name"] == inference_name)
@@ -145,7 +164,10 @@ patch = {"spec": {"template": {"metadata": {"annotations": {
                   f"--object_size={object_size}", f"--barrier_timeout_ms={barrier_timeout}",
                   "--prefix=PairecKvcBurstV2", "--control_path=/run/pairec-kvc-burst/control",
                   "--ready_file=/run/pairec-kvc-burst/ready", "--cleanup_keys=true",
-                  f"--initially_armed={initially_armed}"],
+                  f"--initially_armed={initially_armed}",
+                  f"--sustained_pressure={'true' if sustained_pressure == '1' else 'false'}",
+                  f"--sustained_max_duration_ms={sustained_max_duration_ms}",
+                  f"--sustained_max_loops={sustained_max_loops}"],
          "env": sidecar_env,
          "resources": {"requests": {"cpu": "4", "memory": "1Gi"},
                        "limits": {"memory": "4Gi"}},

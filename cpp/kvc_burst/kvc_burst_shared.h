@@ -260,6 +260,64 @@ inline bool ArriveAndWait(SharedControl* control, uint32_t generation, uint32_t 
     return released && Load(&control->barrier_failed) == 0;
 }
 
+enum class SustainedStop : uint32_t
+{
+    kNone = 0,
+    kBusinessDone = 1,
+    kMaxLoops = 2,
+    kMaxDuration = 3,
+};
+
+// Decides whether a sustained pressure loop should stop. Business completion
+// takes precedence so a finished business Get never keeps lanes running, then
+// the loop budget, then the wall-clock budget. The two budgets protect the
+// sidecar from running forever when the business request fails or crashes.
+inline SustainedStop SustainedStopReason(const SharedControl& control, uint32_t generation,
+    uint64_t loopStartedNs, uint32_t completedLoops, uint32_t maxDurationMs, uint32_t maxLoops)
+{
+    if (Load(&control.business_done_generation) == generation)
+    {
+        return SustainedStop::kBusinessDone;
+    }
+    if (completedLoops >= maxLoops)
+    {
+        return SustainedStop::kMaxLoops;
+    }
+    if (MonotonicNs() - loopStartedNs >= static_cast<uint64_t>(maxDurationMs) * 1000000ULL)
+    {
+        return SustainedStop::kMaxDuration;
+    }
+    return SustainedStop::kNone;
+}
+
+// 1-based submission rank of the business Get among all Gets with a recorded
+// start timestamp in the current generation. Rank 1 means the business Get
+// was submitted before every pressure Get; rank pressure_lanes+1 means it was
+// submitted after all of them. Returns 0 when no business Get was recorded.
+inline uint32_t BusinessSubmitRank(const SharedControl& control)
+{
+    auto businessStart = Load(&control.business_start_ns);
+    if (businessStart == 0)
+    {
+        return 0;
+    }
+    uint32_t rank = 1;
+    auto lanes = Load(&control.pressure_lanes);
+    if (lanes > kMaxPressureLanes)
+    {
+        lanes = kMaxPressureLanes;
+    }
+    for (uint32_t i = 0; i < lanes; ++i)
+    {
+        auto start = Load(&control.pressure_start_ns[i]);
+        if (start > 0 && start < businessStart)
+        {
+            ++rank;
+        }
+    }
+    return rank;
+}
+
 inline bool IsCompatible(const SharedControl& control)
 {
     return control.magic == kMagic && control.version == kVersion && control.struct_size == sizeof(SharedControl)

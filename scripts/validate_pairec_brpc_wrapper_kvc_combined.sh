@@ -18,6 +18,9 @@ CONTENTION_OUTPUT_DIR=${CONTENTION_OUTPUT_DIR:-$OUTPUT_DIR/contention}
 MIN_ROOT_AVAILABLE_KB=${MIN_ROOT_AVAILABLE_KB:-5242880}
 EXPECTED_ONBOARDS_MIN=${EXPECTED_ONBOARDS_MIN:-2}
 EXPECTED_ONBOARDS_MAX=${EXPECTED_ONBOARDS_MAX:-2}
+KVC_SUSTAINED_PRESSURE=${KVC_SUSTAINED_PRESSURE:-0}
+KVC_SUSTAINED_MAX_DURATION_MS=${KVC_SUSTAINED_MAX_DURATION_MS:-1000}
+KVC_SUSTAINED_MAX_LOOPS=${KVC_SUSTAINED_MAX_LOOPS:-100}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 mkdir -p "$OUTPUT_DIR"
@@ -29,6 +32,12 @@ mkdir -p "$OUTPUT_DIR"
 [[ "$KVC_OBJECT_SIZE" =~ ^[1-9][0-9]*$ ]] || die "KVC_OBJECT_SIZE must be positive"
 [[ "$REQUESTS" =~ ^[1-9][0-9]*$ ]] || die "REQUESTS must be positive"
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
+[[ "$KVC_SUSTAINED_PRESSURE" = 0 || "$KVC_SUSTAINED_PRESSURE" = 1 ]] \
+  || die "KVC_SUSTAINED_PRESSURE must be 0 or 1"
+[[ "$KVC_SUSTAINED_MAX_DURATION_MS" =~ ^[1-9][0-9]*$ ]] \
+  || die "KVC_SUSTAINED_MAX_DURATION_MS must be positive"
+[[ "$KVC_SUSTAINED_MAX_LOOPS" =~ ^[1-9][0-9]*$ ]] \
+  || die "KVC_SUSTAINED_MAX_LOOPS must be positive"
 
 restore_kvc() {
   if [[ -f "$KVC_OVERLAY_BACKUP" ]]; then
@@ -45,6 +54,9 @@ NAMESPACE="$NAMESPACE" DEPLOYMENT=inference-brpc-trtllm \
   PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" OBJECT_SIZE="$KVC_OBJECT_SIZE" \
   KVC_BURST_ENABLED=1 \
   KVC_BURST_VERBOSE=1 KVC_BURST_INITIAL_ARMED=0 \
+  SUSTAINED_PRESSURE="$KVC_SUSTAINED_PRESSURE" \
+  SUSTAINED_MAX_DURATION_MS="$KVC_SUSTAINED_MAX_DURATION_MS" \
+  SUSTAINED_MAX_LOOPS="$KVC_SUSTAINED_MAX_LOOPS" \
   bash scripts/deploy_f14_kvc_burst_overlay.sh apply \
   | tee "$OUTPUT_DIR/kvc-overlay.log"
 
@@ -92,7 +104,7 @@ kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper \
 python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log" \
   "$OUTPUT_DIR/summary.json" "$WRAPPER_CONCURRENCY" "$KVC_CONCURRENCY" \
   "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" "$KVC_OBJECT_SIZE" \
-  "$KVC_PRESSURE_KEY_COUNT" <<'PY'
+  "$KVC_PRESSURE_KEY_COUNT" "$KVC_SUSTAINED_PRESSURE" <<'PY'
 import json, math, pathlib, statistics, sys
 contention = json.load(open(sys.argv[1]))
 wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
@@ -102,6 +114,7 @@ expected_onboards_min = int(sys.argv[6])
 expected_onboards_max = int(sys.argv[7])
 kvc_object_size = int(sys.argv[8])
 kvc_pressure_key_count = int(sys.argv[9])
+kvc_sustained_pressure = sys.argv[10] == "1"
 valid = contention.get("valid_repeats") == contention.get("expected_repeats")
 rows = []
 
@@ -151,6 +164,9 @@ for row in contention.get("rows", []):
     assert kvc["pressure_lanes"] == pressure_lanes, kvc
     assert kvc["pressure_success"] == pressure_lanes, kvc
     assert kvc["pressure_errors"] == 0, kvc
+    assert kvc.get("sustained_enabled", False) is kvc_sustained_pressure, kvc
+    if kvc_sustained_pressure and pressure_lanes > 0:
+        assert kvc["sustained_errors"] == 0, kvc
     exact = trace["datasystem_request_complete"]
     executor = trace["trt_executor_request_completions"]
     assert exact["set_count"] == 3, exact
@@ -175,6 +191,9 @@ for row in contention.get("rows", []):
         "kvc_business_get_ms": kvc["business_get_ms"],
         "kvc_pressure_p99_ms": kvc["pressure_get_p99_ms"],
         "kvc_barrier_ms": kvc["barrier_wait_ms"],
+        "kvc_business_submit_rank": float(kvc.get("business_submit_rank", 0)),
+        "kvc_sustained_loop_gets": float(kvc.get("sustained_loop_gets", 0)),
+        "kvc_sustained_window_ms": float(kvc.get("sustained_window_ms", 0.0)),
         "datasystem_get_ms": exact["get_us"] / 1000.0,
         "datasystem_set_ms": exact["set_us"] / 1000.0,
         "wrapper_pressure_p95_ms": wrapper_burst["pressure_latency_p95_ms"],
@@ -195,6 +214,15 @@ for name in metric_names:
     metrics[name] = {"avg": statistics.fmean(values), "p50": percentile(values, .5),
                      "p95": percentile(values, .95), "p99": percentile(values, .99),
                      "max": max(values)}
+ds_worker_samples = []
+for row in contention.get("rows", []):
+    round_dir = pathlib.Path(row["summary_path"]).parent.parent
+    metrics_path = round_dir / "datasystem-worker-metrics.json"
+    error_path = round_dir / "datasystem-worker-metrics.error"
+    if metrics_path.is_file():
+        ds_worker_samples.append(json.loads(metrics_path.read_text()))
+    elif error_path.is_file():
+        ds_worker_samples.append({"error": error_path.read_text().strip()})
 result = {
     "classification": (f"PAIREC_BRPC_WRAPPER_C{wrapper_concurrency}_KVC_C{kvc_concurrency}_OK"
                        if valid else "PAIREC_BRPC_WRAPPER_KVC_COMBINED_FAIL"),
@@ -202,11 +230,13 @@ result = {
     "kvc_concurrency": kvc_concurrency,
     "kvc_object_size_bytes": kvc_object_size,
     "kvc_pressure_key_count": kvc_pressure_key_count,
+    "kvc_sustained_pressure": kvc_sustained_pressure,
     "expected_onboards_min": expected_onboards_min,
     "expected_onboards_max": expected_onboards_max,
     "contention": contention,
     "samples": rows,
     "metrics": metrics,
+    "datasystem_worker_samples": ds_worker_samples,
 }
 pathlib.Path(sys.argv[3]).write_text(json.dumps(result, indent=2) + "\n")
 print(f"classification={result['classification']}")
