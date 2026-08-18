@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PaiRec BRPC + KVC 组合压力端到端时延</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1800px; height: 1600px; overflow: hidden; }
+  body {
+    font-family: "Noto Sans CJK SC", "Noto Sans SC", sans-serif;
+    color: #18212f;
+    background: #f7f8fa;
+    letter-spacing: 0;
+  }
+  .page { width: 1800px; height: 1600px; padding: 52px 64px 42px; }
+  h1 { margin: 0; font-size: 40px; line-height: 1.2; font-weight: 800; }
+  .subtitle { margin-top: 10px; font-size: 19px; color: #526071; }
+  .legend { display: flex; gap: 26px; align-items: center; margin-top: 20px; font-size: 16px; color: #526071; }
+  .legend span::before { content: ""; display: inline-block; width: 18px; height: 4px; margin-right: 8px; vertical-align: middle; }
+  .legend .base::before { background: #2563a8; }
+  .legend .pressure::before { background: #d04a35; }
+  .legend .business::before { background: #263746; }
+  .legend .load::before { height: 0; border-top: 3px dashed #c37a17; }
+
+  .summary {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1.4fr;
+    border: 1px solid #cdd4dc;
+    background: #ffffff;
+    margin-top: 28px;
+  }
+  .summary-item { min-height: 104px; padding: 17px 22px; border-right: 1px solid #d9dee4; }
+  .summary-item:last-child { border-right: 0; }
+  .summary-label { font-size: 16px; color: #657182; }
+  .summary-value { margin-top: 5px; font-size: 28px; font-weight: 800; }
+  .summary-detail { margin-top: 3px; font-size: 16px; color: #526071; }
+  .delta { color: #bd3b2b; font-weight: 800; }
+  .stable { color: #16704a; font-weight: 800; }
+
+  .outer {
+    margin-top: 28px;
+    border: 3px solid #263746;
+    background: #ffffff;
+    padding: 18px;
+    position: relative;
+  }
+  .band-title { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+  .band-title strong { font-size: 22px; }
+  .band-title span { font-size: 16px; color: #657182; }
+  .pairec {
+    border: 3px solid #34775a;
+    background: #f7fbf8;
+    padding: 16px;
+  }
+  .pipeline {
+    display: grid;
+    grid-template-columns: 150px 1fr 190px 150px 145px;
+    gap: 18px;
+    align-items: center;
+  }
+  .stage {
+    position: relative;
+    background: #ffffff;
+    border: 2px solid #758191;
+    min-height: 124px;
+    padding: 15px 16px;
+  }
+  .stage.arrow::after {
+    content: "→";
+    position: absolute;
+    right: -29px;
+    top: 43px;
+    font-size: 28px;
+    font-weight: 800;
+    color: #526071;
+  }
+  .stage-name { font-size: 19px; font-weight: 800; }
+  .numbers { margin-top: 8px; font-size: 16px; line-height: 1.45; }
+  .numbers .b { color: #2563a8; font-weight: 700; }
+  .numbers .p { color: #d04a35; font-weight: 700; }
+  .numbers .d { color: #bd3b2b; font-weight: 800; }
+  .tiny { margin-top: 6px; font-size: 13px; line-height: 1.35; color: #697586; }
+
+  .recall {
+    border: 2px solid #8b6b2b;
+    background: #fffdf7;
+    padding: 14px;
+  }
+  .recall-head { display: flex; justify-content: space-between; font-size: 17px; font-weight: 800; margin-bottom: 10px; }
+  .parallel-note { color: #8b6b2b; font-weight: 600; font-size: 14px; }
+  .recall-grid { display: grid; grid-template-columns: 235px 1fr; gap: 14px; }
+  .vector { border: 2px solid #2d77a5; background: #f5fbff; padding: 14px; }
+  .gen {
+    border: 3px solid #c94734;
+    background: #fff8f6;
+    padding: 13px;
+  }
+  .gen-title { display: flex; justify-content: space-between; align-items: center; }
+  .gen-title strong { font-size: 19px; }
+  .critical { padding: 3px 9px; background: #c94734; color: white; font-size: 12px; font-weight: 800; }
+  .nested-flow { display: grid; grid-template-columns: 180px 1fr; gap: 12px; margin-top: 10px; }
+  .front { border: 2px solid #bc7420; background: #fffaf2; padding: 12px; position: relative; }
+  .front::after { content: "→"; position: absolute; right: -23px; top: 40px; font-size: 24px; font-weight: 800; }
+  .wrapper { border: 2px solid #6a55a3; background: #faf8ff; padding: 11px; }
+  .runner { border: 2px solid #364f7d; background: #f6f8fc; padding: 10px; margin-top: 9px; }
+  .kvc { border-left: 5px solid #b37a16; background: #fffaf0; padding: 8px 10px; margin-top: 8px; }
+  .kvc-line { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; line-height: 1.5; }
+
+  .pressure-zone {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1.25fr;
+    gap: 18px;
+    margin-top: 20px;
+  }
+  .pressure-box {
+    border: 2px dashed #c37a17;
+    background: #fffaf0;
+    min-height: 126px;
+    padding: 14px 16px;
+  }
+  .pressure-box strong { font-size: 17px; }
+  .pressure-box p { margin: 8px 0 0; font-size: 14px; line-height: 1.55; color: #4d5969; }
+  .pressure-arrow { color: #b06e13; font-weight: 800; }
+
+  .bottom {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr;
+    gap: 20px;
+    margin-top: 22px;
+  }
+  .analysis {
+    border: 1px solid #cdd4dc;
+    background: #ffffff;
+    padding: 17px 20px;
+  }
+  .analysis h2 { margin: 0 0 10px; font-size: 20px; }
+  .analysis ul { margin: 0; padding-left: 22px; font-size: 15px; line-height: 1.55; }
+  .delta-tree { display: grid; grid-template-columns: 1fr auto; row-gap: 7px; font-size: 15px; }
+  .delta-tree .major { font-weight: 800; }
+  .delta-tree .indent { padding-left: 18px; color: #4f5c6c; }
+  .footer { margin-top: 14px; font-size: 13px; color: #788392; }
+</style>
+</head>
+<body>
+<main class="page">
+  <h1>PaiRec BRPC + KVC 组合压力：端到端时延流程</h1>
+  <div class="subtitle">基线与组合压力对照 · 单位 ms · 向量召回与生成式召回并行，嵌套阶段不可直接相加</div>
+  <div class="legend">
+    <span class="base">基线</span><span class="pressure">组合压力</span>
+    <span class="business">实线：业务关键路径</span><span class="load">虚线：并发压力/资源竞争</span>
+  </div>
+
+  <section class="summary">
+    <div class="summary-item"><div class="summary-label">客户端 E2E</div><div class="summary-value">154.551 → 177.731</div><div class="summary-detail delta">+23.180</div></div>
+    <div class="summary-item"><div class="summary-label">PaiRec Total</div><div class="summary-value">144.347 → 167.239</div><div class="summary-detail delta">+22.892</div></div>
+    <div class="summary-item"><div class="summary-label">生成式召回</div><div class="summary-value">134.167 → 157.243</div><div class="summary-detail delta">+23.076，主关键路径</div></div>
+    <div class="summary-item"><div class="summary-label">本轮核心结论</div><div class="summary-value">劣化集中在生成式链路</div><div class="summary-detail">Front BRPC、Wrapper 与 TRT runner 上升；KVC business Get 未上升</div></div>
+  </section>
+
+  <section class="outer">
+    <div class="band-title"><strong>客户端 E2E：154.551 → 177.731 <span class="delta">(+23.180)</span></strong><span>外部网络/HTTP/响应：10.204 → 10.492 (+0.288，推导)</span></div>
+    <div class="pairec">
+      <div class="band-title"><strong>PaiRec Pipeline：144.347 → 167.239 <span class="delta">(+22.892)</span></strong><span>完整保留向量召回、生成式召回、DeepFM 与 rerank</span></div>
+      <div class="pipeline">
+        <div class="stage arrow">
+          <div class="stage-name">请求进入</div>
+          <div class="numbers"><span class="b">基线</span> / <span class="p">压力</span></div>
+          <div class="tiny">用户特征、历史序列、候选请求准备</div>
+        </div>
+
+        <div class="recall">
+          <div class="recall-head"><span>并行召回阶段</span><span class="parallel-note">取较慢分支进入关键路径</span></div>
+          <div class="recall-grid">
+            <div class="vector">
+              <div class="stage-name">Milvus 向量召回</div>
+              <div class="numbers"><span class="b">11.159</span> → <span class="p">14.362</span><br><span class="d">+3.203</span></div>
+              <div class="tiny">BRPC；与生成式召回并行，增量通常被较慢分支覆盖</div>
+            </div>
+            <div class="gen">
+              <div class="gen-title"><strong>生成式召回：134.167 → 157.243 <span class="delta">(+23.076)</span></strong><span class="critical">主关键路径</span></div>
+              <div class="nested-flow">
+                <div class="front">
+                  <div class="stage-name">Front BRPC</div>
+                  <div class="numbers"><span class="b">1.744</span> → <span class="p">7.617</span><br><span class="d">+5.873</span></div>
+                  <div class="tiny">PaiRec 到 Wrapper 的前端调用观测</div>
+                </div>
+                <div class="wrapper">
+                  <div class="stage-name">BRPC Wrapper：132.000 → 141.000 <span class="delta">(+9.000)</span></div>
+                  <div class="runner">
+                    <div class="stage-name">C++ TRT runner：131.664 → 137.727 <span class="delta">(+6.062)</span></div>
+                    <div class="kvc">
+                      <div class="kvc-line"><strong>KVC business Get</strong><span><span class="b">8.293</span> → <span class="p">7.382</span> <span class="stable">(-0.911)</span></span></div>
+                      <div class="kvc-line"><span>DataSystem Get 总计</span><span>14.293 → 13.434 (-0.859)</span></div>
+                      <div class="kvc-line"><span>DataSystem Set 总计</span><span>19.958 → 19.166 (-0.792)</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage arrow">
+          <div class="stage-name">DeepFM 精排</div>
+          <div class="numbers"><span class="b">9.489</span> → <span class="p">9.117</span><br><span class="stable">-0.372</span></div>
+          <div class="tiny">BRPC；召回完成后执行</div>
+        </div>
+        <div class="stage arrow">
+          <div class="stage-name">Rerank</div>
+          <div class="numbers"><span class="b">0.010</span> → <span class="p">0.010</span></div>
+          <div class="tiny">基本无变化</div>
+        </div>
+        <div class="stage">
+          <div class="stage-name">响应返回</div>
+          <div class="numbers"><span class="p">E2E 177.731</span></div>
+          <div class="tiny">推荐结果构造与HTTP返回</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pressure-zone">
+      <div class="pressure-box"><strong>BRPC Wrapper 压力 <span class="pressure-arrow">- - - ↗</span></strong><p>预建 10000 连接，1000 active，999 路 × 100KiB。<br>最大活跃约 865；压力延迟 p95 约 28.535ms。</p></div>
+      <div class="pressure-box"><strong>KVC/DataSystem 压力 <span class="pressure-arrow">- - - ↗</span></strong><p>99 路并发 Get；压力 Get p99 约 150.934ms。<br>Barrier 平均约 0.392ms；压力尾延迟不直接串行叠加到业务 E2E。</p></div>
+      <div class="pressure-box"><strong>读取方式</strong><p>实线表示业务请求经过的阶段；虚线表示并发负载对 CPU、网络、内存和 DataSystem 的资源竞争。各阶段存在并行与嵌套，不能简单求和。</p></div>
+    </div>
+  </section>
+
+  <section class="bottom">
+    <div class="analysis">
+      <h2>端到端增量归因</h2>
+      <div class="delta-tree">
+        <span class="major">E2E 总增量</span><span class="delta">+23.180</span>
+        <span class="major">PaiRec Pipeline</span><span class="delta">+22.892</span>
+        <span class="indent">生成式召回</span><span class="delta">+23.076</span>
+        <span class="indent">其中：Front BRPC</span><span class="delta">+5.873</span>
+        <span class="indent">其中：BRPC Wrapper</span><span class="delta">+9.000</span>
+        <span class="indent">其中：TRT runner</span><span class="delta">+6.062</span>
+        <span>向量召回（并行分支）</span><span class="delta">+3.203</span>
+        <span>DeepFM</span><span class="stable">-0.372</span>
+      </div>
+    </div>
+    <div class="analysis">
+      <h2>结论与边界</h2>
+      <ul>
+        <li>总增量几乎全部落在生成式召回，DeepFM 与 rerank 稳定。</li>
+        <li>TRT runner 增加 6.062ms，但 business Get 减少 0.911ms。</li>
+        <li>本轮不能把 runner 劣化归因于业务 KVC Get。</li>
+        <li>压力 Get 的高尾延迟是并发负载指标，不等于业务阻塞 150ms。</li>
+        <li>图中数值对应现有已完成组合结果；8-key、1.75MiB 新测试需另行替换。</li>
+      </ul>
+    </div>
+  </section>
+  <div class="footer">PaiRec4TigerLLM · BRPC/KVC 组合压力时延观测 · 2026-08-18</div>
+</main>
+</body>
+</html>
