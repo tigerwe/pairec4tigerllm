@@ -227,7 +227,9 @@ class SustainedPressureStructureTest(unittest.TestCase):
             "zero business onboard Gets; reshuffle prime and retry",
             '"${round_dir}/replay-attempt-${replay_attempt}"',
             '"${round_dir}/replay.attempts"',
-            'PRIME_REQUESTS="$REPLAY_RETRY_PRIME_REQUESTS" run_prime',
+            'PRIME_UIDS="$REPLAY_USER_ID"',
+            'PRIME_REQUESTS="$REPLAY_RETRY_PRIME_REQUESTS"',
+            'run_prime_once "${round_dir}/replay-prime-${replay_attempt}"',
         ):
             self.assertIn(token, text)
 

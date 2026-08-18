@@ -1446,7 +1446,11 @@ for round in $(seq 1 "$REPEATS"); do
     set_kvc_burst_arm "$round_dir" disarm
     mkdir -p "${round_dir}/replay-prime-${replay_attempt}"
     set +e
-    PRIME_REQUESTS="$REPLAY_RETRY_PRIME_REQUESTS" run_prime "${round_dir}/replay-prime-${replay_attempt}"
+    # Focus the retry prime on the single replay user so its KV blocks are the
+    # most recently written ones and are still resident when replay runs.
+    PRIME_UIDS="$REPLAY_USER_ID" \
+      PRIME_REQUESTS="$REPLAY_RETRY_PRIME_REQUESTS" \
+      run_prime_once "${round_dir}/replay-prime-${replay_attempt}"
     shuffle_code="$?"
     set -e
     if [ "$shuffle_code" -ne 0 ]; then
