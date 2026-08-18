@@ -61,6 +61,14 @@ int main()
         assert(pairec::kvc_burst::WaitForGenerationChange(&control->run_generation, 0, &generation));
         uint64_t waitUs = 0;
         auto released = pairec::kvc_burst::ArriveAndWait(control, generation, 100, &waitUs);
+        pairec::kvc_burst::Store(&control->pressure_start_ns[0],
+            pairec::kvc_burst::MonotonicNs());
+        pairec::kvc_burst::FetchAdd(&control->pressure_started_lanes, 1U);
+        pairec::kvc_burst::FutexWake(&control->pressure_started_lanes);
+        while (pairec::kvc_burst::Load(&control->business_release_generation) != generation)
+        {
+            std::this_thread::yield();
+        }
         _exit(released ? 0 : 1);
     }
 
@@ -69,6 +77,8 @@ int main()
     assert(token.generation == 1);
     assert(token.bytes == 7340032);
     assert(token.barrierReleased);
+    assert(token.pressureEstablished);
+    assert(control->business_release_generation == 1);
     pairec::kvc_burst::finishBusinessGet(token, true);
     assert(control->business_api == static_cast<uint32_t>(BusinessApi::kMGet));
     assert(control->business_key_count == 2);
@@ -94,6 +104,8 @@ int main()
     control->arrived_participants = 0;
     control->release_generation = 0;
     control->barrier_failed = 0;
+    control->pressure_started_lanes = 0;
+    control->business_release_generation = 0;
     std::thread triggering([&] {
         auto waiting = pairec::kvc_burst::beginBusinessGet("request-3", BusinessApi::kGet, 1);
         assert(waiting.triggered());

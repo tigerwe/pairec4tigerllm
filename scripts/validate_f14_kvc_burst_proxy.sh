@@ -147,11 +147,16 @@ for concurrency in levels:
         assert burst["pressure_key_count"] == min(concurrency - 1, max_pressure_keys), burst
         required_overlap = math.ceil((concurrency - 1) * 0.95)
         assert burst["business_overlap_gets"] >= required_overlap, burst
+        assert burst["pressure_started_before_business"] >= required_overlap, burst
+        assert burst["pressure_inflight_at_business_start"] >= required_overlap, burst
+        assert burst["business_submit_rank"] >= required_overlap + 1, burst
         barrier_ms = float(burst["barrier_wait_ms"])
+        pressure_wait_ms = float(burst["pressure_first_wait_ms"])
+        lead_wait_ms = float(burst["pressure_lead_wait_ms"])
         e2e_ms = float(sample["client"]["client_e2e_ms"])
         actual.append(e2e_ms)
-        adjusted.append(max(0.0, e2e_ms - barrier_ms))
-        barriers.append(barrier_ms)
+        adjusted.append(max(0.0, e2e_ms - barrier_ms - pressure_wait_ms - lead_wait_ms))
+        barriers.append(barrier_ms + pressure_wait_ms + lead_wait_ms)
         business.append(float(burst["business_get_ms"]))
         pressure.append(float(burst["pressure_get_p99_ms"]))
     rows.append({
@@ -161,8 +166,8 @@ for concurrency in levels:
         "actual_e2e_p99_ms": percentile(actual, 0.99),
         "adjusted_e2e_avg_ms": statistics.mean(adjusted),
         "adjusted_e2e_p99_ms": percentile(adjusted, 0.99),
-        "barrier_wait_avg_ms": statistics.mean(barriers),
-        "barrier_wait_p99_ms": percentile(barriers, 0.99),
+        "coordination_wait_avg_ms": statistics.mean(barriers),
+        "coordination_wait_p99_ms": percentile(barriers, 0.99),
         "business_get_avg_ms": statistics.mean(business),
         "business_get_p99_ms": percentile(business, 0.99),
         "pressure_get_p99_ms": percentile(pressure, 0.99),
@@ -171,12 +176,12 @@ for concurrency in levels:
 summary = {"classification": "F14_KVC_BURST_PROXY_PASS",
            "disabled_proxy_overhead_p99_us": disabled_p99, "cases": rows}
 (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-print("concurrency samples actual_avg_ms actual_p99_ms adjusted_avg_ms adjusted_p99_ms barrier_avg_ms barrier_p99_ms business_get_p99_ms pressure_get_p99_ms")
+print("concurrency samples actual_avg_ms actual_p99_ms adjusted_avg_ms adjusted_p99_ms coordination_avg_ms coordination_p99_ms business_get_p99_ms pressure_get_p99_ms")
 for row in rows:
     print(f"{row['concurrency']:>11} {row['samples']:>7} "
           f"{row['actual_e2e_avg_ms']:>13.3f} {row['actual_e2e_p99_ms']:>13.3f} "
           f"{row['adjusted_e2e_avg_ms']:>15.3f} {row['adjusted_e2e_p99_ms']:>15.3f} "
-          f"{row['barrier_wait_avg_ms']:>14.3f} {row['barrier_wait_p99_ms']:>14.3f} "
+          f"{row['coordination_wait_avg_ms']:>19.3f} {row['coordination_wait_p99_ms']:>19.3f} "
           f"{row['business_get_p99_ms']:>19.3f} {row['pressure_get_p99_ms']:>19.3f}")
 print(f"disabled_proxy_overhead_p99_us={disabled_p99:.3f}")
 print(f"summary_json={root / 'summary.json'}")

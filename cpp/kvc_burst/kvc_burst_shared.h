@@ -15,7 +15,7 @@ namespace pairec::kvc_burst
 {
 
 constexpr uint64_t kMagic = 0x5041495245434b56ULL;
-constexpr uint32_t kVersion = 2;
+constexpr uint32_t kVersion = 3;
 constexpr uint32_t kMaxConcurrency = 100;
 constexpr uint32_t kMaxPressureLanes = kMaxConcurrency - 1;
 constexpr size_t kRequestIdSize = 128;
@@ -37,6 +37,7 @@ enum class Failure : uint32_t
     kPressureGetFailed = 2,
     kBusinessGetFailed = 3,
     kInvalidControl = 4,
+    kPressureNotEstablished = 5,
 };
 
 enum class BusinessApi : uint32_t
@@ -65,6 +66,9 @@ enum class RefreshState : uint32_t
     kRequested = 1,
     kSucceeded = 2,
     kFailed = 3,
+    kVerifyRequested = 4,
+    kVerifySucceeded = 5,
+    kVerifyFailed = 6,
 };
 
 // All fields use fixed-width integral types so the control block has one ABI in
@@ -111,11 +115,23 @@ struct alignas(64) SharedControl
     uint32_t pressure_key_count;
     uint32_t refresh_state;
 
+    uint32_t pressure_started_lanes;
+    uint32_t pressure_first_failed;
+    uint32_t business_release_generation;
+    uint32_t pressure_lead_us;
+
+    uint32_t result_business_submit_rank;
+    uint32_t result_pressure_started_before_business;
+    uint32_t result_pressure_inflight_at_business_start;
+    uint32_t result_pressure_completed_before_business;
+
     uint64_t object_size_bytes;
     uint64_t shuffle_seed;
     uint64_t heartbeat_ns;
     uint64_t claim_started_ns;
     uint64_t business_barrier_wait_us;
+    uint64_t business_pressure_wait_us;
+    uint64_t business_lead_wait_us;
 
     uint64_t business_trigger_us;
     uint64_t business_bytes;
@@ -258,6 +274,73 @@ inline bool ArriveAndWait(SharedControl* control, uint32_t generation, uint32_t 
         *waitUs = (MonotonicNs() - started) / 1000ULL;
     }
     return released && Load(&control->barrier_failed) == 0;
+}
+
+inline uint32_t RequiredPressureFirst(uint32_t pressureLanes)
+{
+    return (pressureLanes * 95U + 99U) / 100U;
+}
+
+inline bool PressureFirstSatisfied(
+    uint32_t pressureLanes, uint32_t startedBeforeBusiness,
+    uint32_t inflightAtBusinessStart, uint32_t businessSubmitRank)
+{
+    auto required = RequiredPressureFirst(pressureLanes);
+    return startedBeforeBusiness >= required && inflightAtBusinessStart >= required
+        && businessSubmitRank >= required + 1U;
+}
+
+inline bool WaitForPressureStarted(
+    SharedControl* control, uint32_t generation, uint32_t timeoutMs, uint64_t* waitUs)
+{
+    auto started = MonotonicNs();
+    auto required = RequiredPressureFirst(Load(&control->pressure_lanes));
+    auto deadline = started + static_cast<uint64_t>(timeoutMs) * 1000000ULL;
+    bool ready = required == 0;
+    while (!ready && MonotonicNs() < deadline)
+    {
+        if (Load(&control->run_generation) != generation)
+        {
+            break;
+        }
+        auto observed = Load(&control->pressure_started_lanes);
+        if (observed >= required)
+        {
+            ready = true;
+            break;
+        }
+        timespec timeout{0, 1000000L};
+        auto status = FutexWait(&control->pressure_started_lanes, observed, &timeout);
+        if (status != 0 && errno != EAGAIN && errno != EINTR && errno != ETIMEDOUT)
+        {
+            break;
+        }
+    }
+    if (waitUs != nullptr)
+    {
+        *waitUs = (MonotonicNs() - started) / 1000ULL;
+    }
+    if (!ready)
+    {
+        Store(&control->pressure_first_failed, 1U);
+    }
+    return ready;
+}
+
+inline uint64_t ApplyPressureLead(SharedControl* control)
+{
+    auto leadUs = Load(&control->pressure_lead_us);
+    if (leadUs == 0)
+    {
+        return 0;
+    }
+    auto started = MonotonicNs();
+    timespec duration{static_cast<time_t>(leadUs / 1000000U),
+        static_cast<long>(leadUs % 1000000U) * 1000L};
+    while (::nanosleep(&duration, &duration) != 0 && errno == EINTR)
+    {
+    }
+    return (MonotonicNs() - started) / 1000ULL;
 }
 
 enum class SustainedStop : uint32_t

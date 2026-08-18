@@ -5,6 +5,7 @@ NAMESPACE=${NAMESPACE:-pairec}
 KVC_CONCURRENCY=${KVC_CONCURRENCY:-10}
 KVC_PRESSURE_KEY_COUNT=${KVC_PRESSURE_KEY_COUNT:-9}
 KVC_OBJECT_SIZE=${KVC_OBJECT_SIZE:-3670016}
+KVC_PRESSURE_LEAD_US=${KVC_PRESSURE_LEAD_US:-1000}
 WRAPPER_CONCURRENCY=${WRAPPER_CONCURRENCY:-1}
 REQUESTS=${REQUESTS:-3}
 WARMUP_REQUESTS=${WARMUP_REQUESTS:-1}
@@ -30,6 +31,8 @@ mkdir -p "$OUTPUT_DIR"
 (( KVC_PRESSURE_KEY_COUNT <= KVC_CONCURRENCY - 1 )) \
   || die "KVC_PRESSURE_KEY_COUNT must not exceed KVC pressure lanes"
 [[ "$KVC_OBJECT_SIZE" =~ ^[1-9][0-9]*$ ]] || die "KVC_OBJECT_SIZE must be positive"
+[[ "$KVC_PRESSURE_LEAD_US" =~ ^[0-9]+$ ]] && (( KVC_PRESSURE_LEAD_US <= 1000000 )) \
+  || die "KVC_PRESSURE_LEAD_US must be between 0 and 1000000"
 [[ "$REQUESTS" =~ ^[1-9][0-9]*$ ]] || die "REQUESTS must be positive"
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
 [[ "$KVC_SUSTAINED_PRESSURE" = 0 || "$KVC_SUSTAINED_PRESSURE" = 1 ]] \
@@ -52,6 +55,7 @@ echo "== Apply KVC c${KVC_CONCURRENCY} overlay =="
 NAMESPACE="$NAMESPACE" DEPLOYMENT=inference-brpc-trtllm \
   BACKUP_FILE="$KVC_OVERLAY_BACKUP" CONCURRENCY="$KVC_CONCURRENCY" \
   PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" OBJECT_SIZE="$KVC_OBJECT_SIZE" \
+  PRESSURE_LEAD_US="$KVC_PRESSURE_LEAD_US" \
   KVC_BURST_ENABLED=1 \
   KVC_BURST_VERBOSE=1 KVC_BURST_INITIAL_ARMED=0 \
   SUSTAINED_PRESSURE="$KVC_SUSTAINED_PRESSURE" \
@@ -164,6 +168,10 @@ for row in contention.get("rows", []):
     assert kvc["pressure_lanes"] == pressure_lanes, kvc
     assert kvc["pressure_success"] == pressure_lanes, kvc
     assert kvc["pressure_errors"] == 0, kvc
+    required_pressure_first = math.ceil(pressure_lanes * .95)
+    assert kvc["pressure_started_before_business"] >= required_pressure_first, kvc
+    assert kvc["pressure_inflight_at_business_start"] >= required_pressure_first, kvc
+    assert kvc["business_submit_rank"] >= required_pressure_first + 1, kvc
     assert kvc.get("sustained_enabled", False) is kvc_sustained_pressure, kvc
     if kvc_sustained_pressure and pressure_lanes > 0:
         assert kvc["sustained_errors"] == 0, kvc
@@ -191,7 +199,12 @@ for row in contention.get("rows", []):
         "kvc_business_get_ms": kvc["business_get_ms"],
         "kvc_pressure_p99_ms": kvc["pressure_get_p99_ms"],
         "kvc_barrier_ms": kvc["barrier_wait_ms"],
+        "kvc_pressure_first_wait_ms": kvc["pressure_first_wait_ms"],
+        "kvc_pressure_lead_wait_ms": kvc["pressure_lead_wait_ms"],
+        "kvc_coordination_wait_ms": kvc["coordination_wait_ms"],
         "kvc_business_submit_rank": float(kvc.get("business_submit_rank", 0)),
+        "kvc_pressure_inflight_at_business_start": float(
+            kvc.get("pressure_inflight_at_business_start", 0)),
         "kvc_sustained_loop_gets": float(kvc.get("sustained_loop_gets", 0)),
         "kvc_sustained_window_ms": float(kvc.get("sustained_window_ms", 0.0)),
         "datasystem_get_ms": exact["get_us"] / 1000.0,

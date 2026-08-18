@@ -13,6 +13,7 @@ CONCURRENCY=${CONCURRENCY:-1}
 PRESSURE_KEY_COUNT=${PRESSURE_KEY_COUNT:-0}
 OBJECT_SIZE=${OBJECT_SIZE:-3670016}
 BARRIER_TIMEOUT_MS=${BARRIER_TIMEOUT_MS:-5}
+PRESSURE_LEAD_US=${PRESSURE_LEAD_US:-1000}
 DS_ENDPOINT=${DS_ENDPOINT:-192.168.100.12:18482}
 KVC_BURST_ENABLED=${KVC_BURST_ENABLED:-1}
 MEASURE_DISABLED=${MEASURE_DISABLED:-0}
@@ -45,9 +46,9 @@ verify() {
   [[ -n "$pod" ]] || die "inference Pod not found"
   kubectl -n "$NAMESPACE" get pod "$pod" -o wide
   kubectl -n "$NAMESPACE" exec "$pod" -c "$INFERENCE_CONTAINER" -- \
-    grep -aFq KVC_BURST_CONTROL_PATH \
+    grep -aFq PAIREC_KVC_BURST_PROXY_V3 \
       "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
-    || die "KVC proxy capability marker is missing from TensorRT-LLM"
+    || die "KVC proxy V3 capability marker is missing from TensorRT-LLM"
   kubectl -n "$NAMESPACE" exec "$pod" -c "$SIDECAR_CONTAINER" -- \
     test -s /run/pairec-kvc-burst/ready \
     || die "KVC burst sidecar is not ready"
@@ -61,6 +62,10 @@ verify() {
   echo "$ready_event"
   grep -Fq "\"object_size_bytes\":$OBJECT_SIZE" <<<"$ready_event" \
     || die "sidecar object size mismatch: expected=$OBJECT_SIZE"
+  grep -Fq '"version":3' <<<"$ready_event" \
+    || die "sidecar control protocol mismatch: expected version=3"
+  grep -Fq "\"pressure_lead_us\":$PRESSURE_LEAD_US" <<<"$ready_event" \
+    || die "sidecar pressure lead mismatch: expected=$PRESSURE_LEAD_US"
   if [[ "$SUSTAINED_PRESSURE" = 1 ]]; then
     grep -Fq '"sustained_pressure":true' <<<"$ready_event" \
       || die "sidecar sustained pressure mismatch: expected enabled"
@@ -78,6 +83,8 @@ apply_overlay() {
   (( PRESSURE_KEY_COUNT <= CONCURRENCY - 1 )) \
     || die "PRESSURE_KEY_COUNT must not exceed pressure lanes"
   [[ "$OBJECT_SIZE" =~ ^[1-9][0-9]*$ ]] || die "OBJECT_SIZE must be positive"
+  [[ "$PRESSURE_LEAD_US" =~ ^[0-9]+$ ]] && (( PRESSURE_LEAD_US <= 1000000 )) \
+    || die "PRESSURE_LEAD_US must be between 0 and 1000000"
   [[ "$KVC_BURST_ENABLED" = 0 || "$KVC_BURST_ENABLED" = 1 ]] \
     || die "KVC_BURST_ENABLED must be 0 or 1"
   [[ "$MEASURE_DISABLED" = 0 || "$MEASURE_DISABLED" = 1 ]] \
@@ -105,12 +112,13 @@ apply_overlay() {
   kubectl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o json >"$deployment_json"
   python3 - "$deployment_json" "$patch_json" "$INFERENCE_CONTAINER" "$SIDECAR_CONTAINER" \
       "$HOST_RUNTIME_DIR" "$POD_RUNTIME_DIR" "$CONCURRENCY" "$PRESSURE_KEY_COUNT" "$OBJECT_SIZE" \
-      "$BARRIER_TIMEOUT_MS" "$ds_host" "$ds_port" "$KVC_BURST_ENABLED" "$MEASURE_DISABLED" \
+      "$BARRIER_TIMEOUT_MS" "$PRESSURE_LEAD_US" "$ds_host" "$ds_port" "$KVC_BURST_ENABLED" "$MEASURE_DISABLED" \
       "$KVC_BURST_VERBOSE" "$KVC_BURST_INITIAL_ARMED" \
       "$SUSTAINED_PRESSURE" "$SUSTAINED_MAX_DURATION_MS" "$SUSTAINED_MAX_LOOPS" <<'PY'
 import json, pathlib, sys
 (deployment_path, output_path, inference_name, sidecar_name, host_runtime,
- pod_runtime, concurrency, pressure_key_count, object_size, barrier_timeout, ds_host, ds_port,
+ pod_runtime, concurrency, pressure_key_count, object_size, barrier_timeout, pressure_lead_us,
+ ds_host, ds_port,
  enabled, measure_disabled, verbose, initially_armed,
  sustained_pressure, sustained_max_duration_ms, sustained_max_loops) = sys.argv[1:]
 deployment = json.loads(pathlib.Path(deployment_path).read_text())
@@ -162,6 +170,7 @@ patch = {"spec": {"template": {"metadata": {"annotations": {
          "args": [f"--host={ds_host}", f"--port={ds_port}", f"--concurrency={concurrency}",
                   f"--pressure_key_count={pressure_key_count}",
                   f"--object_size={object_size}", f"--barrier_timeout_ms={barrier_timeout}",
+                  f"--pressure_lead_us={pressure_lead_us}",
                   "--prefix=PairecKvcBurstV2", "--control_path=/run/pairec-kvc-burst/control",
                   "--ready_file=/run/pairec-kvc-burst/ready", "--cleanup_keys=true",
                   f"--initially_armed={initially_armed}",

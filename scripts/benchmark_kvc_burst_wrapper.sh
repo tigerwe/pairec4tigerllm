@@ -8,6 +8,7 @@ CONCURRENCY_LEVELS=${CONCURRENCY_LEVELS:-1 10 100}
 REPEATS=${REPEATS:-3}
 OBJECT_SIZE=${OBJECT_SIZE:-3670016}
 BARRIER_TIMEOUT_MS=${BARRIER_TIMEOUT_MS:-10}
+PRESSURE_LEAD_US=${PRESSURE_LEAD_US:-1000}
 SHUFFLE_SEED=${SHUFFLE_SEED:-20260804}
 PREFIX_BASE=${PREFIX_BASE:-PairecKvcBurstV2}
 OUT_DIR=${OUT_DIR:-/tmp/kvc-burst-wrapper/$(date +%Y%m%d-%H%M%S)-$$}
@@ -28,6 +29,8 @@ DS_PORT=${DS_ENDPOINT##*:}
   || die "business probe binary is not executable: $KVC_BURST_BUSINESS_PROBE_BIN"
 [[ "$REPEATS" =~ ^[1-9][0-9]*$ ]] || die "REPEATS must be positive"
 [[ "$OBJECT_SIZE" =~ ^[1-9][0-9]*$ ]] || die "OBJECT_SIZE must be bytes"
+[[ "$PRESSURE_LEAD_US" =~ ^[0-9]+$ ]] && (( PRESSURE_LEAD_US <= 1000000 )) \
+  || die "PRESSURE_LEAD_US must be between 0 and 1000000"
 
 mkdir -p "$OUT_DIR" "$CONTROL_DIR"
 WRAPPER_PID=
@@ -70,6 +73,7 @@ for concurrency in $CONCURRENCY_LEVELS; do
     --concurrency="$concurrency" \
     --object_size="$OBJECT_SIZE" \
     --barrier_timeout_ms="$BARRIER_TIMEOUT_MS" \
+    --pressure_lead_us="$PRESSURE_LEAD_US" \
     --seed="$SHUFFLE_SEED" \
     --prefix="$prefix" \
     --control_path="$control_path" \
@@ -139,6 +143,10 @@ for concurrency in levels:
             if event.get("event") == "kvc_burst_complete":
                 events.append(event)
     valid = len(events) == repeats and all(event.get("valid") is True for event in events)
+    valid = valid and all(
+        int(event.get("pressure_inflight_at_business_start", 0))
+        >= math.ceil(int(event.get("pressure_lanes", 0)) * .95)
+        for event in events)
     business = [float(event["business_get_ms"]) for event in events]
     pressure = [float(event["pressure_get_p99_ms"]) for event in events]
     overlap_min = min((int(event["business_overlap_gets"]) for event in events), default=0)

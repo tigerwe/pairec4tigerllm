@@ -69,6 +69,29 @@ int main()
                pairec::kvc_burst::BusinessApi::kParallelGet))
         == "parallel_get");
 
+    assert(pairec::kvc_burst::RequiredPressureFirst(0) == 0);
+    assert(pairec::kvc_burst::RequiredPressureFirst(9) == 9);
+    assert(pairec::kvc_burst::RequiredPressureFirst(99) == 95);
+    assert(pairec::kvc_burst::PressureFirstSatisfied(99, 95, 95, 96));
+    assert(!pairec::kvc_burst::PressureFirstSatisfied(99, 94, 95, 96));
+    assert(!pairec::kvc_burst::PressureFirstSatisfied(99, 95, 94, 96));
+    assert(!pairec::kvc_burst::PressureFirstSatisfied(99, 95, 95, 95));
+    Initialize(control, 100);
+    control->run_generation = 3;
+    std::thread starts([&] {
+        for (uint32_t i = 0; i < 95; ++i)
+        {
+            pairec::kvc_burst::FetchAdd(&control->pressure_started_lanes, 1U);
+            pairec::kvc_burst::FutexWake(&control->pressure_started_lanes);
+        }
+    });
+    uint64_t pressureWaitUs = 0;
+    assert(pairec::kvc_burst::WaitForPressureStarted(control, 3, 100, &pressureWaitUs));
+    starts.join();
+    assert(control->pressure_first_failed == 0);
+    control->pressure_lead_us = 100;
+    assert(pairec::kvc_burst::ApplyPressureLead(control) >= 100);
+
     Initialize(control, 2);
     assert(!pairec::kvc_burst::ArriveAndWait(control, 2, 2, &waitUs));
     assert(pairec::kvc_burst::Load(&control->barrier_failed) == 1);

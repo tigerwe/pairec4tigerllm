@@ -120,7 +120,7 @@ class F19RealIoScriptTest(unittest.TestCase):
         runtime_heredoc = benchmark_text.split("<<'SH'\n", 1)[1].split("\nSH\n", 1)[0]
         self.assertNotIn("set_kvc_burst_arm()", runtime_heredoc)
         self.assertIn("\nset_kvc_burst_arm() {\n", benchmark_text)
-        self.assertIn("control_action=refresh-and-arm", benchmark_text)
+        self.assertIn('"--control_action=${action}"', benchmark_text)
         self.assertIn('"--host=${ds_host}"', benchmark_text)
         self.assertIn('capture_kvc_burst_failure "$round_dir"', benchmark_text)
         self.assertIn("kvc-burst-failure-sidecar.log", benchmark_text)
@@ -135,7 +135,7 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertLess(replay_failure_capture, disarm_after_replay)
         disarm = benchmark_text.index('set_kvc_burst_arm "$round_dir" disarm')
         prime = benchmark_text.index('run_prime "$round_dir"')
-        arm = benchmark_text.index('set_kvc_burst_arm "$round_dir" arm')
+        arm = benchmark_text.index('set_kvc_burst_arm "$round_dir" refresh-and-arm')
         replay = benchmark_text.index('run_replay "$round_dir"')
         self.assertLess(disarm, prime)
         self.assertLess(prime, arm)
@@ -146,18 +146,21 @@ class F19RealIoScriptTest(unittest.TestCase):
 
     def test_f14_refreshes_pressure_keys_before_arming(self):
         text = KVC_BURST_WRAPPER.read_text()
-        start = text.index('if (config.controlAction != "refresh-and-arm")')
+        start = text.index('auto refreshOnly = config.controlAction == "refresh"')
         end = text.index("\n    return 0;\n}", start)
         action = text[start:end]
         disarm = action.index("Store(&control.trigger_armed, 0U)")
         ready = action.index("State::kReady")
         request = action.index("RefreshState::kRequested")
         refresh = action.index("RefreshState::kSucceeded")
-        arm = action.index("Store(&control.trigger_armed, 1U)")
+        arm = action.index("Store(&control.trigger_armed, arm ? 1U : 0U)")
         self.assertLess(disarm, ready)
         self.assertLess(ready, request)
         self.assertLess(request, refresh)
         self.assertLess(refresh, arm)
+        self.assertIn('config.controlAction == "verify-and-arm"', action)
+        self.assertIn("RefreshState::kVerifyRequested", action)
+        self.assertIn("RefreshState::kVerifySucceeded", action)
         self.assertIn('generationConfig.prefix += "_g"', text)
         sidecar_refresh = text.index("kvc_burst_keys_refreshed")
         self.assertLess(text.rindex("DeleteKeys", 0, sidecar_refresh), sidecar_refresh)
@@ -166,6 +169,8 @@ class F19RealIoScriptTest(unittest.TestCase):
         self.assertIn("detail=\" << status.ToString()", text)
         self.assertIn("pressure_key_count", text)
         self.assertIn("permutation[i] = i % pressureKeyCount", text)
+        self.assertIn("kvc_burst_keys_verified", text)
+        self.assertIn("VerifyKeys(*controlClient, keys)", text)
 
     def test_trace_summary_preserves_completion_multiplicity(self):
         text = TRACE.read_text()

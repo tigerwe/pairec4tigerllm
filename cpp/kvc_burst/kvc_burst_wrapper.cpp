@@ -45,6 +45,7 @@ struct Config
     uint32_t pressureKeyCount{0};
     uint64_t objectSize{3670016ULL};
     uint32_t barrierTimeoutMs{10};
+    uint32_t pressureLeadUs{1000};
     uint64_t seed{20260804};
     std::string prefix{"PairecKvcBurstV2"};
     std::string controlPath{"/run/pairec-kvc-burst/control"};
@@ -150,6 +151,11 @@ bool ParseArgs(int argc, char** argv, Config* config)
         {
             if (!ParseUnsigned(value, &parsed)) return false;
             config->barrierTimeoutMs = static_cast<uint32_t>(parsed);
+        }
+        else if (name == "pressure_lead_us")
+        {
+            if (!ParseUnsigned(value, &parsed) || parsed > 1000000U) return false;
+            config->pressureLeadUs = static_cast<uint32_t>(parsed);
         }
         else if (name == "seed")
         {
@@ -263,6 +269,22 @@ bool PrefillAndVerify(datasystem::KVClient& client, const std::vector<std::strin
     return true;
 }
 
+bool VerifyKeys(datasystem::KVClient& client, const std::vector<std::string>& keys)
+{
+    for (const auto& key : keys)
+    {
+        datasystem::Optional<datasystem::Buffer> buffer;
+        auto status = client.Get(key, buffer, 0);
+        if (status.IsError() || !buffer)
+        {
+            std::cerr << "verification-only Get failed key=" << key
+                      << " detail=" << status.ToString() << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 void DeleteKeys(datasystem::KVClient& client, const std::vector<std::string>& keys)
 {
     if (keys.empty()) return;
@@ -302,6 +324,7 @@ bool CreateMapping(const Config& config, Mapping* mapping)
     mapping->control->pressure_key_count
         = config.pressureKeyCount == 0 ? config.concurrency - 1 : config.pressureKeyCount;
     mapping->control->barrier_timeout_ms = config.barrierTimeoutMs;
+    mapping->control->pressure_lead_us = config.pressureLeadUs;
     mapping->control->object_size_bytes = config.objectSize;
     pairec::kvc_burst::Store(&mapping->control->trigger_armed, config.initiallyArmed ? 1U : 0U);
     pairec::kvc_burst::Store(&mapping->control->state, static_cast<uint32_t>(State::kStarting));
@@ -352,39 +375,48 @@ int ApplyControlAction(const Config& config)
                   << std::endl;
         return 0;
     }
-    if (config.controlAction != "refresh-and-arm")
+    auto refreshOnly = config.controlAction == "refresh";
+    auto refreshAndArm = config.controlAction == "refresh-and-arm";
+    auto verifyAndArm = config.controlAction == "verify-and-arm";
+    if (!refreshOnly && !refreshAndArm && !verifyAndArm)
     {
-        std::cerr << "control_action must be arm, disarm, or refresh-and-arm" << std::endl;
+        std::cerr << "control_action must be arm, disarm, refresh, refresh-and-arm, or "
+                     "verify-and-arm"
+                  << std::endl;
         return 2;
     }
 
     pairec::kvc_burst::Store(&control.trigger_armed, 0U);
     if (pairec::kvc_burst::Load(&control.state) != static_cast<uint32_t>(State::kReady))
     {
-        std::cerr << "cannot refresh pressure keys unless burst state is ready" << std::endl;
-        return 1;
-    }
-    auto pressureKeyCount = pairec::kvc_burst::Load(&control.pressure_key_count);
-    pairec::kvc_burst::Store(
-        &control.refresh_state, static_cast<uint32_t>(RefreshState::kRequested));
-    pairec::kvc_burst::FutexWake(&control.refresh_state);
-    auto deadline = pairec::kvc_burst::DeadlineNs(30000);
-    uint32_t refreshState = static_cast<uint32_t>(RefreshState::kRequested);
-    while (pairec::kvc_burst::MonotonicNs() < deadline)
-    {
-        refreshState = pairec::kvc_burst::Load(&control.refresh_state);
-        if (refreshState != static_cast<uint32_t>(RefreshState::kRequested)) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    if (refreshState != static_cast<uint32_t>(RefreshState::kSucceeded))
-    {
-        std::cerr << "sidecar pressure key refresh failed or timed out; burst remains disarmed"
+        std::cerr << "cannot refresh or verify pressure keys unless burst state is ready"
                   << std::endl;
         return 1;
     }
-    pairec::kvc_burst::Store(&control.trigger_armed, 1U);
-    std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"refresh-and-arm\","
-              << "\"armed\":true,\"refreshed_keys\":" << pressureKeyCount << "}" << std::endl;
+    auto pressureKeyCount = pairec::kvc_burst::Load(&control.pressure_key_count);
+    auto requested = verifyAndArm ? RefreshState::kVerifyRequested : RefreshState::kRequested;
+    auto succeeded = verifyAndArm ? RefreshState::kVerifySucceeded : RefreshState::kSucceeded;
+    pairec::kvc_burst::Store(&control.refresh_state, static_cast<uint32_t>(requested));
+    pairec::kvc_burst::FutexWake(&control.refresh_state);
+    auto deadline = pairec::kvc_burst::DeadlineNs(30000);
+    uint32_t refreshState = static_cast<uint32_t>(requested);
+    while (pairec::kvc_burst::MonotonicNs() < deadline)
+    {
+        refreshState = pairec::kvc_burst::Load(&control.refresh_state);
+        if (refreshState != static_cast<uint32_t>(requested)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (refreshState != static_cast<uint32_t>(succeeded))
+    {
+        std::cerr << "sidecar pressure key " << (verifyAndArm ? "verification" : "refresh")
+                  << " failed or timed out; burst remains disarmed" << std::endl;
+        return 1;
+    }
+    auto arm = refreshAndArm || verifyAndArm;
+    pairec::kvc_burst::Store(&control.trigger_armed, arm ? 1U : 0U);
+    std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"" << config.controlAction
+              << "\",\"armed\":" << (arm ? "true" : "false") << ",\"keys\":"
+              << pressureKeyCount << "}" << std::endl;
     return 0;
 }
 
@@ -432,6 +464,9 @@ struct Aggregate
     uint64_t startSkewUs{0};
     uint64_t businessGetUs{0};
     uint32_t businessSubmitRank{0};
+    uint32_t pressureStartedBeforeBusiness{0};
+    uint32_t pressureInflightAtBusinessStart{0};
+    uint32_t pressureCompletedBeforeBusiness{0};
     uint64_t pressureAvgUs{0};
     uint64_t pressureP95Us{0};
     uint64_t pressureP99Us{0};
@@ -468,6 +503,18 @@ Aggregate AggregateResult(SharedControl& control)
         auto latency = (end - start) / 1000ULL;
         pressureLatencies.push_back(latency);
         latencySum += latency;
+        if (businessStart > 0 && start < businessStart)
+        {
+            ++result.pressureStartedBeforeBusiness;
+            if (end > businessStart)
+            {
+                ++result.pressureInflightAtBusinessStart;
+            }
+            else
+            {
+                ++result.pressureCompletedBeforeBusiness;
+            }
+        }
         if (businessStart < end && start < businessEnd)
         {
             ++result.businessOverlap;
@@ -518,6 +565,13 @@ Aggregate AggregateResult(SharedControl& control)
         || pairec::kvc_burst::Load(&control.pressure_success) != pressureLanes)
     {
         result.failure = Failure::kPressureGetFailed;
+    }
+    else if (pairec::kvc_burst::Load(&control.pressure_first_failed) != 0
+        || !pairec::kvc_burst::PressureFirstSatisfied(pressureLanes,
+            result.pressureStartedBeforeBusiness, result.pressureInflightAtBusinessStart,
+            result.businessSubmitRank))
+    {
+        result.failure = Failure::kPressureNotEstablished;
     }
     else if (result.maxActiveAll < requiredActive || result.businessOverlap < requiredOverlap)
     {
@@ -596,6 +650,14 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
            << ",\"object_size_bytes\":" << config.objectSize << ",\"shuffle_seed\":"
            << control.shuffle_seed << ",\"barrier_wait_ms\":"
            << static_cast<double>(control.business_barrier_wait_us) / 1000.0
+           << ",\"pressure_first_wait_ms\":"
+           << static_cast<double>(control.business_pressure_wait_us) / 1000.0
+           << ",\"pressure_lead_wait_ms\":"
+           << static_cast<double>(control.business_lead_wait_us) / 1000.0
+           << ",\"coordination_wait_ms\":"
+           << static_cast<double>(control.business_barrier_wait_us
+                  + control.business_pressure_wait_us + control.business_lead_wait_us)
+                  / 1000.0
            << ",\"trigger_us\":" << control.business_trigger_us
            << ",\"business_api\":\""
            << pairec::kvc_burst::BusinessApiName(
@@ -609,7 +671,15 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
            << ",\"pressure_get_max_ms\":" << static_cast<double>(result.pressureMaxUs) / 1000.0
            << ",\"start_skew_us\":" << result.startSkewUs << ",\"max_active_all_gets\":"
            << result.maxActiveAll << ",\"business_overlap_gets\":" << result.businessOverlap
-           << ",\"business_submit_rank\":" << result.businessSubmitRank;
+           << ",\"business_submit_rank\":" << result.businessSubmitRank
+           << ",\"pressure_started_before_business\":"
+           << result.pressureStartedBeforeBusiness
+           << ",\"pressure_inflight_at_business_start\":"
+           << result.pressureInflightAtBusinessStart
+           << ",\"pressure_completed_before_business\":"
+           << result.pressureCompletedBeforeBusiness
+           << ",\"pressure_first_required\":"
+           << pairec::kvc_burst::RequiredPressureFirst(control.pressure_lanes);
     {
         auto businessStart = pairec::kvc_burst::Load(&control.business_start_ns);
         auto pressureLanes = pairec::kvc_burst::Load(&control.pressure_lanes);
@@ -717,6 +787,9 @@ bool PublishReadyFile(const std::string& path, const std::string& contents)
 void ResetGeneration(SharedControl& control, uint32_t generation, uint64_t shuffleSeed)
 {
     pairec::kvc_burst::Store(&control.arrived_participants, 0U);
+    pairec::kvc_burst::Store(&control.pressure_started_lanes, 0U);
+    pairec::kvc_burst::Store(&control.pressure_first_failed, 0U);
+    pairec::kvc_burst::Store(&control.business_release_generation, 0U);
     pairec::kvc_burst::Store(&control.completed_pressure_lanes, 0U);
     pairec::kvc_burst::Store(&control.barrier_failed, 0U);
     pairec::kvc_burst::Store(&control.business_done_generation, 0U);
@@ -724,6 +797,8 @@ void ResetGeneration(SharedControl& control, uint32_t generation, uint64_t shuff
     pairec::kvc_burst::Store(&control.pressure_success, 0U);
     pairec::kvc_burst::Store(&control.pressure_errors, 0U);
     pairec::kvc_burst::Store(&control.business_barrier_wait_us, uint64_t{0});
+    pairec::kvc_burst::Store(&control.business_pressure_wait_us, uint64_t{0});
+    pairec::kvc_burst::Store(&control.business_lead_wait_us, uint64_t{0});
     pairec::kvc_burst::Store(&control.business_trigger_us, uint64_t{0});
     pairec::kvc_burst::Store(&control.business_bytes, uint64_t{0});
     pairec::kvc_burst::Store(&control.trigger_started_ns, uint64_t{0});
@@ -776,6 +851,8 @@ void PressureWorker(uint32_t lane, SharedControl* control, datasystem::KVClient*
         {
             auto start = pairec::kvc_burst::MonotonicNs();
             pairec::kvc_burst::Store(&control->pressure_start_ns[lane], start);
+            pairec::kvc_burst::FetchAdd(&control->pressure_started_lanes, 1U);
+            pairec::kvc_burst::FutexWake(&control->pressure_started_lanes);
             datasystem::Optional<datasystem::Buffer> buffer;
             auto status = client->Get((*keys)[(*permutation)[lane]], buffer, 0);
             ok = !status.IsError() && static_cast<bool>(buffer);
@@ -922,11 +999,12 @@ int Run(int argc, char** argv)
             return 1;
         }
     }
-    WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":2,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
+    WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":3,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
             + ",\"pressure_lanes\":" + std::to_string(pressureLanes) + ",\"object_size_bytes\":"
             + std::to_string(config.objectSize) + ",\"pressure_key_count\":" + std::to_string(pressureKeyCount)
             + ",\"clients_connected\":" + std::to_string(pressureLanes)
             + ",\"keys_verified\":" + std::to_string(pressureLanes)
+            + ",\"pressure_lead_us\":" + std::to_string(config.pressureLeadUs)
             + ",\"sustained_pressure\":" + (config.sustainedPressure ? "true" : "false")
             + ",\"sustained_max_duration_ms\":" + std::to_string(config.sustainedMaxDurationMs)
             + ",\"sustained_max_loops\":" + std::to_string(config.sustainedMaxLoops) + "}");
@@ -936,9 +1014,28 @@ int Run(int argc, char** argv)
         pairec::kvc_burst::Store(&control.heartbeat_ns, pairec::kvc_burst::MonotonicNs());
         auto state = pairec::kvc_burst::Load(&control.state);
         auto refreshState = pairec::kvc_burst::Load(&control.refresh_state);
+        auto refreshRequested = refreshState == static_cast<uint32_t>(RefreshState::kRequested);
+        auto verifyRequested
+            = refreshState == static_cast<uint32_t>(RefreshState::kVerifyRequested);
         if (state == static_cast<uint32_t>(State::kReady)
-            && refreshState == static_cast<uint32_t>(RefreshState::kRequested))
+            && (refreshRequested || verifyRequested))
         {
+            if (verifyRequested)
+            {
+                auto verified = pressureKeyCount == 0 || VerifyKeys(*controlClient, keys);
+                pairec::kvc_burst::Store(&control.refresh_state,
+                    static_cast<uint32_t>(verified ? RefreshState::kVerifySucceeded
+                                                   : RefreshState::kVerifyFailed));
+                pairec::kvc_burst::FutexWake(&control.refresh_state);
+                if (verified)
+                {
+                    std::cout << "{\"event\":\"kvc_burst_keys_verified\",\"generation\":"
+                              << pressureKeyGeneration << ",\"pressure_key_count\":"
+                              << pressureKeyCount << "}" << std::endl;
+                }
+                continue;
+            }
+
             ++pressureKeyGeneration;
             auto refreshed = pressureKeyCount == 0;
             std::vector<std::string> refreshedKeys;
@@ -994,6 +1091,13 @@ int Run(int argc, char** argv)
         pairec::kvc_burst::Store(&control.result_failure, static_cast<uint32_t>(result.failure));
         pairec::kvc_burst::Store(&control.result_max_active_all, result.maxActiveAll);
         pairec::kvc_burst::Store(&control.result_business_overlap, result.businessOverlap);
+        pairec::kvc_burst::Store(&control.result_business_submit_rank, result.businessSubmitRank);
+        pairec::kvc_burst::Store(&control.result_pressure_started_before_business,
+            result.pressureStartedBeforeBusiness);
+        pairec::kvc_burst::Store(&control.result_pressure_inflight_at_business_start,
+            result.pressureInflightAtBusinessStart);
+        pairec::kvc_burst::Store(&control.result_pressure_completed_before_business,
+            result.pressureCompletedBeforeBusiness);
         pairec::kvc_burst::Store(&control.result_start_skew_us, result.startSkewUs);
         pairec::kvc_burst::Store(&control.result_business_get_us, result.businessGetUs);
         pairec::kvc_burst::Store(&control.result_pressure_avg_us, result.pressureAvgUs);

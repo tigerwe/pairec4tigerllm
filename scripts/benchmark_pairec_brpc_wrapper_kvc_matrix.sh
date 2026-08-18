@@ -7,6 +7,7 @@ BURST_POOL_SIZE=${BURST_POOL_SIZE:-10000}
 COMBINED_KVC_CONCURRENCY=${COMBINED_KVC_CONCURRENCY:-100}
 COMBINED_KVC_PRESSURE_KEY_COUNT=${COMBINED_KVC_PRESSURE_KEY_COUNT:-4}
 COMBINED_KVC_OBJECT_SIZE=${COMBINED_KVC_OBJECT_SIZE:-3670016}
+KVC_PRESSURE_LEAD_US=${KVC_PRESSURE_LEAD_US:-1000}
 OUTPUT_DIR=${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-kvc-matrix/$(date +%Y%m%d-%H%M%S)-n${REQUESTS}}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -22,7 +23,7 @@ run_case() {
     BURST_ACTIVE_CONNECTIONS="$wrapper_concurrency" \
     BURST_POOL_SIZE="$BURST_POOL_SIZE" BURST_PAYLOAD_BYTES="$payload_bytes" \
     KVC_CONCURRENCY="$kvc_concurrency" KVC_PRESSURE_KEY_COUNT="$pressure_keys" \
-    KVC_OBJECT_SIZE="$object_size" \
+    KVC_OBJECT_SIZE="$object_size" KVC_PRESSURE_LEAD_US="$KVC_PRESSURE_LEAD_US" \
     EXPECTED_ONBOARDS_MIN="$onboard_min" EXPECTED_ONBOARDS_MAX="$onboard_max" \
     OUTPUT_DIR="$OUTPUT_DIR/$name" \
     bash scripts/validate_pairec_brpc_wrapper_kvc_combined.sh \
@@ -41,7 +42,9 @@ names = (
     "client_e2e_ms", "pairec_total_ms", "vector_recall_ms", "generative_recall_ms",
     "deepfm_rank_ms", "rerank_ms", "front_brpc_ms", "wrapper_total_ms",
     "backend_brpc_ms", "runner_ms", "kvc_business_get_ms", "kvc_pressure_p99_ms",
-    "kvc_barrier_ms", "datasystem_get_ms", "datasystem_set_ms",
+    "kvc_barrier_ms", "kvc_pressure_first_wait_ms", "kvc_pressure_lead_wait_ms",
+    "kvc_coordination_wait_ms", "kvc_pressure_inflight_at_business_start",
+    "datasystem_get_ms", "datasystem_set_ms",
     "wrapper_pressure_p95_ms", "wrapper_max_active",
 )
 rows = []

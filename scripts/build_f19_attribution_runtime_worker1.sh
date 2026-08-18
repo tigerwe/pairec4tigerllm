@@ -428,7 +428,7 @@ install -m 0755 "$staging_dir/bin/kvc_burst_wrapper" \
   "$RUNTIME_DIR/bin/kvc_burst_wrapper"
 
 if [[ "$APPLY_KVC_BURST_PROXY" = 1 ]]; then
-  grep -Fq KVC_BURST_CONTROL_PATH \
+  grep -Fq PAIREC_KVC_BURST_PROXY_V3 \
     < <(strings "$RUNTIME_DIR/lib/libtensorrt_llm.so")
 fi
 

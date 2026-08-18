@@ -17,8 +17,11 @@ struct BusinessGetToken
     uint64_t bytes{0};
     uint64_t triggerUs{0};
     uint64_t barrierWaitUs{0};
+    uint64_t pressureWaitUs{0};
+    uint64_t leadWaitUs{0};
     uint64_t businessStartedNs{0};
     bool barrierReleased{false};
+    bool pressureEstablished{false};
 
     [[nodiscard]] bool triggered() const { return status == TriggerStatus::kTriggered; }
 };

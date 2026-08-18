@@ -270,12 +270,28 @@ int main(int argc, char** argv)
     pairec::kvc_burst::FutexWake(&control.run_generation);
     auto triggerCompleted = pairec::kvc_burst::MonotonicNs();
     pairec::kvc_burst::Store(&control.trigger_completed_ns, triggerCompleted);
-    pairec::kvc_burst::Store(&control.business_trigger_us, (triggerCompleted - triggerStarted) / 1000ULL);
+    pairec::kvc_burst::Store(&control.business_trigger_us,
+        static_cast<uint64_t>((triggerCompleted - triggerStarted) / 1000ULL));
 
     uint64_t barrierWaitUs = 0;
     auto released = pairec::kvc_burst::ArriveAndWait(
         &control, generation, pairec::kvc_burst::Load(&control.barrier_timeout_ms), &barrierWaitUs);
     pairec::kvc_burst::Store(&control.business_barrier_wait_us, barrierWaitUs);
+    uint64_t pressureWaitUs = 0;
+    auto pressureEstablished = released && pairec::kvc_burst::WaitForPressureStarted(
+        &control, generation, pairec::kvc_burst::Load(&control.barrier_timeout_ms), &pressureWaitUs);
+    pairec::kvc_burst::Store(&control.business_pressure_wait_us, pressureWaitUs);
+    uint64_t leadWaitUs = 0;
+    if (pressureEstablished)
+    {
+        if (pairec::kvc_burst::Load(&control.pressure_lanes) > 0)
+        {
+            leadWaitUs = pairec::kvc_burst::ApplyPressureLead(&control);
+        }
+        pairec::kvc_burst::Store(&control.business_release_generation, generation);
+        pairec::kvc_burst::FutexWake(&control.business_release_generation);
+    }
+    pairec::kvc_burst::Store(&control.business_lead_wait_us, leadWaitUs);
 
     auto businessStart = pairec::kvc_burst::MonotonicNs();
     pairec::kvc_burst::Store(&control.business_start_ns, businessStart);
@@ -291,12 +307,15 @@ int main(int argc, char** argv)
     std::cout << "{\"event\":\"kvc_proxy_business_get_complete\",\"generation\":" << generation
               << ",\"request_id\":\"" << config.requestId << "\",\"barrier_released\":"
               << (released ? "true" : "false") << ",\"barrier_wait_us\":" << barrierWaitUs
+              << ",\"pressure_established\":" << (pressureEstablished ? "true" : "false")
+              << ",\"pressure_first_wait_us\":" << pressureWaitUs
+              << ",\"pressure_lead_wait_us\":" << leadWaitUs
               << ",\"business_get_us\":" << (businessEnd - businessStart) / 1000ULL
               << ",\"business_api\":\"get\",\"business_key_count\":1,\"business_bytes\":"
               << config.objectSize << ",\"trigger_us\":" << (triggerCompleted - triggerStarted) / 1000ULL
               << ",\"business_success\":" << (success ? "true" : "false") << "}" << std::endl;
 
-    bool resultValid = released && success;
+    bool resultValid = released && pressureEstablished && success;
     if (config.waitResult)
     {
         auto deadline = pairec::kvc_burst::DeadlineNs(config.resultTimeoutMs);

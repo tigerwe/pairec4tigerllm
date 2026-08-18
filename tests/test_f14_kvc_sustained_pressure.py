@@ -15,6 +15,8 @@ CONTENTION = ROOT / "scripts" / "benchmark_brpc_kvc_contention.sh"
 COMBINED = ROOT / "scripts" / "validate_pairec_brpc_wrapper_kvc_combined.sh"
 COLLECTOR = ROOT / "scripts" / "collect_datasystem_worker_metrics.sh"
 METRICS_PY = ROOT / "scripts" / "datasystem_worker_metrics.py"
+DATASYSTEM_STUB = ROOT / "tests" / "stubs"
+BUSINESS_PROBE_CPP = ROOT / "cpp" / "kvc_burst" / "kvc_burst_business_probe.cpp"
 
 spec = importlib.util.spec_from_file_location("datasystem_worker_metrics", METRICS_PY)
 metrics = importlib.util.module_from_spec(spec)
@@ -139,6 +141,10 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn("enum class SustainedStop", text)
         self.assertIn("SustainedStopReason", text)
         self.assertIn("BusinessSubmitRank", text)
+        self.assertIn("WaitForPressureStarted", text)
+        self.assertIn("RequiredPressureFirst", text)
+        self.assertIn("kPressureNotEstablished", text)
+        self.assertIn("constexpr uint32_t kVersion = 3", text)
         self.assertNotIn("uint32_t reserved", text)
 
     def test_wrapper_sustained_flow(self):
@@ -150,6 +156,8 @@ class SustainedPressureStructureTest(unittest.TestCase):
             "SustainedStopReason(*control, generation, loopStarted",
             "sustainedStats->loops += 1;",
             '\\"business_submit_rank\\"',
+            '\\"pressure_inflight_at_business_start\\"',
+            "FetchAdd(&control->pressure_started_lanes, 1U)",
             '\\"pressure_start_offsets_us\\"',
             '\\"pressure_end_offsets_us\\"',
             '\\"sustained_loop_gets\\"',
@@ -159,16 +167,27 @@ class SustainedPressureStructureTest(unittest.TestCase):
         # Sustained errors must be logged at most once per lane per generation.
         self.assertIn("errorLogged", text)
 
+    def test_kvc_binaries_compile_with_sdk_shape_stub(self):
+        for source in (WRAPPER_CPP, BUSINESS_PROBE_CPP):
+            subprocess.run(
+                ["g++", "-std=c++17", "-pthread", "-fsyntax-only",
+                 "-I", str(DATASYSTEM_STUB), "-I", str(ROOT / "cpp" / "kvc_burst"),
+                 str(source)],
+                check=True, capture_output=True, text=True)
+
     def test_deploy_script_sustained_wiring(self):
         text = DEPLOY.read_text()
         for token in (
             "SUSTAINED_PRESSURE=${SUSTAINED_PRESSURE:-0}",
             "SUSTAINED_MAX_DURATION_MS=${SUSTAINED_MAX_DURATION_MS:-1000}",
             "SUSTAINED_MAX_LOOPS=${SUSTAINED_MAX_LOOPS:-100}",
+            "PRESSURE_LEAD_US=${PRESSURE_LEAD_US:-1000}",
             'die "SUSTAINED_PRESSURE must be 0 or 1"',
             "--sustained_pressure=",
             "--sustained_max_duration_ms=",
             "--sustained_max_loops=",
+            "--pressure_lead_us=",
+            "expected version=3",
             '\"sustained_pressure\":true',
         ):
             self.assertIn(token, text)
@@ -197,7 +216,7 @@ class SustainedPressureStructureTest(unittest.TestCase):
             argv = [
                 sys.executable, "-c", blocks[0],
                 str(deployment_path), str(patch_path), "brpc-inference", "kvc-burst-wrapper",
-                "/host", "/pod", "100", "8", "1835008", "5", "ds", "18482", "1", "0", "1", "0",
+                "/host", "/pod", "100", "8", "1835008", "5", "1000", "ds", "18482", "1", "0", "1", "0",
                 "1", "500", "42",
             ]
             subprocess.run(argv, check=True, capture_output=True, text=True)
@@ -207,6 +226,7 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn("--sustained_pressure=true", sidecar["args"])
         self.assertIn("--sustained_max_duration_ms=500", sidecar["args"])
         self.assertIn("--sustained_max_loops=42", sidecar["args"])
+        self.assertIn("--pressure_lead_us=1000", sidecar["args"])
 
     def test_contention_ds_worker_hook(self):
         text = CONTENTION.read_text()
@@ -222,16 +242,27 @@ class SustainedPressureStructureTest(unittest.TestCase):
         for token in (
             'REPLAY_MAX_ATTEMPTS="${REPLAY_MAX_ATTEMPTS:-2}"',
             'REPLAY_RETRY_PRIME_REQUESTS="${REPLAY_RETRY_PRIME_REQUESTS:-20}"',
+            'REPLAY_RETRY_CHURN_REQUESTS="${REPLAY_RETRY_CHURN_REQUESTS:-$REPLAY_RETRY_PRIME_REQUESTS}"',
             'die "REPLAY_MAX_ATTEMPTS must be a positive integer"',
             "replay_zero_business_get \"$round_dir\"",
-            "zero business onboard Gets; reshuffle prime and retry",
+            "zero business onboard Gets; prepare target KV eviction and retry",
             '"${round_dir}/replay-attempt-${replay_attempt}"',
             '"${round_dir}/replay.attempts"',
-            'PRIME_UIDS="$REPLAY_USER_ID"',
-            'PRIME_REQUESTS="$REPLAY_RETRY_PRIME_REQUESTS"',
-            'run_prime_once "${round_dir}/replay-prime-${replay_attempt}"',
+            'prepare_replay_onboard_retry "$round_dir" "$replay_attempt"',
+            'set_kvc_burst_arm "$round_dir" refresh',
+            'USER_ID="$REPLAY_USER_ID"',
+            'PRIME_UIDS="$churn_uids"',
+            'PRIME_REQUESTS="$REPLAY_RETRY_CHURN_REQUESTS"',
+            'set_kvc_burst_arm "$round_dir" verify-and-arm',
+            'pressure_key_control=refresh,target-prime,churn,verify-and-arm',
         ):
             self.assertIn(token, text)
+
+        target = text.index('OUT_DIR="$target_dir"')
+        churn = text.index('run_prime_once "$churn_dir"')
+        verify = text.index('set_kvc_burst_arm "$round_dir" verify-and-arm')
+        self.assertLess(target, churn)
+        self.assertLess(churn, verify)
 
     def test_replay_zero_business_get_detector(self):
         text = CONTENTION.read_text()
@@ -265,10 +296,13 @@ class SustainedPressureStructureTest(unittest.TestCase):
             "KVC_SUSTAINED_PRESSURE=${KVC_SUSTAINED_PRESSURE:-0}",
             'die "KVC_SUSTAINED_PRESSURE must be 0 or 1"',
             'SUSTAINED_PRESSURE="$KVC_SUSTAINED_PRESSURE"',
+            'PRESSURE_LEAD_US="$KVC_PRESSURE_LEAD_US"',
             '"kvc_business_submit_rank"',
+            '"kvc_pressure_inflight_at_business_start"',
             '"kvc_sustained_loop_gets"',
             '"datasystem_worker_samples"',
             'kvc.get("sustained_enabled", False) is kvc_sustained_pressure',
+            'kvc["pressure_inflight_at_business_start"] >= required_pressure_first',
         ):
             self.assertIn(token, text)
 

@@ -171,8 +171,13 @@ def classify(round_dir, attempts, result_row):
     replay_exit = integer_file(round_dir / "replay.exit_code")
     arm_exit = integer_file(round_dir / "kvc-burst-arm.exit_code")
     rearm_exit = integer_file(round_dir / "kvc-burst-arm-retry.exit_code")
+    preparation_exits = [integer_file(path) for path in sorted(
+        round_dir.glob("replay-preparation-*.exit_code")
+    )]
     if arm_exit not in (None, 0) or rearm_exit not in (None, 0):
         return "KVC_ARM_OR_REARM_FAILURE"
+    if any(code not in (None, 0) for code in preparation_exits):
+        return "REPLAY_ONBOARD_PREPARATION_FAILURE"
     if not attempts:
         return "REPLAY_ARTIFACT_MISSING"
     last = attempts[-1]
@@ -181,6 +186,8 @@ def classify(round_dir, attempts, result_row):
     complete = last.get("kvc_complete") or {}
     if int(complete.get("sustained_errors", 0) or 0) > 0:
         return "SUSTAINED_PRESSURE_GET_FAILURE"
+    if int(complete.get("failure", 0) or 0) == 5:
+        return "PRESSURE_FIRST_GATE_FAILURE"
     if last.get("get_count") == 0:
         return "ZERO_ONBOARD_GET_RETRY_EXHAUSTED"
     if last.get("get_count") in (1, 2) and not last.get("kvc_complete_found"):
@@ -207,7 +214,14 @@ for round_dir in round_dirs:
     row = result_rows.get(number)
     worker_metrics = read_json(round_dir / "datasystem-worker-metrics.json")
     worker_error = read_text(round_dir / "datasystem-worker-metrics.error").strip()
-    prime_dirs = sorted(str(path) for path in round_dir.glob("replay-prime-*") if path.is_dir())
+    legacy_prime_dirs = sorted(str(path) for path in round_dir.glob("replay-prime-*") if path.is_dir())
+    target_prime_dirs = sorted(
+        str(path) for path in round_dir.glob("replay-target-prime-*") if path.is_dir()
+    )
+    churn_dirs = sorted(str(path) for path in round_dir.glob("replay-churn-*") if path.is_dir())
+    preparation_files = sorted(
+        str(path) for path in round_dir.glob("replay-preparation-*.txt") if path.is_file()
+    )
     item = {
         "round": int(number),
         "classification": classify(round_dir, attempts, row),
@@ -215,7 +229,10 @@ for round_dir in round_dirs:
         "replay_exit_code": integer_file(round_dir / "replay.exit_code"),
         "arm_exit_code": integer_file(round_dir / "kvc-burst-arm.exit_code"),
         "rearm_exit_code": integer_file(round_dir / "kvc-burst-arm-retry.exit_code"),
-        "focused_prime_dirs": prime_dirs,
+        "focused_prime_dirs": legacy_prime_dirs,
+        "target_prime_dirs": target_prime_dirs,
+        "churn_dirs": churn_dirs,
+        "preparation_files": preparation_files,
         "attempts": attempts,
         "result_row": row,
         "worker_metrics": worker_metrics,
@@ -272,6 +289,12 @@ for item in rounds:
         )
     if item["focused_prime_dirs"]:
         print(f"        focused_prime_count={len(item['focused_prime_dirs'])}")
+    if item["target_prime_dirs"] or item["churn_dirs"]:
+        print(
+            f"        target_prime_count={len(item['target_prime_dirs'])} "
+            f"churn_count={len(item['churn_dirs'])} "
+            f"preparation_records={len(item['preparation_files'])}"
+        )
     if item["worker_metrics_error"]:
         print(f"        worker_metrics_error={item['worker_metrics_error']}")
 

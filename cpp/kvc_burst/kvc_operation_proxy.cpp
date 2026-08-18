@@ -12,6 +12,11 @@
 #include <unordered_set>
 #include <unistd.h>
 
+extern "C" char const* pairecKvcBurstProxyProtocolMarker()
+{
+    return "PAIREC_KVC_BURST_PROXY_V3";
+}
+
 namespace pairec::kvc_burst
 {
 namespace
@@ -256,6 +261,19 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
     token.barrierReleased = ArriveAndWait(
         control, token.generation, Load(&control->barrier_timeout_ms), &token.barrierWaitUs);
     Store(&control->business_barrier_wait_us, token.barrierWaitUs);
+    token.pressureEstablished = token.barrierReleased && WaitForPressureStarted(
+        control, token.generation, Load(&control->barrier_timeout_ms), &token.pressureWaitUs);
+    Store(&control->business_pressure_wait_us, token.pressureWaitUs);
+    if (token.pressureEstablished)
+    {
+        if (Load(&control->pressure_lanes) > 0)
+        {
+            token.leadWaitUs = ApplyPressureLead(control);
+        }
+        Store(&control->business_release_generation, token.generation);
+        FutexWake(&control->business_release_generation);
+    }
+    Store(&control->business_lead_wait_us, token.leadWaitUs);
     token.businessStartedNs = MonotonicNs();
     Store(&control->business_start_ns, token.businessStartedNs);
     return token;

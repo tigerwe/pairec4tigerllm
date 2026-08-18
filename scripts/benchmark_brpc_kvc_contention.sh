@@ -56,6 +56,8 @@ REPLAY_SIZE="${REPLAY_SIZE:-1}"
 REPLAY_TIMEOUT="${REPLAY_TIMEOUT:-30}"
 REPLAY_MAX_ATTEMPTS="${REPLAY_MAX_ATTEMPTS:-2}"
 REPLAY_RETRY_PRIME_REQUESTS="${REPLAY_RETRY_PRIME_REQUESTS:-20}"
+REPLAY_RETRY_CHURN_REQUESTS="${REPLAY_RETRY_CHURN_REQUESTS:-$REPLAY_RETRY_PRIME_REQUESTS}"
+REPLAY_RETRY_CHURN_UIDS="${REPLAY_RETRY_CHURN_UIDS:-}"
 RESET_INFERENCE_BEFORE_ROUND="${RESET_INFERENCE_BEFORE_ROUND:-0}"
 RESET_INFERENCE_MODE="${RESET_INFERENCE_MODE:-rollout}"
 INFERENCE_ROLLOUT_TIMEOUT_SECONDS="${INFERENCE_ROLLOUT_TIMEOUT_SECONDS:-600}"
@@ -192,6 +194,8 @@ validate() {
     || die "REPLAY_MAX_ATTEMPTS must be a positive integer"
   [[ "$REPLAY_RETRY_PRIME_REQUESTS" =~ ^[1-9][0-9]*$ ]] \
     || die "REPLAY_RETRY_PRIME_REQUESTS must be a positive integer"
+  [[ "$REPLAY_RETRY_CHURN_REQUESTS" =~ ^[1-9][0-9]*$ ]] \
+    || die "REPLAY_RETRY_CHURN_REQUESTS must be a positive integer"
   if mode_has_brpc && [ "$BRPC_LOAD_QPS" -eq 0 ] && [ "$BRPC_LOAD_REUSE_CONNECTIONS" != "1" ]; then
 		die "unlimited BRPC load requires BRPC_LOAD_REUSE_CONNECTIONS=1 to avoid ephemeral-port exhaustion"
   fi
@@ -698,10 +702,6 @@ set_kvc_burst_arm() {
   fi
   [ -n "$KVC_BURST_CONTAINER" ] || die "KVC_BURST_CONTAINER is required for dynamic arm"
   local pod
-  local control_action="$action"
-  if [ "$action" = "arm" ]; then
-    control_action=refresh-and-arm
-  fi
   local ds_host="${KVC_DS_ENDPOINT%:*}"
   local ds_port="${KVC_DS_ENDPOINT##*:}"
   pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
@@ -710,12 +710,27 @@ set_kvc_burst_arm() {
   [ -n "$pod" ] || die "inference pod not found for KVC burst ${action}"
   kubectl -n "$NAMESPACE" exec "$pod" -c "$KVC_BURST_CONTAINER" -- \
     "$KVC_BURST_CONTROL_BIN" \
-    "--control_action=${control_action}" \
+    "--control_action=${action}" \
     "--host=${ds_host}" \
     "--port=${ds_port}" \
     "--prefix=PairecKvcBurstV2" \
     "--control_path=/run/pairec-kvc-burst/control" \
     >>"${round_dir}/kvc-burst-control.log" 2>&1
+}
+
+replay_retry_churn_uids() {
+  local source="${REPLAY_RETRY_CHURN_UIDS:-$PRIME_UIDS}"
+  local uid output=""
+  local candidates=()
+  IFS=',' read -r -a candidates <<<"$source"
+  for uid in "${candidates[@]}"; do
+    uid="${uid//[[:space:]]/}"
+    [ -n "$uid" ] || continue
+    [ "$uid" = "$REPLAY_USER_ID" ] && continue
+    output="${output:+${output},}${uid}"
+  done
+  [ -n "$output" ] || return 1
+  printf '%s\n' "$output"
 }
 
 capture_kvc_burst_failure() {
@@ -809,6 +824,50 @@ run_replay() {
   OUT_DIR="${round_dir}/replay" \
     bash scripts/trace_single_brpc_datasystem_request.sh \
     >"${round_dir}/replay.console.log" 2>&1
+}
+
+prepare_replay_onboard_retry() {
+  local round_dir="$1"
+  local replay_attempt="$2"
+  local target_dir="${round_dir}/replay-target-prime-${replay_attempt}"
+  local churn_dir="${round_dir}/replay-churn-${replay_attempt}"
+  local churn_uids
+
+  churn_uids="$(replay_retry_churn_uids)" \
+    || { echo "ERROR: replay retry requires at least one churn UID distinct from REPLAY_USER_ID" >&2; return 1; }
+
+  # Refresh synthetic keys before touching the target KV. The final control
+  # action is verification-only, so no pressure-key Set can evict the target
+  # business blocks immediately before replay.
+  set_kvc_burst_arm "$round_dir" refresh || return 1
+
+  mkdir -p "$target_dir"
+  KVC_BURST_REQUIRE_COMPLETE=0 \
+  NAMESPACE="$NAMESPACE" \
+  PAIREC_TARGET="$PAIREC_TARGET" \
+  BRPC_TARGET="$BRPC_TARGET" \
+  BRPC_CONTAINER="$BRPC_CONTAINER" \
+  USER_ID="$REPLAY_USER_ID" \
+  SIZE="$REPLAY_SIZE" \
+  TIMEOUT="$REPLAY_TIMEOUT" \
+  REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION="$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" \
+  OUT_DIR="$target_dir" \
+    bash scripts/trace_single_brpc_datasystem_request.sh \
+    >"${target_dir}.console.log" 2>&1 || return 1
+
+  mkdir -p "$churn_dir"
+  PRIME_UIDS="$churn_uids" \
+    PRIME_REQUESTS="$REPLAY_RETRY_CHURN_REQUESTS" \
+    run_prime_once "$churn_dir" || return 1
+
+  set_kvc_burst_arm "$round_dir" verify-and-arm || return 1
+  cat >"${round_dir}/replay-preparation-${replay_attempt}.txt" <<EOF
+target_user_id=${REPLAY_USER_ID}
+target_prime_requests=1
+churn_requests=${REPLAY_RETRY_CHURN_REQUESTS}
+churn_uids=${churn_uids}
+pressure_key_control=refresh,target-prime,churn,verify-and-arm
+EOF
 }
 
 summarize() {
@@ -1327,6 +1386,8 @@ inference_runtime_ssh_host=${INFERENCE_RUNTIME_SSH_HOST:-auto-node-internal-ip}
 min_root_available_kb=${MIN_ROOT_AVAILABLE_KB}
 kvc_burst_dynamic_arm=${KVC_BURST_DYNAMIC_ARM}
 kvc_burst_pressure_key_count=${KVC_BURST_PRESSURE_KEY_COUNT}
+replay_retry_churn_requests=${REPLAY_RETRY_CHURN_REQUESTS}
+replay_retry_churn_uids=${REPLAY_RETRY_CHURN_UIDS:-derived-from-prime-uids}
 EOF
 
 log "Experiment configuration"
@@ -1384,7 +1445,7 @@ for round in $(seq 1 "$REPEATS"); do
   fi
 
   set +e
-  set_kvc_burst_arm "$round_dir" arm
+  set_kvc_burst_arm "$round_dir" refresh-and-arm
   arm_code="$?"
   set -e
   if [ "$arm_code" -ne 0 ]; then
@@ -1439,31 +1500,19 @@ for round in $(seq 1 "$REPEATS"); do
     if [ "$replay_code" -eq 0 ] || [ "$retry_business_get" -ne 0 ]; then
       break
     fi
-    log "Round ${round}: replay attempt ${replay_attempt} had zero business onboard Gets; reshuffle prime and retry"
+    log "Round ${round}: replay attempt ${replay_attempt} had zero business onboard Gets; prepare target KV eviction and retry"
     mv "${round_dir}/replay" "${round_dir}/replay-attempt-${replay_attempt}"
     mv "${round_dir}/replay.console.log" "${round_dir}/replay-attempt-${replay_attempt}.console.log"
     replay_attempt=$((replay_attempt + 1))
     set_kvc_burst_arm "$round_dir" disarm
-    mkdir -p "${round_dir}/replay-prime-${replay_attempt}"
     set +e
-    # Focus the retry prime on the single replay user so its KV blocks are the
-    # most recently written ones and are still resident when replay runs.
-    PRIME_UIDS="$REPLAY_USER_ID" \
-      PRIME_REQUESTS="$REPLAY_RETRY_PRIME_REQUESTS" \
-      run_prime_once "${round_dir}/replay-prime-${replay_attempt}"
-    shuffle_code="$?"
+    prepare_replay_onboard_retry "$round_dir" "$replay_attempt"
+    prepare_code="$?"
     set -e
-    if [ "$shuffle_code" -ne 0 ]; then
-      replay_code="$shuffle_code"
-      break
-    fi
-    set +e
-    set_kvc_burst_arm "$round_dir" arm
-    arm_code="$?"
-    set -e
-    if [ "$arm_code" -ne 0 ]; then
-      echo "$arm_code" >"${round_dir}/kvc-burst-arm-retry.exit_code"
-      replay_code="$arm_code"
+    if [ "$prepare_code" -ne 0 ]; then
+      echo "$prepare_code" >"${round_dir}/replay-preparation-${replay_attempt}.exit_code"
+      capture_kvc_burst_failure "$round_dir"
+      replay_code="$prepare_code"
       break
     fi
   done

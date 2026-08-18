@@ -7,7 +7,8 @@ import argparse
 from pathlib import Path
 
 
-MARKER = "PAIREC_KVC_BURST_PROXY_V2"
+MARKER = "PAIREC_KVC_BURST_PROXY_V3"
+LEGACY_MARKERS = ("PAIREC_KVC_BURST_PROXY_V2",)
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
@@ -22,8 +23,11 @@ def replace_once(path: Path, old: str, new: str) -> None:
 
 def write_managed(path: Path, content: str) -> None:
     managed = f"/* {MARKER} */\n{content}"
-    if path.exists() and MARKER not in path.read_text():
-        raise RuntimeError(f"refusing to overwrite unmanaged file: {path}")
+    if path.exists():
+        existing = path.read_text()
+        markers = (MARKER, *LEGACY_MARKERS)
+        if not any(marker in existing for marker in markers):
+            raise RuntimeError(f"refusing to overwrite unmanaged file: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(managed)
 
