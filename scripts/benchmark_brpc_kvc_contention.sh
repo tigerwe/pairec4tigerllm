@@ -54,6 +54,8 @@ HISTORY_MAX_LENGTH="${HISTORY_MAX_LENGTH:-20}"
 REPLAY_USER_ID="${REPLAY_USER_ID:-5}"
 REPLAY_SIZE="${REPLAY_SIZE:-1}"
 REPLAY_TIMEOUT="${REPLAY_TIMEOUT:-30}"
+REPLAY_MAX_ATTEMPTS="${REPLAY_MAX_ATTEMPTS:-2}"
+REPLAY_RETRY_PRIME_REQUESTS="${REPLAY_RETRY_PRIME_REQUESTS:-20}"
 RESET_INFERENCE_BEFORE_ROUND="${RESET_INFERENCE_BEFORE_ROUND:-0}"
 RESET_INFERENCE_MODE="${RESET_INFERENCE_MODE:-rollout}"
 INFERENCE_ROLLOUT_TIMEOUT_SECONDS="${INFERENCE_ROLLOUT_TIMEOUT_SECONDS:-600}"
@@ -186,6 +188,10 @@ validate() {
     0|1) ;;
     *) die "KVC_DSBENCH_SUSTAINED must be 0 or 1" ;;
   esac
+  [[ "$REPLAY_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] \
+    || die "REPLAY_MAX_ATTEMPTS must be a positive integer"
+  [[ "$REPLAY_RETRY_PRIME_REQUESTS" =~ ^[1-9][0-9]*$ ]] \
+    || die "REPLAY_RETRY_PRIME_REQUESTS must be a positive integer"
   if mode_has_brpc && [ "$BRPC_LOAD_QPS" -eq 0 ] && [ "$BRPC_LOAD_REUSE_CONNECTIONS" != "1" ]; then
 		die "unlimited BRPC load requires BRPC_LOAD_REUSE_CONNECTIONS=1 to avoid ephemeral-port exhaustion"
   fi
@@ -759,6 +765,34 @@ run_prime() {
     fi
   done
   return 1
+}
+
+# Returns 0 when the failed replay provably had zero business onboard Gets,
+# meaning the round had no business Get to pressure and must be retried rather
+# than scored as a KVC burst failure.
+replay_zero_business_get() {
+  local round_dir="$1"
+  [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ] || return 1
+  local trt_log="${round_dir}/replay/brpc_trtllm.log"
+  [ -f "$trt_log" ] || return 1
+  python3 - "$trt_log" <<'PY'
+import json
+import sys
+
+last = None
+with open(sys.argv[1], errors="replace") as handle:
+    for line in handle:
+        if '"event":"datasystem_request_complete"' not in line:
+            continue
+        pos = line.find("{")
+        try:
+            event = json.loads(line[pos:])
+        except json.JSONDecodeError:
+            continue
+        if event.get("event") == "datasystem_request_complete":
+            last = event
+sys.exit(0 if last is not None and last.get("get_count", 0) == 0 else 1)
+PY
 }
 
 run_replay() {
@@ -1385,13 +1419,52 @@ for round in $(seq 1 "$REPEATS"); do
     die "KVC pressure exited before replay"
   fi
 
+  replay_attempt=1
+  while true; do
+    set +e
+    run_replay "$round_dir"
+    replay_code="$?"
+    set -e
+    if [ "$replay_code" -ne 0 ] && [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ]; then
+      # Preserve the armed control state and Proxy skip reason before disarm.
+      capture_kvc_burst_failure "$round_dir"
+    fi
+    retry_business_get=1
+    if [ "$replay_code" -ne 0 ] && [ "$replay_attempt" -lt "$REPLAY_MAX_ATTEMPTS" ]; then
+      set +e
+      replay_zero_business_get "$round_dir"
+      retry_business_get=$?
+      set -e
+    fi
+    if [ "$replay_code" -eq 0 ] || [ "$retry_business_get" -ne 0 ]; then
+      break
+    fi
+    log "Round ${round}: replay attempt ${replay_attempt} had zero business onboard Gets; reshuffle prime and retry"
+    mv "${round_dir}/replay" "${round_dir}/replay-attempt-${replay_attempt}"
+    mv "${round_dir}/replay.console.log" "${round_dir}/replay-attempt-${replay_attempt}.console.log"
+    replay_attempt=$((replay_attempt + 1))
+    set_kvc_burst_arm "$round_dir" disarm
+    mkdir -p "${round_dir}/replay-prime-${replay_attempt}"
+    set +e
+    PRIME_REQUESTS="$REPLAY_RETRY_PRIME_REQUESTS" run_prime "${round_dir}/replay-prime-${replay_attempt}"
+    shuffle_code="$?"
+    set -e
+    if [ "$shuffle_code" -ne 0 ]; then
+      replay_code="$shuffle_code"
+      break
+    fi
+    set +e
+    set_kvc_burst_arm "$round_dir" arm
+    arm_code="$?"
+    set -e
+    if [ "$arm_code" -ne 0 ]; then
+      echo "$arm_code" >"${round_dir}/kvc-burst-arm-retry.exit_code"
+      replay_code="$arm_code"
+      break
+    fi
+  done
+  echo "$replay_attempt" >"${round_dir}/replay.attempts"
   set +e
-  run_replay "$round_dir"
-  replay_code="$?"
-  if [ "$replay_code" -ne 0 ] && [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ]; then
-    # Preserve the armed control state and Proxy skip reason before disarm.
-    capture_kvc_burst_failure "$round_dir"
-  fi
   set_kvc_burst_arm "$round_dir" disarm
   disarm_code="$?"
   set -e

@@ -217,6 +217,46 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn("collect_datasystem_worker_metrics.sh snapshot", text)
         self.assertIn("datasystem-worker-metrics.error", text)
 
+    def test_contention_replay_retry_wiring(self):
+        text = CONTENTION.read_text()
+        for token in (
+            'REPLAY_MAX_ATTEMPTS="${REPLAY_MAX_ATTEMPTS:-2}"',
+            'REPLAY_RETRY_PRIME_REQUESTS="${REPLAY_RETRY_PRIME_REQUESTS:-20}"',
+            'die "REPLAY_MAX_ATTEMPTS must be a positive integer"',
+            "replay_zero_business_get \"$round_dir\"",
+            "zero business onboard Gets; reshuffle prime and retry",
+            '"${round_dir}/replay-attempt-${replay_attempt}"',
+            '"${round_dir}/replay.attempts"',
+            'PRIME_REQUESTS="$REPLAY_RETRY_PRIME_REQUESTS" run_prime',
+        ):
+            self.assertIn(token, text)
+
+    def test_replay_zero_business_get_detector(self):
+        text = CONTENTION.read_text()
+        blocks = re.findall(r"python3 - \"\$trt_log\" <<'PY'\n(.*?)\nPY", text, re.DOTALL)
+        self.assertEqual(1, len(blocks))
+        with tempfile.TemporaryDirectory() as tmp:
+            log = pathlib.Path(tmp) / "brpc_trtllm.log"
+            # Real TRT logs use compact JSON without spaces after colons.
+            def compact(event):
+                return json.dumps(event, separators=(",", ":"))
+
+            event = {"event": "datasystem_request_complete", "request_id": "r1",
+                     "get_count": 0, "set_count": 3}
+            log.write_text('noise ' + compact(event) + '\n')
+            result = subprocess.run([sys.executable, "-c", blocks[0], str(log)],
+                                    capture_output=True)
+            self.assertEqual(0, result.returncode)
+            event["get_count"] = 2
+            log.write_text(compact(event) + '\n')
+            result = subprocess.run([sys.executable, "-c", blocks[0], str(log)],
+                                    capture_output=True)
+            self.assertEqual(1, result.returncode)
+            log.write_text("no events here\n")
+            result = subprocess.run([sys.executable, "-c", blocks[0], str(log)],
+                                    capture_output=True)
+            self.assertEqual(1, result.returncode)
+
     def test_combined_script_sustained_wiring(self):
         text = COMBINED.read_text()
         for token in (
