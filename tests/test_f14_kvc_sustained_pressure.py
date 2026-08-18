@@ -136,6 +136,11 @@ class DataSystemWorkerMetricsTest(unittest.TestCase):
 
 
 class SustainedPressureStructureTest(unittest.TestCase):
+    def test_apply_script_requires_v3_managed_proxy(self):
+        script = (ROOT / "scripts/apply_trtllm_kvc_burst_proxy_patch.sh").read_text()
+        self.assertIn("grep -q PAIREC_KVC_BURST_PROXY_V3", script)
+        self.assertNotIn("grep -q PAIREC_KVC_BURST_PROXY_V2", script)
+
     def test_shared_header_helpers(self):
         text = SHARED_H.read_text()
         self.assertIn("enum class SustainedStop", text)
