@@ -259,15 +259,20 @@ class SustainedPressureStructureTest(unittest.TestCase):
             'PRIME_UIDS="$churn_uids"',
             'PRIME_REQUESTS="$REPLAY_RETRY_CHURN_REQUESTS"',
             'set_kvc_burst_arm "$round_dir" verify-and-arm',
-            'pressure_key_control=refresh,target-prime,churn,verify-and-arm',
+            'pressure_key_control=target-prime,churn,refresh,verify-and-arm',
         ):
             self.assertIn(token, text)
 
+        # The repair must prime the target, churn it out of HBM, then rebuild
+        # pressure keys as the LAST write (churn evicts synthetic keys, so
+        # refreshing before churn left verify-and-arm with "Key not found").
         target = text.index('OUT_DIR="$target_dir"')
         churn = text.index('run_prime_once "$churn_dir"')
+        refresh = text.index('set_kvc_burst_arm "$round_dir" refresh || return 1')
         verify = text.index('set_kvc_burst_arm "$round_dir" verify-and-arm')
         self.assertLess(target, churn)
-        self.assertLess(churn, verify)
+        self.assertLess(churn, refresh)
+        self.assertLess(refresh, verify)
 
     def test_replay_zero_business_get_detector(self):
         text = CONTENTION.read_text()

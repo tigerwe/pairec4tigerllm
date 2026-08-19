@@ -840,11 +840,6 @@ prepare_replay_onboard_retry() {
   churn_uids="$(replay_retry_churn_uids)" \
     || { echo "ERROR: replay retry requires at least one churn UID distinct from REPLAY_USER_ID" >&2; return 1; }
 
-  # Refresh synthetic keys before touching the target KV. The final control
-  # action is verification-only, so no pressure-key Set can evict the target
-  # business blocks immediately before replay.
-  set_kvc_burst_arm "$round_dir" refresh || return 1
-
   mkdir -p "$target_dir"
   KVC_BURST_REQUIRE_COMPLETE=0 \
   NAMESPACE="$NAMESPACE" \
@@ -864,13 +859,21 @@ prepare_replay_onboard_retry() {
     PRIME_REQUESTS="$REPLAY_RETRY_CHURN_REQUESTS" \
     run_prime_once "$churn_dir" || return 1
 
+  # Rebuild synthetic pressure keys only AFTER churn. Churn's offloads evict
+  # synthetic keys from DataSystem, so refreshing before churn left them
+  # missing at verify time (observed: verify-and-arm got "Key not found" on
+  # PairecKvcBurstV2_g2_pressure_0). Refresh is the last write before the
+  # read-only verify+arm, so pressure keys are present at replay without a
+  # pressure-key Set racing the target business blocks.
+  set_kvc_burst_arm "$round_dir" refresh || return 1
+
   set_kvc_burst_arm "$round_dir" verify-and-arm || return 1
   cat >"${round_dir}/replay-preparation-${replay_attempt}.txt" <<EOF
 target_user_id=${REPLAY_USER_ID}
 target_prime_requests=1
 churn_requests=${REPLAY_RETRY_CHURN_REQUESTS}
 churn_uids=${churn_uids}
-pressure_key_control=refresh,target-prime,churn,verify-and-arm
+pressure_key_control=target-prime,churn,refresh,verify-and-arm
 EOF
 }
 
