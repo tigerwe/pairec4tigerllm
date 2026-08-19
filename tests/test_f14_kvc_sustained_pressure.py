@@ -295,6 +295,26 @@ class SustainedPressureStructureTest(unittest.TestCase):
                                     capture_output=True)
             self.assertEqual(1, result.returncode)
 
+    def test_zero_onboard_retry_not_gated_on_replay_exit_code(self):
+        text = CONTENTION.read_text()
+        # The zero-onboard detector must run even when the replay exited zero
+        # (business completed but no DataSystem onboard Get). The guard must
+        # key on KVC requirement + attempt budget, not on replay failure, and
+        # the break must not skip a successful replay with zero onboard Gets.
+        self.assertIn(
+            'if [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ] && [ "$replay_attempt" -lt "$REPLAY_MAX_ATTEMPTS" ]; then',
+            text,
+        )
+        self.assertIn('if [ "$retry_business_get" -ne 0 ]; then', text)
+        self.assertNotIn(
+            'if [ "$replay_code" -eq 0 ] || [ "$retry_business_get" -ne 0 ]; then',
+            text,
+        )
+        self.assertNotIn(
+            '[ "$replay_code" -ne 0 ] && [ "$replay_attempt" -lt "$REPLAY_MAX_ATTEMPTS" ]; then',
+            text,
+        )
+
     def test_combined_script_sustained_wiring(self):
         text = COMBINED.read_text()
         for token in (

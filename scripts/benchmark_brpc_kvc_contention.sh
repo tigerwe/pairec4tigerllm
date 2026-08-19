@@ -1491,13 +1491,20 @@ for round in $(seq 1 "$REPEATS"); do
       capture_kvc_burst_failure "$round_dir"
     fi
     retry_business_get=1
-    if [ "$replay_code" -ne 0 ] && [ "$replay_attempt" -lt "$REPLAY_MAX_ATTEMPTS" ]; then
+    # A business replay that completed with zero DataSystem onboard Gets
+    # (get_count==0) is a cache-preparation gap, not a request failure: the
+    # target KV block was still resident in local HBM, so the replay never
+    # exercised a real DataSystem business Get and cannot be compared against
+    # the baseline. Detect it independently of the replay exit code, then
+    # repair with the deterministic target-prime/churn/verify-and-arm sequence
+    # and re-issue the replay.
+    if [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ] && [ "$replay_attempt" -lt "$REPLAY_MAX_ATTEMPTS" ]; then
       set +e
       replay_zero_business_get "$round_dir"
       retry_business_get=$?
       set -e
     fi
-    if [ "$replay_code" -eq 0 ] || [ "$retry_business_get" -ne 0 ]; then
+    if [ "$retry_business_get" -ne 0 ]; then
       break
     fi
     log "Round ${round}: replay attempt ${replay_attempt} had zero business onboard Gets; prepare target KV eviction and retry"
