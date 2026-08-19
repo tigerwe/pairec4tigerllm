@@ -343,6 +343,15 @@ class SustainedPressureStructureTest(unittest.TestCase):
         ):
             self.assertIn(token, text)
 
+    def test_combined_script_prime_requests_overridable(self):
+        # PRIME_REQUESTS must be tunable from the environment so a low value
+        # (e.g. 1) can deterministically force a zero-onboard replay for
+        # live-verifying the replay retry, rather than being hardcoded to 195.
+        text = COMBINED.read_text()
+        self.assertIn("PRIME_REQUESTS=${PRIME_REQUESTS:-195}", text)
+        self.assertIn('PRIME_REQUESTS="$PRIME_REQUESTS" \\', text)
+        self.assertNotIn("PRIME_REQUESTS=195 \\", text)
+
     def test_shell_syntax(self):
         for script in (DEPLOY, CONTENTION, COMBINED, COLLECTOR):
             subprocess.run(["bash", "-n", str(script)], check=True, capture_output=True)
