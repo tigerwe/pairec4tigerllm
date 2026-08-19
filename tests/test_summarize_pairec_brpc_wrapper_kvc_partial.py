@@ -46,6 +46,32 @@ class PartialKvcSummaryTest(unittest.TestCase):
             self.assertEqual(result["phases"]["combined"]["invalid_rounds"][0]["classification"],
                              "zero_onboard")
 
+    def test_reads_alternate_native_log_and_embedded_summary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            for phase in ("baseline", "combined"):
+                replay = root / phase / "contention" / "round-1" / "replay"
+                replay.mkdir(parents=True)
+                native = {
+                    "event": "datasystem_request_complete", "get_count": 2,
+                    "get_us": 8000, "set_count": 3, "set_us": 20000,
+                }
+                if phase == "baseline":
+                    (replay / "brpc_inference.log").write_text(json.dumps(native) + "\n")
+                else:
+                    (replay / "summary.json").write_text(json.dumps({
+                        "datasystem_request_complete": native,
+                    }))
+                (replay / "kvc_burst.log").write_text(json.dumps({
+                    "event": "kvc_burst_complete", "valid": True,
+                    "business_get_ms": 8, "pressure_get_p99_ms": 80,
+                }) + "\n")
+            output = root / "summary.json"
+            subprocess.run(["python3", str(SCRIPT), str(root), "--output", str(output)], check=True)
+            result = json.loads(output.read_text())
+            self.assertEqual(result["phases"]["baseline"]["valid_rounds"], 1)
+            self.assertEqual(result["phases"]["combined"]["valid_rounds"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -37,16 +37,33 @@ def read_json_lines(path: pathlib.Path, event_name: str) -> list[dict[str, Any]]
     return events
 
 
-def read_native(path: pathlib.Path) -> dict[str, Any] | None:
-    if not path.is_file():
-        return None
-    for line in reversed(path.read_text(errors="replace").splitlines()):
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
+def read_native(replay: pathlib.Path) -> dict[str, Any] | None:
+    candidates = [
+        replay / "brpc_trtllm.log",
+        replay / "brpc_inference.log",
+        replay / "brpc-inference.log",
+    ]
+    candidates.extend(replay.rglob("brpc_trtllm.log"))
+    candidates.extend(replay.rglob("brpc_inference.log"))
+    for path in dict.fromkeys(candidates):
+        if not path.is_file():
             continue
-        if value.get("event") == "datasystem_request_complete":
-            return value
+        for line in reversed(path.read_text(errors="replace").splitlines()):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if value.get("event") == "datasystem_request_complete":
+                return value
+    summary = replay / "summary.json"
+    if summary.is_file():
+        try:
+            value = json.loads(summary.read_text())
+        except json.JSONDecodeError:
+            value = {}
+        embedded = value.get("datasystem_request_complete")
+        if isinstance(embedded, dict):
+            return embedded
     return None
 
 
@@ -66,7 +83,7 @@ def scan_phase(phase_dir: pathlib.Path, required_gets: int) -> dict[str, Any]:
     rows = []
     for round_dir in sorted(phase_dir.glob("round-*"), key=lambda p: int(p.name.split("-")[-1])):
         replay = round_dir / "replay"
-        native = read_native(replay / "brpc_trtllm.log")
+        native = read_native(replay)
         bursts = read_json_lines(replay / "kvc_burst.log", "kvc_burst_complete")
         burst = bursts[-1] if bursts else None
         row: dict[str, Any] = {
