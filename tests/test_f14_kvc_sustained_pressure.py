@@ -315,6 +315,18 @@ class SustainedPressureStructureTest(unittest.TestCase):
             text,
         )
 
+    def test_free_space_gate_targets_output_filesystem(self):
+        text = CONTENTION.read_text()
+        # The free-space gate must check the filesystem that actually holds
+        # OUT_DIR (where the run writes), not the hardcoded root '/'. On nodes
+        # where /tmp is a tmpfs or separate mount, gating '/' at 5 GiB
+        # false-fails even though the run never writes there.
+        self.assertIn('check_output_free_space() {', text)
+        self.assertIn('target_dir="${OUT_DIR:-/}"', text)
+        self.assertIn('available_kb="$(df -Pk "$target_dir" | awk', text)
+        self.assertIn('fs_mount="$(df -Pk "$target_dir" | awk', text)
+        self.assertNotIn('df -Pk / |', text)
+
     def test_combined_script_sustained_wiring(self):
         text = COMBINED.read_text()
         for token in (

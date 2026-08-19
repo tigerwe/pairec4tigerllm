@@ -596,12 +596,16 @@ reset_inference_pod_recreate() {
   return 1
 }
 
-check_root_free_space() {
+check_output_free_space() {
   [ "$MIN_ROOT_AVAILABLE_KB" -gt 0 ] || return 0
-  local available_kb
-  available_kb="$(df -Pk / | awk 'NR == 2 { print $4 + 0 }')"
+  local target_dir available_kb fs_mount
+  # Gate the filesystem that actually holds OUT_DIR (where this run writes),
+  # not the root filesystem '/', which may be a different mount (e.g. /tmp tmpfs).
+  target_dir="${OUT_DIR:-/}"
+  available_kb="$(df -Pk "$target_dir" | awk 'NR == 2 { print $4 + 0 }')"
+  fs_mount="$(df -Pk "$target_dir" | awk 'NR == 2 { print $6 }')"
   if [ "$available_kb" -lt "$MIN_ROOT_AVAILABLE_KB" ]; then
-    echo "ERROR: root filesystem has ${available_kb}KiB available; require at least ${MIN_ROOT_AVAILABLE_KB}KiB" >&2
+    echo "ERROR: filesystem '${fs_mount}' (holding OUT_DIR=${target_dir}) has ${available_kb}KiB available; require at least ${MIN_ROOT_AVAILABLE_KB}KiB" >&2
     return 1
   fi
 }
@@ -1400,9 +1404,9 @@ for round in $(seq 1 "$REPEATS"); do
   mkdir -p "$round_dir"
   log "Round ${round}/${REPEATS}: mode=${MODE}"
 
-  if ! check_root_free_space; then
+  if ! check_output_free_space; then
     overall_code=1
-    echo "ERROR: round ${round} root filesystem free-space gate failed" >&2
+    echo "ERROR: round ${round} output filesystem free-space gate failed" >&2
     break
   fi
 
