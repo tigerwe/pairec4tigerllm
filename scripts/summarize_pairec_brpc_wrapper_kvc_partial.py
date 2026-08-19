@@ -37,6 +37,25 @@ def read_json_lines(path: pathlib.Path, event_name: str) -> list[dict[str, Any]]
     return events
 
 
+def parse_event_line(line: str, event_name: str) -> dict[str, Any] | None:
+    candidates = [line]
+    start = line.find("{")
+    if start >= 0:
+        candidates.append(line[start:])
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                value, _ = decoder.raw_decode(candidate)
+            except json.JSONDecodeError:
+                continue
+        if value.get("event") == event_name:
+            return value
+    return None
+
+
 def read_native(replay: pathlib.Path) -> dict[str, Any] | None:
     candidates = [
         replay / "brpc_trtllm.log",
@@ -49,11 +68,8 @@ def read_native(replay: pathlib.Path) -> dict[str, Any] | None:
         if not path.is_file():
             continue
         for line in reversed(path.read_text(errors="replace").splitlines()):
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if value.get("event") == "datasystem_request_complete":
+            value = parse_event_line(line, "datasystem_request_complete")
+            if value is not None:
                 return value
     summary = replay / "summary.json"
     if summary.is_file():

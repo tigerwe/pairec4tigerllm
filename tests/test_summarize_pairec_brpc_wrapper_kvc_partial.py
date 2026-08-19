@@ -72,6 +72,26 @@ class PartialKvcSummaryTest(unittest.TestCase):
             self.assertEqual(result["phases"]["baseline"]["valid_rounds"], 1)
             self.assertEqual(result["phases"]["combined"]["valid_rounds"], 1)
 
+    def test_reads_prefixed_tensor_rt_llm_event(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            replay = root / "baseline" / "contention" / "round-1" / "replay"
+            replay.mkdir(parents=True)
+            native = json.dumps({
+                "event": "datasystem_request_complete", "get_count": 0,
+                "get_us": 0, "set_count": 3, "set_us": 20000,
+            })
+            (replay / "brpc_trtllm.log").write_text(
+                "[TensorRT-LLM][INFO] " + native + "\n")
+            output = root / "summary.json"
+            subprocess.run(["python3", str(SCRIPT), str(root), "--output", str(output)],
+                           check=True, capture_output=True, text=True)
+            result = json.loads(output.read_text())
+            self.assertEqual(result["phases"]["baseline"]["valid_rounds"], 0)
+            self.assertEqual(
+                result["phases"]["baseline"]["invalid_rounds"][0]["classification"],
+                "zero_onboard")
+
 
 if __name__ == "__main__":
     unittest.main()
