@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>PaiRec4TigerLLM 架构图 2026-08-18</title>
+<style>
+  body { margin:0; background:#f2f5f9; font-family:"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif; }
+  svg { display:block; }
+  text { font-family:"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif; }
+  .node { fill:#ffffff; stroke-width:2.2; filter:url(#shadow); }
+  .ntitle { font-size:16px; font-weight:700; fill:#17222e; }
+  .nsub { font-size:12px; fill:#5c6d7f; }
+  .ntiny { font-size:11px; fill:#7d8da0; }
+  .cluster { fill-opacity:0.55; stroke-width:2; stroke-dasharray:9 6; }
+  .clabel { font-size:15px; font-weight:700; fill:#41505f; }
+  .elabel { font-size:12.5px; fill:#3c4c5e; font-weight:600; }
+  .etiny { font-size:11px; fill:#6a7b8d; }
+  .chip { fill:#f4f8fd; stroke:#9db8d8; stroke-width:1.4; }
+  .panel { fill:#ffffff; stroke:#c9d6e4; stroke-width:2; }
+  .ptitle { font-size:18px; font-weight:700; fill:#17222e; }
+</style>
+</head>
+<body>
+<svg width="1920" height="1560" viewBox="0 0 1920 1560" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+    <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#8aa0b8" flood-opacity="0.35"/>
+  </filter>
+  <marker id="ab" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#2563eb"/></marker>
+  <marker id="ao" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#ea580c"/></marker>
+  <marker id="ap" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#7c3aed"/></marker>
+  <marker id="ag" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#059669"/></marker>
+  <marker id="apb" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#7c3aed"/></marker>
+</defs>
+
+<!-- ===================== 标题 ===================== -->
+<text x="40" y="52" style="font-size:30px;font-weight:800;fill:#17222e;">PaiRec4TigerLLM 架构图</text>
+<text x="40" y="78" style="font-size:14px;fill:#5c6d7f;">分支 pairec-brpc-observability · 2026-08-18 · 生成式推荐（Qwen3 + TRT-LLM + DataSystem KVC）与两级压力 Wrapper</text>
+
+<!-- 图例 -->
+<g transform="translate(40,96)">
+  <line x1="0" y1="0" x2="34" y2="0" stroke="#2563eb" stroke-width="3"/><text x="42" y="4" class="etiny">业务路径</text>
+  <line x1="130" y1="0" x2="164" y2="0" stroke="#ea580c" stroke-width="3" stroke-dasharray="7 4"/><text x="172" y="4" class="etiny">压力路径</text>
+  <line x1="260" y1="0" x2="294" y2="0" stroke="#7c3aed" stroke-width="3" stroke-dasharray="2 4"/><text x="302" y="4" class="etiny">控制面</text>
+  <line x1="380" y1="0" x2="414" y2="0" stroke="#059669" stroke-width="3"/><text x="422" y="4" class="etiny">KV 数据面（DataSystem）</text>
+</g>
+
+<!-- ===================== 集群分区 ===================== -->
+<rect x="200" y="120" width="790" height="570" rx="14" class="cluster" fill="#e8f0fc" stroke="#8fb4e8"/>
+<text x="222" y="148" class="clabel">K8s master 节点（141.61.91.189）</text>
+
+<rect x="1030" y="120" width="850" height="570" rx="14" class="cluster" fill="#fdf0e3" stroke="#eab882"/>
+<text x="1052" y="148" class="clabel">worker1 节点（141.61.91.188 · L40S GPU）</text>
+
+<!-- ===================== 客户端 ===================== -->
+<g>
+  <rect x="36" y="225" width="136" height="90" rx="12" class="node" stroke="#64748b"/>
+  <text x="104" y="258" text-anchor="middle" class="ntitle">客户端</text>
+  <text x="104" y="278" text-anchor="middle" class="nsub">压测 replay</text>
+  <text x="104" y="296" text-anchor="middle" class="ntiny">E2E ≈157ms</text>
+</g>
+
+<!-- ===================== PaiRec Go ===================== -->
+<g>
+  <rect x="230" y="180" width="480" height="170" rx="12" class="node" stroke="#2563eb"/>
+  <text x="250" y="206" class="ntitle">PaiRec Go 推荐服务</text>
+  <text x="250" y="224" class="ntiny">pairec-brpc-observed-wrapper · ClusterIP :18080 · F18 全链路 trace</text>
+  <!-- pipeline chips -->
+  <rect x="246" y="238" width="132" height="44" rx="8" class="chip"/>
+  <text x="312" y="258" text-anchor="middle" class="elabel">并行召回</text>
+  <text x="312" y="276" text-anchor="middle" class="etiny">向量 ∥ 生成式</text>
+  <line x1="378" y1="260" x2="398" y2="260" stroke="#2563eb" stroke-width="2" marker-end="url(#ab)"/>
+  <rect x="400" y="238" width="110" height="44" rx="8" class="chip"/>
+  <text x="455" y="258" text-anchor="middle" class="elabel">DeepFM</text>
+  <text x="455" y="276" text-anchor="middle" class="etiny">精排 BRPC</text>
+  <line x1="510" y1="260" x2="530" y2="260" stroke="#2563eb" stroke-width="2" marker-end="url(#ab)"/>
+  <rect x="532" y="238" width="110" height="44" rx="8" class="chip"/>
+  <text x="587" y="258" text-anchor="middle" class="elabel">F20 重排</text>
+  <text x="587" y="276" text-anchor="middle" class="etiny">来源配额</text>
+  <!-- burst coordinator chip -->
+  <rect x="246" y="296" width="448" height="44" rx="8" fill="#fff3e6" stroke="#ea580c" stroke-width="1.8"/>
+  <text x="262" y="316" class="elabel" fill="#c2410c">BRPCBurstCoordinator（Go，进程内突发引擎）</text>
+  <text x="262" y="334" class="etiny">pool ≤10000 session · 每请求选 1000 · 1×Recommend + 999×Health</text>
+</g>
+
+<!-- Milvus / DeepFM 服务（PaiRec 正下方，垂直连线） -->
+<g>
+  <rect x="270" y="380" width="220" height="60" rx="10" class="node" stroke="#2563eb"/>
+  <text x="380" y="408" text-anchor="middle" class="elabel">Milvus 向量召回</text>
+  <text x="380" y="428" text-anchor="middle" class="ntiny">BRPC · ≈10ms</text>
+</g>
+<g>
+  <rect x="510" y="380" width="200" height="60" rx="10" class="node" stroke="#2563eb"/>
+  <text x="610" y="408" text-anchor="middle" class="elabel">DeepFM 精排服务</text>
+  <text x="610" y="428" text-anchor="middle" class="ntiny">BRPC · ≈9ms</text>
+</g>
+
+<!-- 压测控制面 -->
+<g>
+  <rect x="230" y="480" width="330" height="100" rx="12" class="node" stroke="#7c3aed"/>
+  <text x="250" y="506" class="ntitle" font-size="15">压测控制面（F14 脚本链）</text>
+  <text x="250" y="526" class="ntiny">matrix → combined 验收 → contention 生命周期</text>
+  <text x="250" y="544" class="ntiny">reset → disarm → prime:195 → refresh-and-arm → replay</text>
+  <text x="250" y="562" class="ntiny" fill="#7c3aed">scripts/benchmark_pairec_brpc_wrapper_kvc_matrix.sh</text>
+</g>
+
+<!-- DataSystem 25g master（圆柱，数据面枢纽） -->
+<g>
+  <path d="M690,500 a95,18 0 0 1 190,0 v64 a95,18 0 0 1 -190,0 z" fill="#e7f6ef" stroke="#059669" stroke-width="2.2"/>
+  <ellipse cx="785" cy="500" rx="95" ry="18" fill="#d3efe2" stroke="#059669" stroke-width="2.2"/>
+  <text x="785" y="534" text-anchor="middle" class="elabel">DataSystem worker</text>
+  <text x="785" y="552" text-anchor="middle" class="ntiny">datasystem-25g-master · :18482（25G）</text>
+</g>
+
+<!-- datasystem-pool worker + etcd（DaemonSet，master 也有实例） -->
+<g>
+  <path d="M250,610 a80,14 0 0 1 160,0 v40 a80,14 0 0 1 -160,0 z" fill="#e7f6ef" stroke="#059669" stroke-width="2"/>
+  <ellipse cx="330" cy="610" rx="80" ry="14" fill="#d3efe2" stroke="#059669" stroke-width="2"/>
+  <text x="330" y="640" text-anchor="middle" class="elabel" font-size="13">datasystem-pool worker</text>
+  <text x="330" y="656" text-anchor="middle" class="ntiny">DaemonSet · :18481</text>
+</g>
+<g>
+  <rect x="430" y="610" width="240" height="52" rx="10" class="node" stroke="#94a3b8"/>
+  <text x="550" y="632" text-anchor="middle" class="elabel" font-size="13">datasystem-pool etcd</text>
+  <text x="550" y="650" text-anchor="middle" class="ntiny">元数据 :12379</text>
+</g>
+
+<!-- ===================== worker1 内容 ===================== -->
+<!-- C++ wrapper pod -->
+<g>
+  <rect x="1060" y="170" width="300" height="120" rx="12" class="node" stroke="#2563eb"/>
+  <text x="1080" y="192" class="ntitle" font-size="15">C++ brpc_burst_wrapper</text>
+  <text x="1080" y="210" class="ntiny">Pod brpc-burst-wrapper · hostNetwork :18103</text>
+  <text x="1080" y="230" class="nsub">Recommend → 转发 :18100（5s · 0重试）</text>
+  <text x="1080" y="250" class="nsub">Health → <tspan fill="#c2410c" font-weight="700">本地终结，不转发</tspan></text>
+  <text x="1080" y="270" class="ntiny">requests cpu=8 · 无 CPU limit（防 CFS 污染）</text>
+</g>
+
+<!-- inference pod -->
+<rect x="1400" y="160" width="460" height="420" rx="14" class="cluster" fill="#eef2f7" stroke="#94a3b8"/>
+<text x="1420" y="184" class="clabel" font-size="13">Pod inference-brpc-trtllm</text>
+
+<g>
+  <rect x="1420" y="196" width="420" height="140" rx="10" class="node" stroke="#059669"/>
+  <text x="1440" y="222" class="ntitle" font-size="15">brpc-inference 容器</text>
+  <text x="1440" y="242" class="nsub">brpc_inference_server + libtensorrt_llm.so</text>
+  <text x="1440" y="260" class="ntiny">Qwen3-0.6B · ctx224 · KVC：HBM LRU → DataSystem → Prefill</text>
+  <text x="1440" y="280" class="ntiny" fill="#0e9f6e">KVC Proxy 补丁：beginBusinessGet / finishBusinessGet</text>
+  <text x="1440" y="298" class="ntiny" fill="#0e9f6e">F19 归因：clientId → datasystem_request_complete</text>
+  <text x="1440" y="320" class="ntiny">单 Get / MGet / parallel Get 三条路径埋点</text>
+</g>
+
+<!-- 共享控制块 -->
+<g>
+  <rect x="1500" y="352" width="270" height="56" rx="10" class="node" stroke="#7c3aed"/>
+  <text x="1635" y="376" text-anchor="middle" class="elabel" fill="#6d28d9">共享控制块 tmpfs</text>
+  <text x="1635" y="394" text-anchor="middle" class="ntiny">SharedControl ABI v2 · mmap + futex</text>
+</g>
+
+<g>
+  <rect x="1420" y="428" width="420" height="120" rx="10" class="node" stroke="#ea580c"/>
+  <text x="1440" y="452" class="ntitle" font-size="15">kvc-burst-wrapper sidecar</text>
+  <text x="1440" y="472" class="nsub">99 PressureWorker 线程 × exclusive KVClient</text>
+  <text x="1440" y="490" class="ntiny">4 keys × 3.5MiB 热点复用 ≈346MiB 在飞 · NONE_L2_CACHE_EVICT</text>
+  <text x="1440" y="508" class="ntiny">sustained：循环 Get 至 business_done（保护 1000ms / 100 次）</text>
+  <text x="1440" y="526" class="ntiny">arm / disarm / refresh-and-arm 控制命令</text>
+</g>
+
+<!-- ===================== 连线（严格正交、零交叉） ===================== -->
+<!-- client -> PaiRec -->
+<line x1="176" y1="270" x2="226" y2="270" stroke="#2563eb" stroke-width="3" marker-end="url(#ab)"/>
+<text x="120" y="210" class="etiny" fill="#1d4ed8">HTTP /api/recommend</text>
+
+<!-- PaiRec -> Milvus / DeepFM（垂直向下） -->
+<line x1="380" y1="350" x2="380" y2="376" stroke="#2563eb" stroke-width="2.5" marker-end="url(#ab)"/>
+<line x1="610" y1="350" x2="610" y2="376" stroke="#2563eb" stroke-width="2.5" marker-end="url(#ab)"/>
+
+<!-- PaiRec burst -> C++ wrapper：业务 y=230 / 压力 y=270，两条纯水平通道 -->
+<line x1="710" y1="230" x2="1056" y2="230" stroke="#2563eb" stroke-width="3.2" marker-end="url(#ab)"/>
+<text x="850" y="218" class="elabel" fill="#1d4ed8">1× Recommend（业务）</text>
+<line x1="710" y1="270" x2="1056" y2="270" stroke="#ea580c" stroke-width="3" stroke-dasharray="8 5" marker-end="url(#ao)"/>
+<text x="850" y="290" class="elabel" fill="#c2410c">999× Health · 100KiB（压力）</text>
+
+<!-- wrapper -> TRT（仅 Recommend） -->
+<line x1="1360" y1="245" x2="1416" y2="245" stroke="#2563eb" stroke-width="3.2" marker-end="url(#ab)"/>
+
+<!-- TRT -> DataSystem 25g（业务 KVC）：左侧出 → 集群间隙下行 → 顶部进入 DS -->
+<path d="M1420,310 L1000,310 L1000,440 L860,440 L860,478" fill="none" stroke="#059669" stroke-width="3.2" marker-end="url(#ag)"/>
+<text x="720" y="425" class="elabel" fill="#047857">业务 KVC Set/Get（精确 3 Set + 2 Get）</text>
+
+<!-- sidecar -> DataSystem 25g（压力）：左侧出 → 低位通道 → 右侧进入 DS -->
+<path d="M1420,500 L970,500 L970,572 L885,572" fill="none" stroke="#ea580c" stroke-width="3" stroke-dasharray="8 5" marker-end="url(#ao)"/>
+<text x="1120" y="480" class="elabel" fill="#c2410c">99 lane 压力 Get（sustained 循环）</text>
+
+<!-- proxy <-> tmpfs <-> sidecar -->
+<line x1="1635" y1="336" x2="1635" y2="348" stroke="#7c3aed" stroke-width="2.6" marker-end="url(#ap)"/>
+<line x1="1635" y1="408" x2="1635" y2="424" stroke="#7c3aed" stroke-width="2.6" marker-end="url(#ap)"/>
+<line x1="1662" y1="424" x2="1662" y2="408" stroke="#7c3aed" stroke-width="2.6" marker-end="url(#apb)"/>
+
+<!-- 控制面 -> DataSystem（worker 指标快照） -->
+<line x1="560" y1="540" x2="685" y2="540" stroke="#7c3aed" stroke-width="2.4" stroke-dasharray="3 5" marker-end="url(#ap)"/>
+<text x="565" y="522" class="etiny" fill="#6d28d9">DS worker 指标快照</text>
+
+<!-- 控制面 -> worker1（顶部通道：deploy overlay / reset / 控制命令） -->
+<path d="M230,500 L210,500 L210,155 L1630,155 L1630,162" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-dasharray="3 5" marker-end="url(#ap)"/>
+<line x1="1210" y1="155" x2="1210" y2="172" stroke="#7c3aed" stroke-width="2.4" stroke-dasharray="3 5" marker-end="url(#ap)"/>
+<text x="700" y="140" class="etiny" fill="#6d28d9">deploy overlay · reset · arm/disarm/refresh-and-arm</text>
+
+<!-- ===================== 底部 panel A：BRPC wrapper 内部 ===================== -->
+<rect x="40" y="730" width="920" height="660" rx="14" class="panel"/>
+<text x="64" y="766" class="ptitle">BRPC Burst Wrapper 内部 —— Go 突发引擎（PaiRec 进程内）+ C++ 薄转发</text>
+
+<!-- PaiRec 进程框 -->
+<rect x="70" y="790" width="520" height="570" rx="12" fill="#fdf6ee" stroke="#ea580c" stroke-width="2"/>
+<text x="90" y="818" class="elabel" font-size="14" fill="#c2410c">PaiRec 进程 · BRPCBurstCoordinator</text>
+<text x="90" y="838" class="ntiny">每 session 一个常驻 goroutine + 无缓冲 job channel · 按 index%N 绑 CPU shard</text>
+
+<!-- session pool 点阵 -->
+<g id="pool"></g>
+<text x="90" y="1330" class="ntiny">▲ 预建连接池（示意 400 点 ≈ 10000 session）；橙色 = 本请求 poolCursor 轮转选中的 1000 条</text>
+
+<!-- gate -->
+<rect x="470" y="870" width="46" height="420" rx="8" fill="#1f2937"/>
+<text x="493" y="1090" class="elabel" fill="#ffffff" transform="rotate(90 493 1090)">close(gate) 同步起跑</text>
+<line x1="404" y1="1080" x2="466" y2="1080" stroke="#ea580c" stroke-width="2.4" marker-end="url(#ao)"/>
+
+<!-- 到 C++ wrapper 的箭头 -->
+<path d="M516,990 C560,975 580,955 612,945" fill="none" stroke="#2563eb" stroke-width="3" marker-end="url(#ab)"/>
+<path d="M516,1060 C560,1045 580,1020 612,1005" fill="none" stroke="#ea580c" stroke-width="2.6" stroke-dasharray="7 4" marker-end="url(#ao)"/>
+
+<!-- C++ wrapper -->
+<rect x="616" y="880" width="310" height="150" rx="12" class="node" stroke="#2563eb"/>
+<text x="636" y="908" class="elabel" font-size="14">C++ brpc_burst_wrapper :18103</text>
+<text x="636" y="930" class="ntiny">baidu_std · pooled channel</text>
+<text x="636" y="950" class="ntiny">backend_timeout 5s · max_retry 0</text>
+<text x="636" y="970" class="ntiny">失败即 500 · 无 HTTP fallback</text>
+<text x="636" y="998" class="ntiny" fill="#c2410c">◀ 999× Health（100KiB）</text>
+<text x="636" y="1018" class="ntiny" fill="#1d4ed8">◀ 1× Recommend（business lane 互质 stride 轮转）</text>
+
+<line x1="760" y1="1030" x2="760" y2="1090" stroke="#2563eb" stroke-width="3" marker-end="url(#ab)"/>
+<rect x="636" y="1096" width="250" height="56" rx="10" fill="#e7f6ef" stroke="#059669" stroke-width="2"/>
+<text x="761" y="1120" text-anchor="middle" class="elabel" font-size="13">TRT inference :18100</text>
+<text x="761" y="1138" text-anchor="middle" class="ntiny">仅 Recommend 到达</text>
+
+<line x1="900" y1="1030" x2="900" y2="1190" stroke="#ea580c" stroke-width="2.4" stroke-dasharray="7 4" marker-end="url(#ao)"/>
+<rect x="770" y="1196" width="226" height="54" rx="10" fill="#fdecec" stroke="#dc2626" stroke-width="2"/>
+<text x="883" y="1220" text-anchor="middle" class="elabel" font-size="13" fill="#b91c1c">Health 本地终结 ✕</text>
+<text x="883" y="1238" text-anchor="middle" class="ntiny">压力流量不出 wrapper</text>
+
+<text x="70" y="1376" class="ntiny">事件：pairec_brpc_burst_ready / start / business_complete / complete（shard_requests、start_skew_us、max_active_workers、pressure_latency_p95）</text>
+
+<!-- ===================== 底部 panel B：KVC wrapper 协议 ===================== -->
+<rect x="990" y="730" width="890" height="660" rx="14" class="panel"/>
+<text x="1014" y="766" class="ptitle">KVC Burst Wrapper 协议 —— claim → futex barrier → 99 lane sustained Get</text>
+
+<!-- TRT 进程 -->
+<rect x="1020" y="790" width="380" height="250" rx="12" fill="#eef7f2" stroke="#059669" stroke-width="2"/>
+<text x="1040" y="818" class="elabel" font-size="14" fill="#047857">TRT 进程（kvCacheTransferManager）</text>
+<g class="kvcsteps">
+  <rect x="1040" y="832" width="160" height="46" rx="8" class="chip"/><text x="1120" y="852" text-anchor="middle" class="etiny">onboard Get 调用点</text><text x="1120" y="868" text-anchor="middle" class="etiny">（首个 Get / request）</text>
+  <rect x="1220" y="832" width="160" height="46" rx="8" fill="#f3eefe" stroke="#7c3aed" stroke-width="1.6"/><text x="1300" y="852" text-anchor="middle" class="etiny">① claim CAS</text><text x="1300" y="868" text-anchor="middle" class="etiny">Ready→Claimed</text>
+  <rect x="1040" y="900" width="160" height="46" rx="8" fill="#f3eefe" stroke="#7c3aed" stroke-width="1.6"/><text x="1120" y="920" text-anchor="middle" class="etiny">② futex wake + barrier</text><text x="1120" y="936" text-anchor="middle" class="etiny">ArriveAndWait</text>
+  <rect x="1220" y="900" width="160" height="46" rx="8" fill="#e7f6ef" stroke="#059669" stroke-width="1.6"/><text x="1300" y="920" text-anchor="middle" class="etiny">③ 真实 DataSystem Get</text><text x="1300" y="936" text-anchor="middle" class="etiny">（计时 business_get）</text>
+  <rect x="1040" y="968" width="340" height="46" rx="8" fill="#e7f6ef" stroke="#059669" stroke-width="1.6"/><text x="1210" y="988" text-anchor="middle" class="etiny">④ finishBusinessGet：写 business_done_generation + futex wake</text><text x="1210" y="1004" text-anchor="middle" class="etiny">（业务不等压力，立即继续 TRT）</text>
+</g>
+
+<!-- 共享块 -->
+<rect x="1090" y="1090" width="260" height="60" rx="10" class="node" stroke="#7c3aed"/>
+<text x="1220" y="1116" text-anchor="middle" class="elabel" font-size="13" fill="#6d28d9">SharedControl（tmpfs）</text>
+<text x="1220" y="1134" text-anchor="middle" class="ntiny">state · run/release_generation · timestamps</text>
+
+<line x1="1220" y1="1040" x2="1220" y2="1086" stroke="#7c3aed" stroke-width="2.6" marker-end="url(#ap)"/>
+<line x1="1350" y1="1120" x2="1466" y2="1120" stroke="#7c3aed" stroke-width="2.6" marker-end="url(#ap)"/>
+<line x1="1350" y1="1136" x2="1466" y2="1136" stroke="#7c3aed" stroke-width="2.6" marker-end="url(#apb)"/>
+
+<!-- sidecar -->
+<rect x="1470" y="790" width="390" height="360" rx="12" fill="#fdf6ee" stroke="#ea580c" stroke-width="2"/>
+<text x="1490" y="818" class="elabel" font-size="14" fill="#c2410c">sidecar：99 PressureWorker lane</text>
+<g id="lanes"></g>
+<text x="1490" y="1130" class="ntiny">⑤ futex 等 run_generation → barrier 同刻起跑 → 首个 Get 计时 →</text>
+<text x="1490" y="1148" class="ntiny">　 sustained 循环 Get 直到 business_done（≤1000ms / ≤100 次）</text>
+
+<!-- sidecar -> DS -->
+<line x1="1660" y1="1150" x2="1660" y2="1206" stroke="#ea580c" stroke-width="3" stroke-dasharray="8 5" marker-end="url(#ao)"/>
+<g>
+  <path d="M1560,1212 a100,16 0 0 1 200,0 v58 a100,16 0 0 1 -200,0 z" fill="#e7f6ef" stroke="#059669" stroke-width="2.2"/>
+  <ellipse cx="1660" cy="1212" rx="100" ry="16" fill="#d3efe2" stroke="#059669" stroke-width="2.2"/>
+  <text x="1660" y="1250" text-anchor="middle" class="elabel" font-size="13">DataSystem worker :18482</text>
+  <text x="1660" y="1268" text-anchor="middle" class="ntiny">业务 Get 与 99 路压力 Get 在此竞争</text>
+</g>
+
+<!-- 聚合输出 -->
+<rect x="1020" y="1200" width="440" height="150" rx="12" class="node" stroke="#64748b"/>
+<text x="1040" y="1228" class="elabel" font-size="14">⑥ 聚合输出 kvc_burst_complete</text>
+<text x="1040" y="1252" class="ntiny">business_get_ms · business_submit_rank（提交次序）</text>
+<text x="1040" y="1272" class="ntiny">每 lane 提交/完成 offsets · sustained_loop_gets / window</text>
+<text x="1040" y="1292" class="ntiny">pressure p50/p95/p99 · max_active · business_overlap ≥95%</text>
+<text x="1040" y="1312" class="ntiny">barrier_wait · start_skew · 停止原因计数</text>
+<text x="1040" y="1336" class="ntiny" fill="#6d28d9">门禁：同 request_id 精确 3 Set + 2 Get · 压力零错误 · 无 restart</text>
+
+<text x="1014" y="1376" class="ntiny">控制命令：kvc_burst_wrapper --control_action=arm | disarm | refresh-and-arm（sidecar 内刷新 _gN_ 压力 key 后才武装）</text>
+
+<!-- ===================== 底部条 ===================== -->
+<rect x="40" y="1420" width="1840" height="110" rx="12" class="panel"/>
+<text x="64" y="1452" class="elabel" font-size="14">训练（远程 L40S）：training/decoder/ Qwen3-0.6B + LoRA rank 8 · DDP · 物品前缀约束解码 · resume checkpoint</text>
+<text x="64" y="1476" class="etiny">观测：F18 pipeline trace（vector/generative/deepfm/rerank 分段）· F19 native 归因（闭合误差 ≤100µs）· 组合时延图 docs/assets/combined_pressure_latency_flow_*.png</text>
+<text x="64" y="1498" class="etiny">DataSystem worker 侧指标（每轮 replay 前后）：cgroup CPU/节流 · 上下文切换 · 网卡收发 · NET_RX/TX 软中断 · PSI cpu/memory · pgfault/pgmajfault —— scripts/collect_datasystem_worker_metrics.sh</text>
+</svg>
+
+<script>
+// 连接池点阵：20列×20行，每10个点1个橙色（代表 1000/10000 活跃选中）
+(function(){
+  const g = document.getElementById('pool');
+  const NS = 'http://www.w3.org/2000/svg';
+  for (let r = 0; r < 20; r++) {
+    for (let c = 0; c < 20; c++) {
+      const i = r * 20 + c;
+      const dot = document.createElementNS(NS, 'circle');
+      dot.setAttribute('cx', 100 + c * 15);
+      dot.setAttribute('cy', 880 + r * 20);
+      dot.setAttribute('r', 4.6);
+      dot.setAttribute('fill', i % 10 === 0 ? '#ea580c' : '#c8d6e5');
+      g.appendChild(dot);
+    }
+  }
+  // business lane 红点
+  const b = document.createElementNS(NS, 'circle');
+  b.setAttribute('cx', 100); b.setAttribute('cy', 880); b.setAttribute('r', 6.5);
+  b.setAttribute('fill', '#dc2626'); b.setAttribute('stroke', '#fff'); b.setAttribute('stroke-width', '1.6');
+  g.appendChild(b);
+  const t = document.createElementNS(NS, 'text');
+  t.setAttribute('x', 96); t.setAttribute('y', 862); t.setAttribute('class', 'etiny');
+  t.setAttribute('fill', '#b91c1c'); t.textContent = 'business lane（Recommend）';
+  g.appendChild(t);
+})();
+// sidecar 99 lane 条
+(function(){
+  const g = document.getElementById('lanes');
+  const NS = 'http://www.w3.org/2000/svg';
+  for (let i = 0; i < 24; i++) {
+    const bar = document.createElementNS(NS, 'rect');
+    bar.setAttribute('x', 1490); bar.setAttribute('y', 832 + i * 11);
+    bar.setAttribute('width', 250 - (i % 5) * 18); bar.setAttribute('height', 7);
+    bar.setAttribute('rx', 3); bar.setAttribute('fill', i % 6 === 0 ? '#ea580c' : '#f0c39b');
+    g.appendChild(bar);
+  }
+  const t = document.createElementNS(NS, 'text');
+  t.setAttribute('x', 1760); t.setAttribute('y', 960); t.setAttribute('class', 'etiny');
+  t.textContent = '99 lanes';
+  g.appendChild(t);
+  // 循环箭头
+  const p = document.createElementNS(NS, 'path');
+  p.setAttribute('d', 'M1765,850 C1810,900 1810,1020 1760,1066');
+  p.setAttribute('fill', 'none'); p.setAttribute('stroke', '#ea580c');
+  p.setAttribute('stroke-width', '2.4'); p.setAttribute('stroke-dasharray', '6 4');
+  p.setAttribute('marker-end', 'url(#ao)');
+  g.appendChild(p);
+  const t2 = document.createElementNS(NS, 'text');
+  t2.setAttribute('x', 1794); t2.setAttribute('y', 965); t2.setAttribute('class', 'etiny');
+  t2.setAttribute('fill', '#c2410c'); t2.textContent = 'sustained';
+  g.appendChild(t2);
+})();
+</script>
+</body>
+</html>
