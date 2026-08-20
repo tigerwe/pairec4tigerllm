@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<title>组合压力下单次 Recommend 请求时序图</title>
+<style>
+  body { margin:0; background:#f2f5f9; font-family:"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif; }
+  svg { display:block; }
+  .title { font-size:30px; font-weight:800; fill:#17222e; }
+  .sub { font-size:14px; fill:#5c6d7f; }
+  .life { stroke:#cbd5e1; stroke-width:2; stroke-dasharray:6 5; }
+  .lhead { fill:#ffffff; stroke:#7d93aa; stroke-width:2; filter:url(#shadow); }
+  .lname { font-size:16px; font-weight:700; fill:#17222e; }
+  .lsub { font-size:11.5px; fill:#5c6d7f; }
+  .msg { font-size:13.5px; font-weight:600; fill:#22303e; }
+  .msgp { font-size:13.5px; font-weight:600; fill:#c2410c; }
+  .msgc { font-size:13.5px; font-weight:600; fill:#6d28d9; }
+  .ret { font-size:12.5px; fill:#64748b; }
+  .phase { font-size:13px; font-weight:700; fill:#94a3b8; letter-spacing:1px; }
+  .tick { font-size:12px; font-weight:700; fill:#0f766e; }
+  .note { font-size:12px; fill:#33465a; }
+  .noteb { font-size:12.5px; font-weight:700; fill:#33465a; }
+  .divider { stroke:#e2e8f0; stroke-width:1.4; stroke-dasharray:3 5; }
+  .abox { fill:#ffffff; stroke-width:1.6; filter:url(#shadow); }
+  .arr { stroke:#dc2626; stroke-width:2.6; fill:none; }
+  .arrd { stroke:#dc2626; stroke-width:2.2; stroke-dasharray:7 4; fill:none; }
+  .aro { stroke:#ea580c; stroke-width:2.4; stroke-dasharray:8 5; fill:none; }
+  .arp { stroke:#7c3aed; stroke-width:2.4; stroke-dasharray:4 4; fill:none; }
+  .arg { stroke:#94a3b8; stroke-width:2; stroke-dasharray:6 4; fill:none; }
+  .th { font-size:13px; font-weight:700; fill:#5c6d7f; }
+  .td { font-size:13.5px; fill:#22303e; }
+  .tdn { font-size:13.5px; font-weight:700; fill:#17222e; }
+  .tup { font-size:13.5px; font-weight:700; fill:#b91c1c; }
+  .tflat { font-size:13.5px; fill:#94a3b8; }
+</style>
+</head>
+<body>
+<svg width="1920" height="1680" viewBox="0 0 1920 1680" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+    <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#8aa0b8" flood-opacity="0.35"/>
+  </filter>
+  <marker id="mr" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#dc2626"/></marker>
+  <marker id="mo" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#ea580c"/></marker>
+  <marker id="mp" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#7c3aed"/></marker>
+  <marker id="mg" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#94a3b8"/></marker>
+</defs>
+
+<text x="40" y="52" class="title">组合压力下的单次 Recommend 请求时序图</text>
+<text x="40" y="78" class="sub">两路召回并发（QuotaMultiRecall），生成式召回为关键路径 · baseline c1 → combined（BRPC c1000 + KVC c100 · 4 keys × 3.5MiB）实测 · 2026-08-18</text>
+
+<!-- 图例 -->
+<g transform="translate(40,98)">
+  <line x1="0" y1="0" x2="34" y2="0" class="arr" marker-end="url(#mr)"/><text x="44" y="4" class="note">主线请求</text>
+  <line x1="130" y1="0" x2="164" y2="0" class="arrd" marker-end="url(#mr)"/><text x="174" y="4" class="note">主线返回</text>
+  <line x1="260" y1="0" x2="294" y2="0" class="aro" marker-end="url(#mo)"/><text x="304" y="4" class="note">压力并发</text>
+  <line x1="390" y1="0" x2="424" y2="0" class="arp" marker-end="url(#mp)"/><text x="434" y="4" class="note">并发控制（gate / futex / barrier）</text>
+  <line x1="700" y1="0" x2="734" y2="0" class="arg" marker-end="url(#mg)"/><text x="744" y="4" class="note">普通返回</text>
+  <rect x="880" y="-9" width="14" height="12" fill="#bbf7d0" stroke="#4ade80"/><text x="902" y="4" class="note">激活条 = 该角色正在处理</text>
+  <text x="1100" y="4" class="tick">t+N = 请求发出后的累计毫秒（baseline）</text>
+</g>
+
+<!-- ===================== 生命线 ===================== -->
+<!-- x: 客户端100 PaiRec300 Milvus490 DeepFM670 Wrapper890 TRT1110 sidecar1340 DS1680 -->
+<g>
+  <line x1="100" y1="200" x2="100" y2="1350" class="life"/>
+  <line x1="300" y1="200" x2="300" y2="1350" class="life"/>
+  <line x1="490" y1="200" x2="490" y2="1350" class="life"/>
+  <line x1="670" y1="200" x2="670" y2="1350" class="life"/>
+  <line x1="890" y1="200" x2="890" y2="1350" class="life"/>
+  <line x1="1110" y1="200" x2="1110" y2="1350" class="life"/>
+  <line x1="1340" y1="200" x2="1340" y2="1350" class="life"/>
+  <line x1="1680" y1="200" x2="1680" y2="1350" class="life"/>
+</g>
+<g>
+  <rect x="30" y="140" width="140" height="56" rx="10" class="lhead"/>
+  <text x="100" y="164" text-anchor="middle" class="lname">客户端</text>
+  <text x="100" y="184" text-anchor="middle" class="lsub">压测 replay</text>
+
+  <rect x="210" y="140" width="180" height="56" rx="10" class="lhead"/>
+  <text x="300" y="164" text-anchor="middle" class="lname">PaiRec (Go)</text>
+  <text x="300" y="184" text-anchor="middle" class="lsub">master · burst 引擎进程内</text>
+
+  <rect x="415" y="140" width="150" height="56" rx="10" class="lhead"/>
+  <text x="490" y="164" text-anchor="middle" class="lname">Milvus</text>
+  <text x="490" y="184" text-anchor="middle" class="lsub">向量召回服务</text>
+
+  <rect x="595" y="140" width="150" height="56" rx="10" class="lhead"/>
+  <text x="670" y="164" text-anchor="middle" class="lname">DeepFM</text>
+  <text x="670" y="184" text-anchor="middle" class="lsub">精排服务</text>
+
+  <rect x="800" y="140" width="180" height="56" rx="10" class="lhead"/>
+  <text x="890" y="164" text-anchor="middle" class="lname">BRPC Wrapper</text>
+  <text x="890" y="184" text-anchor="middle" class="lsub">worker1 :18103 薄转发</text>
+
+  <rect x="1000" y="140" width="220" height="56" rx="10" class="lhead"/>
+  <text x="1110" y="164" text-anchor="middle" class="lname">TRT-LLM 业务线程</text>
+  <text x="1110" y="184" text-anchor="middle" class="lsub">worker1 :18100 · proxy</text>
+
+  <rect x="1230" y="140" width="220" height="56" rx="10" class="lhead"/>
+  <text x="1340" y="164" text-anchor="middle" class="lname">KVC sidecar ×99</text>
+  <text x="1340" y="184" text-anchor="middle" class="lsub">99 压力线程 + 99 独占连接</text>
+
+  <rect x="1570" y="140" width="220" height="56" rx="10" class="lhead"/>
+  <text x="1680" y="164" text-anchor="middle" class="lname">DataSystem worker</text>
+  <text x="1680" y="184" text-anchor="middle" class="lsub">master :18482 hostNetwork</text>
+</g>
+
+<!-- 激活条 -->
+<g>
+  <rect x="294" y="250" width="12" height="1074" fill="#bfdbfe" stroke="#60a5fa"/>
+  <rect x="484" y="342" width="12" height="44" fill="#99f6e4" stroke="#2dd4bf"/>
+  <rect x="884" y="490" width="12" height="78" fill="#fde68a" stroke="#fbbf24"/>
+  <rect x="884" y="1130" width="12" height="44" fill="#fde68a" stroke="#fbbf24"/>
+  <rect x="1104" y="568" width="12" height="566" fill="#bbf7d0" stroke="#4ade80"/>
+  <rect x="1334" y="858" width="12" height="242" fill="#fed7aa" stroke="#fb923c"/>
+  <rect x="1674" y="684" width="12" height="44" fill="#e2e8f0" stroke="#94a3b8"/>
+  <rect x="1674" y="970" width="12" height="72" fill="#e2e8f0" stroke="#94a3b8"/>
+  <rect x="664" y="1226" width="12" height="44" fill="#ddd6fe" stroke="#a78bfa"/>
+</g>
+
+<!-- ===================== 阶段分隔 + 标签 ===================== -->
+<line x1="30" y1="270" x2="1890" y2="270" class="divider"/>
+<line x1="30" y1="395" x2="1890" y2="395" class="divider"/>
+<line x1="30" y1="575" x2="1890" y2="575" class="divider"/>
+<line x1="30" y1="750" x2="1890" y2="750" class="divider"/>
+<line x1="30" y1="1100" x2="1890" y2="1100" class="divider"/>
+<line x1="30" y1="1185" x2="1890" y2="1185" class="divider"/>
+<text x="1886" y="240" text-anchor="end" class="phase">A · 请求进入</text>
+<text x="1886" y="300" text-anchor="end" class="phase">B · 召回：两路并发</text>
+<text x="1886" y="420" text-anchor="end" class="phase">C · BRPC burst 并发点（c1000）</text>
+<text x="1886" y="600" text-anchor="end" class="phase">D · 生成 + KV offload</text>
+<text x="1886" y="775" text-anchor="end" class="phase">E · KVC burst 并发点（c100）</text>
+<text x="1886" y="1125" text-anchor="end" class="phase">F · 生成式返回 · join</text>
+<text x="1886" y="1214" text-anchor="end" class="phase">G · 精排 · 重排 · 响应</text>
+
+<!-- 累计时刻 -->
+<text x="34" y="254" class="tick">t+0</text>
+<text x="34" y="304" class="tick">t+2</text>
+<text x="34" y="390" class="tick">t+12</text>
+<text x="34" y="1174" class="tick">t+136</text>
+<text x="34" y="1274" class="tick">t+145</text>
+<text x="34" y="1302" class="tick">t+147</text>
+<text x="34" y="1328" class="tick">t=157/181</text>
+
+<!-- ===================== A 请求进入 ===================== -->
+<text x="200" y="238" text-anchor="middle" class="msg">① Recommend(uid=3, topk=10)</text>
+<line x1="100" y1="250" x2="294" y2="250" class="arr" marker-end="url(#mr)"/>
+
+<!-- ===================== B 召回：两路并发 ===================== -->
+<text x="595" y="288" text-anchor="middle" class="msg">② 生成式召回 → BRPC burst（关键路径，topk=50）</text>
+<line x1="306" y1="300" x2="884" y2="300" class="arr" marker-end="url(#mr)"/>
+<text x="395" y="330" text-anchor="middle" class="msg">③ 向量召回（Milvus，topk=50）</text>
+<line x1="306" y1="342" x2="484" y2="342" class="arr" marker-end="url(#mr)"/>
+<text x="395" y="374" text-anchor="middle" class="ret">≈10ms 先到，等生成式 join</text>
+<line x1="484" y1="386" x2="306" y2="386" class="arg" marker-end="url(#mg)"/>
+
+<!-- ===================== C BRPC burst ===================== -->
+<rect x="320" y="410" width="250" height="46" rx="8" class="abox" stroke="#c4b5fd"/>
+<text x="445" y="429" text-anchor="middle" class="noteb">burst coordinator：close(gate)</text>
+<text x="445" y="447" text-anchor="middle" class="note">一次唤醒 1000 个 goroutine 同刻发送</text>
+
+<text x="595" y="478" text-anchor="middle" class="msg">④ 1× Recommend 〔gate 同刻起跑〕</text>
+<line x1="306" y1="490" x2="884" y2="490" class="arr" marker-end="url(#mr)"/>
+<text x="595" y="516" text-anchor="middle" class="msgp">999× Health（100KiB）</text>
+<line x1="306" y1="528" x2="884" y2="528" class="aro" marker-end="url(#mo)"/>
+
+<rect x="905" y="460" width="200" height="46" rx="8" class="abox" stroke="#fdba74"/>
+<text x="1005" y="479" text-anchor="middle" class="noteb">Health 本地终结</text>
+<text x="1005" y="497" text-anchor="middle" class="note">仅打满 wrapper，不进 TRT</text>
+
+<text x="1000" y="556" text-anchor="middle" class="msg">⑤ 转发 → :18100（BRPC ≈2ms）</text>
+<line x1="896" y1="568" x2="1104" y2="568" class="arr" marker-end="url(#mr)"/>
+
+<!-- ===================== D 生成 + offload ===================== -->
+<rect x="1120" y="592" width="210" height="46" rx="8" class="abox" stroke="#86efac"/>
+<text x="1225" y="611" text-anchor="middle" class="noteb">Qwen3 生成</text>
+<text x="1225" y="629" text-anchor="middle" class="note">runner 95 → 110ms（+15.0）</text>
+
+<text x="1395" y="672" text-anchor="middle" class="msg">⑥ 3× KV Set（offload ≈21.3ms）</text>
+<line x1="1116" y1="684" x2="1674" y2="684" class="arr" marker-end="url(#mr)"/>
+<text x="1395" y="716" text-anchor="middle" class="ret">OK（3 个 block 落盘）</text>
+<line x1="1674" y1="728" x2="1116" y2="728" class="arg" marker-end="url(#mg)"/>
+
+<!-- ===================== E KVC burst ===================== -->
+<rect x="880" y="768" width="220" height="46" rx="8" class="abox" stroke="#c4b5fd"/>
+<text x="990" y="787" text-anchor="middle" class="noteb">⑦ 首个 onboard Get：</text>
+<text x="990" y="805" text-anchor="middle" class="note">CAS claim generation（每请求一次）</text>
+
+<text x="1225" y="846" text-anchor="middle" class="msgc">FutexWake(run_generation)</text>
+<line x1="1116" y1="858" x2="1334" y2="858" class="arp" marker-end="url(#mp)"/>
+
+<rect x="1350" y="822" width="270" height="46" rx="8" class="abox" stroke="#fdba74"/>
+<text x="1485" y="841" text-anchor="middle" class="noteb">99 worker 从 futex 睡眠中唤醒</text>
+<text x="1485" y="859" text-anchor="middle" class="note">各持 1 个独占 DS 连接</text>
+
+<text x="1225" y="904" text-anchor="middle" class="msgc">barrier ArriveAndWait：100 方到齐，统一放行</text>
+<line x1="1110" y1="916" x2="1340" y2="916" stroke="#7c3aed" stroke-width="5"/>
+<line x1="1110" y1="908" x2="1110" y2="924" stroke="#7c3aed" stroke-width="5"/>
+<line x1="1340" y1="908" x2="1340" y2="924" stroke="#7c3aed" stroke-width="5"/>
+<text x="1225" y="940" text-anchor="middle" class="msgc">↓ 同一时刻起跑 ↓</text>
+
+<text x="1250" y="958" text-anchor="middle" class="msg">1× business Get</text>
+<line x1="1116" y1="970" x2="1674" y2="970" class="arr" marker-end="url(#mr)"/>
+<text x="1520" y="994" text-anchor="middle" class="msgp">99× pressure Get（同刻并发）</text>
+<line x1="1346" y1="1006" x2="1674" y2="1006" class="aro" marker-end="url(#mo)"/>
+
+<text x="1300" y="1030" text-anchor="middle" class="ret">business Get 7.65 → 13.21ms/次（+5.56）· submit_rank avg 40.3/100</text>
+<line x1="1674" y1="1042" x2="1116" y2="1042" class="arrd" marker-end="url(#mr)"/>
+
+<rect x="1350" y="1050" width="270" height="46" rx="8" class="abox" stroke="#fdba74"/>
+<text x="1485" y="1069" text-anchor="middle" class="noteb">sustained 模式：循环 Get</text>
+<text x="1485" y="1087" text-anchor="middle" class="note">读到 business_done_generation 即停</text>
+
+<!-- ===================== F 生成式返回 · join ===================== -->
+<text x="1000" y="1122" text-anchor="middle" class="msg">生成式 items 返回（TRT server ≈129ms）</text>
+<line x1="1104" y1="1134" x2="896" y2="1134" class="arrd" marker-end="url(#mr)"/>
+<text x="595" y="1158" text-anchor="middle" class="msg">②&#39; 生成式召回结果回传，两路 join</text>
+<line x1="884" y1="1170" x2="306" y2="1170" class="arrd" marker-end="url(#mr)"/>
+
+<!-- ===================== G 精排·重排·响应 ===================== -->
+<text x="485" y="1214" text-anchor="middle" class="msg">⑧ DeepFM 精排（50 候选）≈9ms</text>
+<line x1="306" y1="1226" x2="664" y2="1226" class="arr" marker-end="url(#mr)"/>
+<text x="485" y="1258" text-anchor="middle" class="ret">打分排序</text>
+<line x1="664" y1="1270" x2="306" y2="1270" class="arg" marker-end="url(#mg)"/>
+<text x="320" y="1298" class="note">重排 source_quota_tail ≈2ms：生成式 quota 2/50 置尾</text>
+<text x="200" y="1312" text-anchor="middle" class="msg">⑨ 响应 · E2E 157 → 181ms（+23.9）</text>
+<line x1="294" y1="1324" x2="106" y2="1324" class="arrd" marker-end="url(#mr)"/>
+
+<!-- ===================== 底部各阶段实测时延表 ===================== -->
+<rect x="40" y="1380" width="1840" height="262" rx="14" fill="#ffffff" stroke="#d5e0ea" stroke-width="1.6" filter="url(#shadow)"/>
+<text x="64" y="1414" font-size="19px" font-weight="700" fill="#17222e">单请求各阶段实测时延：baseline c1 → combined（单位 ms）</text>
+<g>
+  <text x="64" y="1446" class="th">阶段</text>
+  <text x="500" y="1446" class="th">baseline</text>
+  <text x="640" y="1446" class="th">combined</text>
+  <text x="790" y="1446" class="th">Δ</text>
+  <line x1="64" y1="1456" x2="900" y2="1456" stroke="#e2e8f0" stroke-width="1.4"/>
+  <text x="64" y="1482" class="td">端到端 E2E</text><text x="500" y="1482" class="tdn">157</text><text x="640" y="1482" class="tdn">181</text><text x="790" y="1482" class="tup">+23.9</text>
+  <text x="64" y="1510" class="td">TRT runner 生成</text><text x="500" y="1510" class="tdn">95</text><text x="640" y="1510" class="tdn">110</text><text x="790" y="1510" class="tup">+15.0</text>
+  <text x="64" y="1538" class="td">onboard Get（2 次合计）</text><text x="500" y="1538" class="tdn">15.2</text><text x="640" y="1538" class="tdn">26.3</text><text x="790" y="1538" class="tup">+11.1</text>
+  <text x="64" y="1566" class="td">单次 business Get</text><text x="500" y="1566" class="tdn">7.65</text><text x="640" y="1566" class="tdn">13.21</text><text x="790" y="1566" class="tup">+5.56</text>
+  <text x="64" y="1594" class="td">offload Set（3 次合计）</text><text x="500" y="1594" class="tdn">≈21.3</text><text x="640" y="1594" class="tdn">≈21.3</text><text x="790" y="1594" class="tflat">≈0</text>
+
+  <text x="1000" y="1446" class="th">阶段（与压力无关，实测不变）</text>
+  <text x="1420" y="1446" class="th">baseline</text>
+  <text x="1550" y="1446" class="th">combined</text>
+  <text x="1690" y="1446" class="th">Δ</text>
+  <line x1="1000" y1="1456" x2="1830" y2="1456" stroke="#e2e8f0" stroke-width="1.4"/>
+  <text x="1000" y="1482" class="td">向量召回 Milvus（与生成式并发）</text><text x="1420" y="1482" class="tdn">≈10</text><text x="1550" y="1482" class="tdn">≈10</text><text x="1690" y="1482" class="tflat">0</text>
+  <text x="1000" y="1510" class="td">DeepFM 精排</text><text x="1420" y="1510" class="tdn">≈9</text><text x="1550" y="1510" class="tdn">≈9</text><text x="1690" y="1510" class="tflat">0</text>
+  <text x="1000" y="1538" class="td">front / backend BRPC</text><text x="1420" y="1538" class="tdn">≈2</text><text x="1550" y="1538" class="tdn">≈2</text><text x="1690" y="1538" class="tflat">≈0</text>
+  <text x="1000" y="1566" class="td">重排 + PaiRec 框架 + 网络</text><text x="1420" y="1566" class="tdn">≈14</text><text x="1550" y="1566" class="tdn">≈14</text><text x="1690" y="1566" class="tflat">0</text>
+  <text x="1000" y="1594" class="td">压力 Get p99（对照）</text><text x="1420" y="1594" class="tflat">—</text><text x="1550" y="1594" class="tdn">160</text><text x="1690" y="1594" class="tflat">—</text>
+</g>
+<line x1="64" y1="1608" x2="1830" y2="1608" stroke="#e2e8f0" stroke-width="1"/>
+<text x="64" y="1630" class="note">并发证据：business_submit_rank avg 40.3/100 · inflight_at_business_start = 99 · 999×Health 在 wrapper 本地终结 · 业务语义每请求 3 Set + 2 Get；runner 增量含同 Pod 99 压力线程的 CPU/带宽干扰；≈ 为毫秒日志精度或派生值</text>
+</svg>
+</body>
+</html>
