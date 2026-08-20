@@ -27,10 +27,19 @@ class NicBurstSummaryTest(unittest.TestCase):
         self.assertAlmostEqual(80.0, result["peak_tx_link_pct"])
         self.assertAlmostEqual(10.0, result["peak_rx_gbps"])
 
+    def test_summary_rejects_empty_or_single_sample_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "samples"
+            path.write_text("1000000000 0 0\n")
+            with self.assertRaisesRegex(ValueError, "at least 2 valid NIC samples"):
+                MODULE.summarize(path, 25e9)
+
     def test_contention_wires_sampler_around_replay(self):
         text = (ROOT / "scripts" / "benchmark_brpc_kvc_contention.sh").read_text()
-        self.assertIn("sample_nic_burst.py' collect", text)
+        self.assertIn("python3 - collect", text)
+        self.assertIn("<scripts/sample_nic_burst.py", text)
         self.assertIn("sample_nic_burst.py summarize", text)
+        self.assertIn("NIC burst collector failed: exit=", text)
         self.assertIn('KVC_NIC_BURST_INTERVAL_MS="${KVC_NIC_BURST_INTERVAL_MS:-20}"', text)
 
     def test_combined_summary_keeps_nic_samples(self):

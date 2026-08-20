@@ -873,8 +873,11 @@ run_replay() {
   if [ "$KVC_NIC_BURST_SAMPLE" = "1" ]; then
     NIC_BURST_STOP_FILE="/tmp/pairec-nic-burst-${RUN_ID}-${RANDOM}.stop"
     ssh "$KVC_LOAD_HOST" "rm -f '$NIC_BURST_STOP_FILE'" >/dev/null 2>&1 || true
+    # Stream the collector from the controller so worker1 does not need a
+    # separately synchronized repository checkout.
     ssh "$KVC_LOAD_HOST" \
-      "python3 '$KVC_REMOTE_REPO/scripts/sample_nic_burst.py' collect --interface '$REMOTE_NETWORK_INTERFACE' --interval-ms '$KVC_NIC_BURST_INTERVAL_MS' --stop-file '$NIC_BURST_STOP_FILE'" \
+      "python3 - collect --interface '$REMOTE_NETWORK_INTERFACE' --interval-ms '$KVC_NIC_BURST_INTERVAL_MS' --stop-file '$NIC_BURST_STOP_FILE'" \
+      <scripts/sample_nic_burst.py \
       >"${round_dir}/replay/nic-burst.samples" \
       2>"${round_dir}/replay/nic-burst.collect.log" &
     NIC_BURST_PID=$!
@@ -892,16 +895,27 @@ run_replay() {
     bash scripts/trace_single_brpc_datasystem_request.sh \
     >"${round_dir}/replay.console.log" 2>&1 || replay_code=$?
   if [ -n "$NIC_BURST_PID" ]; then
+    local nic_burst_collect_code=0
     ssh "$KVC_LOAD_HOST" "touch '$NIC_BURST_STOP_FILE'" >/dev/null 2>&1 || true
-    wait "$NIC_BURST_PID" >/dev/null 2>&1 || true
+    wait "$NIC_BURST_PID" >/dev/null 2>&1 || nic_burst_collect_code=$?
     NIC_BURST_PID=""
     NIC_BURST_STOP_FILE=""
-    python3 scripts/sample_nic_burst.py summarize \
+    if [ "$nic_burst_collect_code" -ne 0 ]; then
+      {
+        echo "NIC burst collector failed: exit=${nic_burst_collect_code}"
+        cat "${round_dir}/replay/nic-burst.collect.log" 2>/dev/null || true
+      } >"${round_dir}/replay/nic-burst.error"
+    elif ! python3 scripts/sample_nic_burst.py summarize \
       --input "${round_dir}/replay/nic-burst.samples" \
       --output "${round_dir}/replay/nic-burst.json" \
       --link-bps "$DS_WORKER_LINK_BPS" \
-      >"${round_dir}/replay/nic-burst.summary.log" 2>&1 \
-      || echo "NIC burst summary failed" >"${round_dir}/replay/nic-burst.error"
+      >"${round_dir}/replay/nic-burst.summary.log" 2>&1; then
+      {
+        echo "NIC burst summary failed"
+        cat "${round_dir}/replay/nic-burst.summary.log" 2>/dev/null || true
+        cat "${round_dir}/replay/nic-burst.collect.log" 2>/dev/null || true
+      } >"${round_dir}/replay/nic-burst.error"
+    fi
   fi
   return "$replay_code"
 }

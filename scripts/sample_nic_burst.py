@@ -43,6 +43,10 @@ def summarize(path: pathlib.Path, link_bps: float) -> dict:
             samples.append(tuple(int(value) for value in fields))
         except ValueError:
             continue
+    if len(samples) < 2:
+        raise ValueError(
+            f"need at least 2 valid NIC samples, found {len(samples)} in {path}"
+        )
     rx_bps = []
     tx_bps = []
     for before, after in zip(samples, samples[1:]):
