@@ -26,7 +26,8 @@ PRIME_REQUESTS=${PRIME_REQUESTS:-195}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 mkdir -p "$OUTPUT_DIR"
-[[ "$KVC_CONCURRENCY" =~ ^(1|10|100)$ ]] || die "KVC_CONCURRENCY must be 1, 10, or 100"
+[[ "$KVC_CONCURRENCY" =~ ^[1-9][0-9]*$ ]] && (( KVC_CONCURRENCY <= 256 )) \
+  || die "KVC_CONCURRENCY must be between 1 and 256"
 [[ "$WRAPPER_CONCURRENCY" =~ ^(1|1000)$ ]] || die "WRAPPER_CONCURRENCY must be 1 or 1000"
 [[ "$KVC_PRESSURE_KEY_COUNT" =~ ^[0-9]+$ ]] || die "KVC_PRESSURE_KEY_COUNT must be non-negative"
 (( KVC_PRESSURE_KEY_COUNT <= KVC_CONCURRENCY - 1 )) \
@@ -232,6 +233,7 @@ for name in metric_names:
                      "max": max(values)}
 ds_worker_samples = []
 ds_worker_threadpool = []
+nic_burst_samples = []
 for row in contention.get("rows", []):
     round_dir = pathlib.Path(row["summary_path"]).parent.parent
     metrics_path = round_dir / "datasystem-worker-metrics.json"
@@ -246,6 +248,12 @@ for row in contention.get("rows", []):
         ds_worker_threadpool.append(json.loads(tp_path.read_text()).get("peak", {}))
     elif tp_error.is_file():
         ds_worker_threadpool.append({"error": tp_error.read_text().strip()})
+    nic_path = pathlib.Path(row["summary_path"]).parent / "nic-burst.json"
+    nic_error = pathlib.Path(row["summary_path"]).parent / "nic-burst.error"
+    if nic_path.is_file():
+        nic_burst_samples.append(json.loads(nic_path.read_text()))
+    elif nic_error.is_file():
+        nic_burst_samples.append({"error": nic_error.read_text().strip()})
 result = {
     "classification": (f"PAIREC_BRPC_WRAPPER_C{wrapper_concurrency}_KVC_C{kvc_concurrency}_OK"
                        if valid else "PAIREC_BRPC_WRAPPER_KVC_COMBINED_FAIL"),
@@ -261,6 +269,7 @@ result = {
     "metrics": metrics,
     "datasystem_worker_samples": ds_worker_samples,
     "datasystem_worker_threadpool": ds_worker_threadpool,
+    "nic_burst_samples": nic_burst_samples,
 }
 pathlib.Path(sys.argv[3]).write_text(json.dumps(result, indent=2) + "\n")
 print(f"classification={result['classification']}")

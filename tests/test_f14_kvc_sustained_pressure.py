@@ -207,10 +207,10 @@ class DataSystemWorkerMetricsTest(unittest.TestCase):
 
 
 class SustainedPressureStructureTest(unittest.TestCase):
-    def test_apply_script_requires_v3_managed_proxy(self):
+    def test_apply_script_requires_v4_managed_proxy(self):
         script = (ROOT / "scripts/apply_trtllm_kvc_burst_proxy_patch.sh").read_text()
-        self.assertIn("grep -q PAIREC_KVC_BURST_PROXY_V3", script)
-        self.assertNotIn("grep -q PAIREC_KVC_BURST_PROXY_V2", script)
+        self.assertIn("grep -q PAIREC_KVC_BURST_PROXY_V4", script)
+        self.assertNotIn("grep -q PAIREC_KVC_BURST_PROXY_V3", script)
 
     def test_shared_header_helpers(self):
         text = SHARED_H.read_text()
@@ -220,7 +220,8 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn("WaitForPressureStarted", text)
         self.assertIn("RequiredPressureFirst", text)
         self.assertIn("kPressureNotEstablished", text)
-        self.assertIn("constexpr uint32_t kVersion = 3", text)
+        self.assertIn("constexpr uint32_t kVersion = 4", text)
+        self.assertIn("constexpr uint32_t kMaxConcurrency = 256", text)
         self.assertNotIn("uint32_t reserved", text)
 
     def test_wrapper_sustained_flow(self):
@@ -263,7 +264,7 @@ class SustainedPressureStructureTest(unittest.TestCase):
             "--sustained_max_duration_ms=",
             "--sustained_max_loops=",
             "--pressure_lead_us=",
-            "expected version=3",
+            "expected version=4",
             '\"sustained_pressure\":true',
         ):
             self.assertIn(token, text)
@@ -314,6 +315,16 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn("datasystem-worker-metrics.error", text)
         self.assertIn('DS_WORKER_WAIT_UNTIL_NS="$wait_until_ns"', text)
         self.assertIn('DS_WORKER_WINDOW_START_NS="$window_start_ns"', text)
+
+    def test_v4_scripts_accept_extended_concurrency(self):
+        deploy = DEPLOY.read_text()
+        combined = COMBINED.read_text()
+        self.assertIn('(( CONCURRENCY <= 256 ))', deploy)
+        self.assertIn('CONCURRENCY must be between 1 and 256', deploy)
+        self.assertIn('(( KVC_CONCURRENCY <= 256 ))', combined)
+        self.assertIn('KVC_CONCURRENCY must be between 1 and 256', combined)
+        self.assertNotIn('^(1|10|100)$', deploy)
+        self.assertNotIn('^(1|10|100)$', combined)
 
     def test_contention_replay_retry_wiring(self):
         text = CONTENTION.read_text()

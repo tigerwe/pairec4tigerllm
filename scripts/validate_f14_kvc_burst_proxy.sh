@@ -68,7 +68,8 @@ mkdir -p "$OUT_DIR"
 
 run_case disabled 1 0 1 0
 for concurrency in $CONCURRENCY_LEVELS; do
-  [[ "$concurrency" =~ ^(1|10|100)$ ]] || die "concurrency must be 1, 10, or 100"
+  [[ "$concurrency" =~ ^[1-9][0-9]*$ ]] && (( concurrency <= 256 )) \
+    || die "concurrency must be between 1 and 256"
   run_case "c$concurrency" "$concurrency" 1 0 1
 done
 

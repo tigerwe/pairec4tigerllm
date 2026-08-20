@@ -58,7 +58,7 @@ wait_ready() {
 
 for concurrency in $CONCURRENCY_LEVELS; do
   [[ "$concurrency" =~ ^[1-9][0-9]*$ ]] || die "invalid concurrency: $concurrency"
-  (( concurrency <= 100 )) || die "concurrency exceeds first-phase maximum: $concurrency"
+  (( concurrency <= 256 )) || die "concurrency exceeds maximum: $concurrency"
   case_dir="$OUT_DIR/c$concurrency"
   mkdir -p "$case_dir"
   control_path="$CONTROL_DIR/control-c$concurrency"

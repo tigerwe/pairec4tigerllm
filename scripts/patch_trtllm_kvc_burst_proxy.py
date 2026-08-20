@@ -7,8 +7,8 @@ import argparse
 from pathlib import Path
 
 
-MARKER = "PAIREC_KVC_BURST_PROXY_V3"
-LEGACY_MARKERS = ("PAIREC_KVC_BURST_PROXY_V2",)
+MARKER = "PAIREC_KVC_BURST_PROXY_V4"
+LEGACY_MARKERS = ("PAIREC_KVC_BURST_PROXY_V3", "PAIREC_KVC_BURST_PROXY_V2")
 
 
 def replace_once(path: Path, old: str, new: str) -> None:

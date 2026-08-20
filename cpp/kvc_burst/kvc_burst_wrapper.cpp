@@ -999,7 +999,7 @@ int Run(int argc, char** argv)
             return 1;
         }
     }
-    WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":3,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
+    WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":4,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
             + ",\"pressure_lanes\":" + std::to_string(pressureLanes) + ",\"object_size_bytes\":"
             + std::to_string(config.objectSize) + ",\"pressure_key_count\":" + std::to_string(pressureKeyCount)
             + ",\"clients_connected\":" + std::to_string(pressureLanes)

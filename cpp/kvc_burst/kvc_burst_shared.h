@@ -15,8 +15,8 @@ namespace pairec::kvc_burst
 {
 
 constexpr uint64_t kMagic = 0x5041495245434b56ULL;
-constexpr uint32_t kVersion = 3;
-constexpr uint32_t kMaxConcurrency = 100;
+constexpr uint32_t kVersion = 4;
+constexpr uint32_t kMaxConcurrency = 256;
 constexpr uint32_t kMaxPressureLanes = kMaxConcurrency - 1;
 constexpr size_t kRequestIdSize = 128;
 

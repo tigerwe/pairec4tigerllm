@@ -46,9 +46,9 @@ verify() {
   [[ -n "$pod" ]] || die "inference Pod not found"
   kubectl -n "$NAMESPACE" get pod "$pod" -o wide
   kubectl -n "$NAMESPACE" exec "$pod" -c "$INFERENCE_CONTAINER" -- \
-    grep -aFq PAIREC_KVC_BURST_PROXY_V3 \
+    grep -aFq PAIREC_KVC_BURST_PROXY_V4 \
       "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
-    || die "KVC proxy V3 capability marker is missing from TensorRT-LLM"
+    || die "KVC proxy V4 capability marker is missing from TensorRT-LLM"
   kubectl -n "$NAMESPACE" exec "$pod" -c "$SIDECAR_CONTAINER" -- \
     test -s /run/pairec-kvc-burst/ready \
     || die "KVC burst sidecar is not ready"
@@ -62,8 +62,8 @@ verify() {
   echo "$ready_event"
   grep -Fq "\"object_size_bytes\":$OBJECT_SIZE" <<<"$ready_event" \
     || die "sidecar object size mismatch: expected=$OBJECT_SIZE"
-  grep -Fq '"version":3' <<<"$ready_event" \
-    || die "sidecar control protocol mismatch: expected version=3"
+  grep -Fq '"version":4' <<<"$ready_event" \
+    || die "sidecar control protocol mismatch: expected version=4"
   grep -Fq "\"pressure_lead_us\":$PRESSURE_LEAD_US" <<<"$ready_event" \
     || die "sidecar pressure lead mismatch: expected=$PRESSURE_LEAD_US"
   if [[ "$SUSTAINED_PRESSURE" = 1 ]]; then
@@ -78,7 +78,8 @@ verify() {
 }
 
 apply_overlay() {
-  [[ "$CONCURRENCY" =~ ^(1|10|100)$ ]] || die "CONCURRENCY must be 1, 10, or 100"
+  [[ "$CONCURRENCY" =~ ^[1-9][0-9]*$ ]] && (( CONCURRENCY <= 256 )) \
+    || die "CONCURRENCY must be between 1 and 256"
   [[ "$PRESSURE_KEY_COUNT" =~ ^[0-9]+$ ]] || die "PRESSURE_KEY_COUNT must be non-negative"
   (( PRESSURE_KEY_COUNT <= CONCURRENCY - 1 )) \
     || die "PRESSURE_KEY_COUNT must not exceed pressure lanes"

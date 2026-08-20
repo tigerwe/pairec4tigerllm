@@ -14,7 +14,7 @@
 
 extern "C" char const* pairecKvcBurstProxyProtocolMarker()
 {
-    return "PAIREC_KVC_BURST_PROXY_V3";
+    return "PAIREC_KVC_BURST_PROXY_V4";
 }
 
 namespace pairec::kvc_burst

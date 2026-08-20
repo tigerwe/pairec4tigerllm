@@ -31,6 +31,8 @@ void Initialize(SharedControl* control, uint32_t concurrency)
 
 int main()
 {
+    static_assert(pairec::kvc_burst::kMaxConcurrency == 256);
+    static_assert(pairec::kvc_burst::kMaxPressureLanes == 255);
     auto memory = ::mmap(nullptr, sizeof(SharedControl), PROT_READ | PROT_WRITE,
         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     assert(memory != MAP_FAILED);
@@ -72,6 +74,9 @@ int main()
     assert(pairec::kvc_burst::RequiredPressureFirst(0) == 0);
     assert(pairec::kvc_burst::RequiredPressureFirst(9) == 9);
     assert(pairec::kvc_burst::RequiredPressureFirst(99) == 95);
+    assert(pairec::kvc_burst::RequiredPressureFirst(127) == 121);
+    assert(pairec::kvc_burst::RequiredPressureFirst(191) == 182);
+    assert(pairec::kvc_burst::RequiredPressureFirst(255) == 243);
     assert(pairec::kvc_burst::PressureFirstSatisfied(99, 95, 95, 96));
     assert(!pairec::kvc_burst::PressureFirstSatisfied(99, 94, 95, 96));
     assert(!pairec::kvc_burst::PressureFirstSatisfied(99, 95, 94, 96));
@@ -91,6 +96,10 @@ int main()
     assert(control->pressure_first_failed == 0);
     control->pressure_lead_us = 100;
     assert(pairec::kvc_burst::ApplyPressureLead(control) >= 100);
+
+    Initialize(control, 256);
+    assert(pairec::kvc_burst::IsCompatible(*control));
+    assert(control->pressure_lanes == 255);
 
     Initialize(control, 2);
     assert(!pairec::kvc_burst::ArriveAndWait(control, 2, 2, &waitUs));

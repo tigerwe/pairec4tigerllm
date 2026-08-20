@@ -85,6 +85,8 @@ DS_WORKER_LOG_DIR="${DS_WORKER_LOG_DIR:-/tmp/datasystem-25g-master/log}"
 DS_WORKER_TAIL_LINES="${DS_WORKER_TAIL_LINES:-20}"
 DS_WORKER_THREADPOOL_WAIT_TIMEOUT_SECONDS="${DS_WORKER_THREADPOOL_WAIT_TIMEOUT_SECONDS:-20}"
 DS_WORKER_LINK_BPS="${DS_WORKER_LINK_BPS:-25000000000}"
+KVC_NIC_BURST_SAMPLE="${KVC_NIC_BURST_SAMPLE:-1}"
+KVC_NIC_BURST_INTERVAL_MS="${KVC_NIC_BURST_INTERVAL_MS:-20}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT_DIR="${OUT_DIR:-/tmp/brpc-kvc-contention/${RUN_ID}-${MODE}}"
@@ -98,6 +100,8 @@ KVC_REMOTE_READY_FILE=""
 KVC_REMOTE_PREPARED_FILE=""
 KVC_REMOTE_START_FILE=""
 KVC_REMOTE_STATS_FILE=""
+NIC_BURST_PID=""
+NIC_BURST_STOP_FILE=""
 
 log() {
   printf '\n== %s ==\n' "$*"
@@ -476,6 +480,14 @@ capture_kvc_stats() {
 }
 
 stop_loads() {
+  if [ -n "$NIC_BURST_STOP_FILE" ]; then
+    ssh "$KVC_LOAD_HOST" "touch '$NIC_BURST_STOP_FILE'" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$NIC_BURST_PID" ]; then
+    wait "$NIC_BURST_PID" >/dev/null 2>&1 || true
+    NIC_BURST_PID=""
+  fi
+  NIC_BURST_STOP_FILE=""
   if [ -n "$BRPC_LOAD_PID" ]; then
     kill "$BRPC_LOAD_PID" >/dev/null 2>&1 || true
     wait "$BRPC_LOAD_PID" >/dev/null 2>&1 || true
@@ -855,7 +867,19 @@ PY
 
 run_replay() {
   local round_dir="$1"
+  local replay_code=0
   log "Replay one PaiRec request"
+  mkdir -p "${round_dir}/replay"
+  if [ "$KVC_NIC_BURST_SAMPLE" = "1" ]; then
+    NIC_BURST_STOP_FILE="/tmp/pairec-nic-burst-${RUN_ID}-${RANDOM}.stop"
+    ssh "$KVC_LOAD_HOST" "rm -f '$NIC_BURST_STOP_FILE'" >/dev/null 2>&1 || true
+    ssh "$KVC_LOAD_HOST" \
+      "python3 '$KVC_REMOTE_REPO/scripts/sample_nic_burst.py' collect --interface '$REMOTE_NETWORK_INTERFACE' --interval-ms '$KVC_NIC_BURST_INTERVAL_MS' --stop-file '$NIC_BURST_STOP_FILE'" \
+      >"${round_dir}/replay/nic-burst.samples" \
+      2>"${round_dir}/replay/nic-burst.collect.log" &
+    NIC_BURST_PID=$!
+    sleep 0.1
+  fi
   NAMESPACE="$NAMESPACE" \
   PAIREC_TARGET="$PAIREC_TARGET" \
   BRPC_TARGET="$BRPC_TARGET" \
@@ -864,9 +888,22 @@ run_replay() {
   SIZE="$REPLAY_SIZE" \
   TIMEOUT="$REPLAY_TIMEOUT" \
   REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION="$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" \
-  OUT_DIR="${round_dir}/replay" \
+    OUT_DIR="${round_dir}/replay" \
     bash scripts/trace_single_brpc_datasystem_request.sh \
-    >"${round_dir}/replay.console.log" 2>&1
+    >"${round_dir}/replay.console.log" 2>&1 || replay_code=$?
+  if [ -n "$NIC_BURST_PID" ]; then
+    ssh "$KVC_LOAD_HOST" "touch '$NIC_BURST_STOP_FILE'" >/dev/null 2>&1 || true
+    wait "$NIC_BURST_PID" >/dev/null 2>&1 || true
+    NIC_BURST_PID=""
+    NIC_BURST_STOP_FILE=""
+    python3 scripts/sample_nic_burst.py summarize \
+      --input "${round_dir}/replay/nic-burst.samples" \
+      --output "${round_dir}/replay/nic-burst.json" \
+      --link-bps "$DS_WORKER_LINK_BPS" \
+      >"${round_dir}/replay/nic-burst.summary.log" 2>&1 \
+      || echo "NIC burst summary failed" >"${round_dir}/replay/nic-burst.error"
+  fi
+  return "$replay_code"
 }
 
 prepare_replay_onboard_retry() {
