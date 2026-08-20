@@ -41,6 +41,8 @@ class NicBurstSummaryTest(unittest.TestCase):
         self.assertIn("sample_nic_burst.py summarize", text)
         self.assertIn("NIC burst collector failed: exit=", text)
         self.assertIn('KVC_NIC_BURST_INTERVAL_MS="${KVC_NIC_BURST_INTERVAL_MS:-20}"', text)
+        self.assertIn("resolve_kvc_load_host", text)
+        self.assertIn("InternalIP", text)
 
     def test_combined_summary_keeps_nic_samples(self):
         text = (ROOT / "scripts" / "validate_pairec_brpc_wrapper_kvc_combined.sh").read_text()

@@ -22,6 +22,7 @@ BRPC_LOAD_READY_TIMEOUT_SECONDS="${BRPC_LOAD_READY_TIMEOUT_SECONDS:-30}"
 BRPC_PROBE_BIN="${BRPC_PROBE_BIN:-/tmp/probe-go-brpc-client}"
 
 KVC_LOAD_HOST="${KVC_LOAD_HOST:-worker1}"
+KVC_LOAD_HOST_ORIGINAL="$KVC_LOAD_HOST"
 KVC_REMOTE_REPO="${KVC_REMOTE_REPO:-/home/zcx/workspace/pairec4tigerllm}"
 KVC_DS_ENDPOINT="${KVC_DS_ENDPOINT:-192.168.100.12:18482}"
 KVC_PRESSURE_ENGINE="${KVC_PRESSURE_ENGINE:-dsbench}"
@@ -114,6 +115,23 @@ die() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
+}
+
+resolve_kvc_load_host() {
+  local configured_host="$KVC_LOAD_HOST"
+  local user_prefix=""
+  local node_name="$configured_host"
+  local internal_ip
+  if [[ "$configured_host" == *@* ]]; then
+    user_prefix="${configured_host%@*}@"
+    node_name="${configured_host##*@}"
+  fi
+  internal_ip="$(kubectl get node "$node_name" \
+    -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' \
+    2>/dev/null || true)"
+  if [ -n "$internal_ip" ]; then
+    KVC_LOAD_HOST="${user_prefix}${internal_ip}"
+  fi
 }
 
 mode_has_brpc() {
@@ -1443,6 +1461,7 @@ if mode_has_kvc; then
   require_command ssh
 fi
 validate
+resolve_kvc_load_host
 build_brpc_probe
 
 cat >"${OUT_DIR}/config.txt" <<EOF
@@ -1456,6 +1475,7 @@ brpc_load_payload_bytes=${BRPC_LOAD_PAYLOAD_BYTES}
 brpc_load_reuse_connections=${BRPC_LOAD_REUSE_CONNECTIONS}
 brpc_load_pod_selector=${BRPC_LOAD_POD_SELECTOR}
 brpc_load_container=${BRPC_LOAD_CONTAINER}
+kvc_load_host_configured=${KVC_LOAD_HOST_ORIGINAL}
 kvc_load_host=${KVC_LOAD_HOST}
 kvc_ds_endpoint=${KVC_DS_ENDPOINT}
 kvc_pressure_engine=${KVC_PRESSURE_ENGINE}
