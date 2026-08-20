@@ -64,7 +64,8 @@ case "$ACTION" in
   delta)
     [[ $# -eq 4 ]] || die "usage: $0 delta <before.json> <after.json> <out.json>"
     python3 "$SCRIPT_DIR/datasystem_worker_metrics.py" delta \
-      --before "$2" --after "$3" --out "$4"
+      --before "$2" --after "$3" --out "$4" \
+      --link-bps "${DS_WORKER_LINK_BPS:-25000000000}"
     ;;
   *)
     die "usage: $0 snapshot <out.json> | delta <before.json> <after.json> <out.json>"

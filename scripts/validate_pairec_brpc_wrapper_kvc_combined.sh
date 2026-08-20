@@ -231,6 +231,7 @@ for name in metric_names:
                      "p95": percentile(values, .95), "p99": percentile(values, .99),
                      "max": max(values)}
 ds_worker_samples = []
+ds_worker_threadpool = []
 for row in contention.get("rows", []):
     round_dir = pathlib.Path(row["summary_path"]).parent.parent
     metrics_path = round_dir / "datasystem-worker-metrics.json"
@@ -239,6 +240,12 @@ for row in contention.get("rows", []):
         ds_worker_samples.append(json.loads(metrics_path.read_text()))
     elif error_path.is_file():
         ds_worker_samples.append({"error": error_path.read_text().strip()})
+    tp_path = round_dir / "worker-threadpool.after.json"
+    tp_error = round_dir / "worker-threadpool.error"
+    if tp_path.is_file():
+        ds_worker_threadpool.append(json.loads(tp_path.read_text()).get("peak", {}))
+    elif tp_error.is_file():
+        ds_worker_threadpool.append({"error": tp_error.read_text().strip()})
 result = {
     "classification": (f"PAIREC_BRPC_WRAPPER_C{wrapper_concurrency}_KVC_C{kvc_concurrency}_OK"
                        if valid else "PAIREC_BRPC_WRAPPER_KVC_COMBINED_FAIL"),
@@ -253,6 +260,7 @@ result = {
     "samples": rows,
     "metrics": metrics,
     "datasystem_worker_samples": ds_worker_samples,
+    "datasystem_worker_threadpool": ds_worker_threadpool,
 }
 pathlib.Path(sys.argv[3]).write_text(json.dumps(result, indent=2) + "\n")
 print(f"classification={result['classification']}")

@@ -134,6 +134,49 @@ class DataSystemWorkerMetricsTest(unittest.TestCase):
             parsed = json.loads(out.read_text())
             self.assertEqual("p", parsed["pod"])
 
+    def test_parse_resource_log(self):
+        # 7 log-header fields + 22 ResMetricName fields, joined by " | ".
+        header = ["2026-08-19T16:24:07.146+08:00", "info", "worker_oc_server.cpp:100",
+                  "ds-pod", "9:177", "trace", "ds-worker"]
+        msg = [
+            "a/b/c/d/e/f", "x/y/z/w", "99", "16", "1835008",
+            "8/8/100/5/0.620", "1/2/10/0/0.010", "0/1/2/0/0.000", "0/1/1/0/0.000",
+            "0/100/0.0", "100.000", "100.000", "0/1/1/0/0.000", "0",
+            "0/1/1/0/0.000", "0/1/1/0/0.000", "0/1/1/0/0.000", "0/1/1/0/0.000",
+            "100.000", "a/b/c/d", "a/b/c/d", "10/0/0/0/5",
+        ]
+        parsed = metrics.parse_resource_log(
+            " | ".join(header + msg) + "\n", "ds-pod", "master", 123)
+        self.assertEqual(1, parsed["line_count"])
+        line = parsed["lines"][0]
+        self.assertEqual(99, line["client_count"])
+        self.assertEqual(16, line["object_count"])
+        self.assertEqual(1835008, line["object_size"])
+        self.assertEqual("10/0/0/0/5", line["cache_hit"])
+        self.assertEqual(
+            {"max_running": 8, "current_total": 8, "tasks_delta": 100,
+             "max_waiting": 5, "usage": 0.62},
+            line["worker_oc_service"],
+        )
+        self.assertEqual(5, parsed["peak"]["worker_oc_service"]["max_waiting"])
+        self.assertEqual(0.62, parsed["peak"]["worker_oc_service"]["max_usage"])
+
+    def test_delta_link_pct(self):
+        before = {
+            "ts_ns": 0, "pod": "p", "node": "n",
+            "netdev": {"enp": {"rx_bytes": 0, "tx_bytes": 0}},
+            "cpu_stat": {}, "proc_stat": {}, "ctxt_switches": {}, "softirq": {},
+            "psi_cpu": {}, "psi_memory": {}, "memory_stat": {},
+            "memory_current_bytes": None, "loadavg": {}, "cpuacct_usage_ns": None,
+        }
+        after = json.loads(json.dumps(before))
+        after["ts_ns"] = 1_000_000_000
+        # 25 Gbps for 1s -> 3.125 GiB received (100%), 1.5625 GiB sent (50%).
+        after["netdev"]["enp"] = {"rx_bytes": 3_125_000_000, "tx_bytes": 1_562_500_000}
+        delta = metrics.compute_delta(before, after, link_bps=25e9)
+        self.assertAlmostEqual(100.0, delta["netdev_total"]["rx_link_pct"], places=1)
+        self.assertAlmostEqual(50.0, delta["netdev_total"]["tx_link_pct"], places=1)
+
 
 class SustainedPressureStructureTest(unittest.TestCase):
     def test_apply_script_requires_v3_managed_proxy(self):
@@ -343,6 +386,7 @@ class SustainedPressureStructureTest(unittest.TestCase):
             '"kvc_pressure_inflight_at_business_start"',
             '"kvc_sustained_loop_gets"',
             '"datasystem_worker_samples"',
+            '"datasystem_worker_threadpool"',
             'kvc.get("sustained_enabled", False) is kvc_sustained_pressure',
             'kvc["pressure_inflight_at_business_start"] >= required_pressure_first',
         ):

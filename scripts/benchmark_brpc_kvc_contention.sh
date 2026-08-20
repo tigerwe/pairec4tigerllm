@@ -80,6 +80,10 @@ REMOTE_NETWORK_INTERFACE="${REMOTE_NETWORK_INTERFACE:-enp41s0f1}"
 DS_WORKER_METRICS="${DS_WORKER_METRICS:-1}"
 DS_WORKER_POD_SELECTOR="${DS_WORKER_POD_SELECTOR:-app=datasystem-25g-master}"
 DS_WORKER_CONTAINER="${DS_WORKER_CONTAINER:-datasystem-worker}"
+DS_WORKER_THREADPOOL="${DS_WORKER_THREADPOOL:-1}"
+DS_WORKER_LOG_DIR="${DS_WORKER_LOG_DIR:-/tmp/datasystem-25g-master/log}"
+DS_WORKER_TAIL_LINES="${DS_WORKER_TAIL_LINES:-20}"
+DS_WORKER_LINK_BPS="${DS_WORKER_LINK_BPS:-25000000000}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT_DIR="${OUT_DIR:-/tmp/brpc-kvc-contention/${RUN_ID}-${MODE}}"
@@ -257,13 +261,32 @@ capture_datasystem_worker_metrics() {
     return 0
   fi
   if [ "$phase" = "after" ] && [ -f "${round_dir}/datasystem-worker-metrics.before.json" ]; then
-    if ! bash scripts/collect_datasystem_worker_metrics.sh delta \
+    if ! DS_WORKER_LINK_BPS="$DS_WORKER_LINK_BPS" \
+        bash scripts/collect_datasystem_worker_metrics.sh delta \
         "${round_dir}/datasystem-worker-metrics.before.json" \
         "${round_dir}/datasystem-worker-metrics.after.json" \
         "${round_dir}/datasystem-worker-metrics.json" \
         >>"${round_dir}/datasystem-worker-metrics.${phase}.log" 2>&1; then
       echo "delta computation failed" >"${round_dir}/datasystem-worker-metrics.error"
     fi
+  fi
+}
+
+capture_datasystem_worker_threadpool() {
+  local round_dir="$1"
+  local phase="$2"
+  [ "$DS_WORKER_THREADPOOL" = "1" ] || return 0
+  # Observational: a collection failure is recorded as an artifact and never
+  # fails the round itself.
+  if ! DS_WORKER_POD_SELECTOR="$DS_WORKER_POD_SELECTOR" \
+       DS_WORKER_CONTAINER="$DS_WORKER_CONTAINER" NAMESPACE="$NAMESPACE" \
+       DS_WORKER_LOG_DIR="$DS_WORKER_LOG_DIR" DS_WORKER_TAIL_LINES="$DS_WORKER_TAIL_LINES" \
+       bash scripts/collect_datasystem_worker_threadpool.sh snapshot \
+         "${round_dir}/worker-threadpool.${phase}.json" \
+         >"${round_dir}/worker-threadpool.${phase}.log" 2>&1; then
+    echo "threadpool snapshot phase=${phase} failed; see ${round_dir}/worker-threadpool.${phase}.log" \
+      >"${round_dir}/worker-threadpool.error"
+    return 0
   fi
 }
 
@@ -1467,6 +1490,7 @@ for round in $(seq 1 "$REPEATS"); do
   capture_inference_state "$round_dir" before
   capture_brpc_pressure_cpu_stat "$round_dir" before
   capture_datasystem_worker_metrics "$round_dir" before
+  capture_datasystem_worker_threadpool "$round_dir" before
 
   read_counter "$NETWORK_INTERFACE" rx_bytes >"${round_dir}/local-rx.before"
   read_counter "$NETWORK_INTERFACE" tx_bytes >"${round_dir}/local-tx.before"
@@ -1544,6 +1568,7 @@ for round in $(seq 1 "$REPEATS"); do
   capture_inference_state "$round_dir" after
   capture_brpc_pressure_cpu_stat "$round_dir" after
   capture_datasystem_worker_metrics "$round_dir" after
+  capture_datasystem_worker_threadpool "$round_dir" after
 
   read_counter "$NETWORK_INTERFACE" rx_bytes >"${round_dir}/local-rx.after"
   read_counter "$NETWORK_INTERFACE" tx_bytes >"${round_dir}/local-tx.after"

@@ -140,7 +140,9 @@ def _rate(before, after, key, elapsed_s):
     return (after[key] - before[key]) / elapsed_s
 
 
-def compute_delta(before: dict, after: dict, clk_tck: int = CLK_TCK_DEFAULT) -> dict:
+def compute_delta(
+    before: dict, after: dict, clk_tck: int = CLK_TCK_DEFAULT, link_bps: float | None = None
+) -> dict:
     elapsed_s = (after["ts_ns"] - before["ts_ns"]) / 1e9
     delta = {
         "pod": after["pod"],
@@ -196,10 +198,15 @@ def compute_delta(before: dict, after: dict, clk_tck: int = CLK_TCK_DEFAULT) -> 
             continue
         interfaces[name] = {"rx_Bps": round(rx_bps, 1), "tx_Bps": round(tx_bps, 1)}
     delta["netdev"] = interfaces
-    delta["netdev_total"] = {
+    netdev_total = {
         "rx_Bps": round(sum(item["rx_Bps"] for item in interfaces.values()), 1),
         "tx_Bps": round(sum(item["tx_Bps"] for item in interfaces.values()), 1),
     }
+    if link_bps:
+        # B/s * 8 -> bps, then as a percentage of the link capacity.
+        netdev_total["rx_link_pct"] = round(netdev_total["rx_Bps"] * 8 / link_bps * 100, 3)
+        netdev_total["tx_link_pct"] = round(netdev_total["tx_Bps"] * 8 / link_bps * 100, 3)
+    delta["netdev_total"] = netdev_total
 
     softirq = {}
     for key in ("net_rx", "net_tx"):
@@ -229,6 +236,103 @@ def compute_delta(before: dict, after: dict, clk_tck: int = CLK_TCK_DEFAULT) -> 
     return delta
 
 
+# DataSystem worker "resource" log layout. Lines split on " | ": the first 7
+# fields are the standard log header (time|level|filename|pod|pid:tid|trace_id|
+# cluster_name); the remaining 22 are the ResMetricName fields in
+# res_metrics.def order. Verified against the client log-monitor test which
+# uses exactly 7 header fields and asserts object size at absolute index 11.
+RESOURCE_HEADER_FIELDS = 7
+# 0-based message indices (i.e. offset after the 7 header fields).
+RESOURCE_INT_FIELDS = {
+    "client_count": 2,   # ACTIVE_CLIENT_COUNT
+    "object_count": 3,   # OBJECT_COUNT
+    "object_size": 4,    # OBJECT_SIZE
+}
+# Slash-separated fields kept verbatim (memHit/diskHit/l2Hit/remoteHit/miss).
+RESOURCE_STRING_FIELDS = {
+    "cache_hit": 21,     # OC_HIT_NUM
+}
+# Thread pools report "maxRunning/currentTotal/tasksDelta/maxWaiting/usage"
+# (thread_pool.h ThreadPoolUsage::ToString(int64_t)). maxWaiting is the peak
+# queued-task depth over the interval -- the direct saturation signal.
+THREAD_POOL_FIELDS = (
+    ("worker_oc_service", 5),          # WORKER_OC_SERVICE_THREAD_POOL (main Get/Set RPC pool)
+    ("worker_worker_oc_service", 6),
+    ("master_worker_oc_service", 7),
+    ("master_oc_service", 8),
+    ("master_async_tasks", 12),
+)
+
+
+def _field_int(fields: list[str], index: int) -> int | None:
+    if index >= len(fields):
+        return None
+    value = fields[index].strip()
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def parse_thread_pool(field: str) -> dict | None:
+    parts = field.strip().split("/")
+    if len(parts) != 5:
+        return None
+    try:
+        return {
+            "max_running": int(parts[0]),
+            "current_total": int(parts[1]),
+            "tasks_delta": int(parts[2]),
+            "max_waiting": int(parts[3]),
+            "usage": float(parts[4]),
+        }
+    except ValueError:
+        return None
+
+
+def parse_resource_log(raw: str, pod: str, node: str, ts_ns: int) -> dict:
+    lines: list[dict] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        fields = [f.strip() for f in line.split(" | ")]
+        if len(fields) < RESOURCE_HEADER_FIELDS + 1:
+            continue
+        entry: dict = {"ts": fields[0]}
+        for name, msg_idx in RESOURCE_INT_FIELDS.items():
+            value = _field_int(fields, RESOURCE_HEADER_FIELDS + msg_idx)
+            if value is not None:
+                entry[name] = value
+        for name, msg_idx in RESOURCE_STRING_FIELDS.items():
+            if RESOURCE_HEADER_FIELDS + msg_idx < len(fields):
+                entry[name] = fields[RESOURCE_HEADER_FIELDS + msg_idx]
+        for name, msg_idx in THREAD_POOL_FIELDS:
+            idx = RESOURCE_HEADER_FIELDS + msg_idx
+            if idx >= len(fields):
+                continue
+            pool = parse_thread_pool(fields[idx])
+            if pool is not None:
+                entry[name] = pool
+        lines.append(entry)
+
+    peak: dict = {}
+    for name, _ in THREAD_POOL_FIELDS:
+        waiting = [e[name]["max_waiting"] for e in lines if name in e]
+        usage = [e[name]["usage"] for e in lines if name in e]
+        peak[name] = {
+            "max_waiting": max(waiting) if waiting else None,
+            "max_usage": max(usage) if usage else None,
+        }
+    return {
+        "pod": pod,
+        "node": node,
+        "ts_ns": ts_ns,
+        "line_count": len(lines),
+        "peak": peak,
+        "lines": lines,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -245,18 +349,31 @@ def main() -> None:
     delta.add_argument("--after", type=pathlib.Path, required=True)
     delta.add_argument("--out", type=pathlib.Path, required=True)
     delta.add_argument("--clk-tck", type=int, default=CLK_TCK_DEFAULT)
+    delta.add_argument("--link-bps", type=float, default=25e9,
+                       help="link capacity in bits/s for saturation percentage (default 25 Gbps)")
+
+    reslog = sub.add_parser("parse-resource-log")
+    reslog.add_argument("--raw", type=pathlib.Path, required=True)
+    reslog.add_argument("--pod", required=True)
+    reslog.add_argument("--node", required=True)
+    reslog.add_argument("--ts-ns", type=int, required=True)
+    reslog.add_argument("--out", type=pathlib.Path, required=True)
 
     args = parser.parse_args()
     if args.command == "parse-snapshot":
         result = parse_snapshot(args.raw.read_text(), args.pod, args.node, args.ts_ns)
+    elif args.command == "parse-resource-log":
+        result = parse_resource_log(args.raw.read_text(), args.pod, args.node, args.ts_ns)
     else:
         result = compute_delta(
             json.loads(args.before.read_text()),
             json.loads(args.after.read_text()),
             args.clk_tck,
+            args.link_bps,
         )
     args.out.write_text(json.dumps(result, indent=2) + "\n")
-    print(f"DATASYSTEM_WORKER_METRICS_{'SNAPSHOT' if args.command == 'parse-snapshot' else 'DELTA'}_OK out={args.out}")
+    marker = {"parse-snapshot": "SNAPSHOT", "parse-resource-log": "RESOURCE_LOG", "delta": "DELTA"}[args.command]
+    print(f"DATASYSTEM_WORKER_METRICS_{marker}_OK out={args.out}")
 
 
 if __name__ == "__main__":
