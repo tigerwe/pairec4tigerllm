@@ -83,6 +83,7 @@ DS_WORKER_CONTAINER="${DS_WORKER_CONTAINER:-datasystem-worker}"
 DS_WORKER_THREADPOOL="${DS_WORKER_THREADPOOL:-1}"
 DS_WORKER_LOG_DIR="${DS_WORKER_LOG_DIR:-/tmp/datasystem-25g-master/log}"
 DS_WORKER_TAIL_LINES="${DS_WORKER_TAIL_LINES:-20}"
+DS_WORKER_THREADPOOL_WAIT_TIMEOUT_SECONDS="${DS_WORKER_THREADPOOL_WAIT_TIMEOUT_SECONDS:-20}"
 DS_WORKER_LINK_BPS="${DS_WORKER_LINK_BPS:-25000000000}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
@@ -275,12 +276,27 @@ capture_datasystem_worker_metrics() {
 capture_datasystem_worker_threadpool() {
   local round_dir="$1"
   local phase="$2"
+  local window_start_ns=""
+  local wait_until_ns=""
   [ "$DS_WORKER_THREADPOOL" = "1" ] || return 0
+  if [ "$phase" = "after" ]; then
+    wait_until_ns="$(date +%s%N)"
+    if [ -f "${round_dir}/worker-threadpool.before.json" ]; then
+      window_start_ns="$(python3 - "${round_dir}/worker-threadpool.before.json" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1])).get("ts_ns", ""))
+PY
+)"
+    fi
+  fi
   # Observational: a collection failure is recorded as an artifact and never
   # fails the round itself.
   if ! DS_WORKER_POD_SELECTOR="$DS_WORKER_POD_SELECTOR" \
        DS_WORKER_CONTAINER="$DS_WORKER_CONTAINER" NAMESPACE="$NAMESPACE" \
        DS_WORKER_LOG_DIR="$DS_WORKER_LOG_DIR" DS_WORKER_TAIL_LINES="$DS_WORKER_TAIL_LINES" \
+       DS_WORKER_WINDOW_START_NS="$window_start_ns" DS_WORKER_WAIT_UNTIL_NS="$wait_until_ns" \
+       DS_WORKER_WAIT_TIMEOUT_SECONDS="$DS_WORKER_THREADPOOL_WAIT_TIMEOUT_SECONDS" \
        bash scripts/collect_datasystem_worker_threadpool.sh snapshot \
          "${round_dir}/worker-threadpool.${phase}.json" \
          >"${round_dir}/worker-threadpool.${phase}.log" 2>&1; then

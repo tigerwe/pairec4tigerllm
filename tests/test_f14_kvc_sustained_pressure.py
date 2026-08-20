@@ -160,6 +160,34 @@ class DataSystemWorkerMetricsTest(unittest.TestCase):
         )
         self.assertEqual(5, parsed["peak"]["worker_oc_service"]["max_waiting"])
         self.assertEqual(0.62, parsed["peak"]["worker_oc_service"]["max_usage"])
+        self.assertEqual(
+            metrics.parse_resource_timestamp_ns("2026-08-19T08:24:07.146Z"),
+            line["resource_ts_ns"],
+        )
+
+    def test_resource_log_naive_timestamp_is_utc_and_window_uses_covering_line(self):
+        def resource_line(timestamp, waiting, usage):
+            header = [timestamp, "info", "worker.cpp:1", "pod", "1:2", "trace", "cluster"]
+            msg = [
+                "a", "b", "1", "1", "1",
+                f"15/15/16/{waiting}/{usage}", "0/0/0/0/0", "0/0/0/0/0", "0/0/0/0/0",
+                "0", "0", "0", "0/0/0/0/0", "0", "0/0/0/0/0", "0/0/0/0/0",
+                "0/0/0/0/0", "0/0/0/0/0", "0", "0", "0", "0",
+            ]
+            return " | ".join(header + msg)
+
+        start = metrics.parse_resource_timestamp_ns("2026-08-20T06:32:01Z")
+        end = metrics.parse_resource_timestamp_ns("2026-08-20T06:32:10Z")
+        raw = "\n".join([
+            resource_line("2026-08-20T06:32:02", 0, "0.0"),
+            resource_line("2026-08-20T06:32:12", 85, "1.0"),
+            resource_line("2026-08-20T06:32:22", 0, "0.0"),
+        ])
+        parsed = metrics.parse_resource_log(raw, "pod", "node", end, start, end)
+        self.assertEqual(1, parsed["window_line_count"])
+        self.assertEqual("2026-08-20T06:32:12", parsed["window_lines"][0]["ts"])
+        self.assertEqual(85, parsed["peak"]["worker_oc_service"]["max_waiting"])
+        self.assertEqual(1.0, parsed["peak"]["worker_oc_service"]["max_usage"])
 
     def test_delta_link_pct(self):
         before = {
@@ -284,6 +312,8 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn("capture_datasystem_worker_metrics \"$round_dir\" after", text)
         self.assertIn("collect_datasystem_worker_metrics.sh snapshot", text)
         self.assertIn("datasystem-worker-metrics.error", text)
+        self.assertIn('DS_WORKER_WAIT_UNTIL_NS="$wait_until_ns"', text)
+        self.assertIn('DS_WORKER_WINDOW_START_NS="$window_start_ns"', text)
 
     def test_contention_replay_retry_wiring(self):
         text = CONTENTION.read_text()

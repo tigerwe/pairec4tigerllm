@@ -11,6 +11,7 @@ standalone module so the parsing and delta math are unit-testable.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import pathlib
 import sys
@@ -290,7 +291,45 @@ def parse_thread_pool(field: str) -> dict | None:
         return None
 
 
-def parse_resource_log(raw: str, pod: str, node: str, ts_ns: int) -> dict:
+def parse_resource_timestamp_ns(value: str) -> int | None:
+    """Parse DataSystem resource timestamps.
+
+    DataSystem emits naive ISO timestamps in UTC even when the Kubernetes host
+    uses CST. Offset-bearing timestamps are respected as written.
+    """
+    try:
+        parsed = dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    parsed = parsed.astimezone(dt.timezone.utc)
+    epoch = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+    delta = parsed - epoch
+    return ((delta.days * 86400 + delta.seconds) * 1_000_000_000
+            + delta.microseconds * 1000)
+
+
+def _thread_pool_peak(lines: list[dict]) -> dict:
+    peak: dict = {}
+    for name, _ in THREAD_POOL_FIELDS:
+        waiting = [e[name]["max_waiting"] for e in lines if name in e]
+        usage = [e[name]["usage"] for e in lines if name in e]
+        peak[name] = {
+            "max_waiting": max(waiting) if waiting else None,
+            "max_usage": max(usage) if usage else None,
+        }
+    return peak
+
+
+def parse_resource_log(
+    raw: str,
+    pod: str,
+    node: str,
+    ts_ns: int,
+    window_start_ns: int | None = None,
+    window_end_ns: int | None = None,
+) -> dict:
     lines: list[dict] = []
     for line in raw.splitlines():
         if not line.strip():
@@ -299,6 +338,9 @@ def parse_resource_log(raw: str, pod: str, node: str, ts_ns: int) -> dict:
         if len(fields) < RESOURCE_HEADER_FIELDS + 1:
             continue
         entry: dict = {"ts": fields[0]}
+        resource_ts_ns = parse_resource_timestamp_ns(fields[0])
+        if resource_ts_ns is not None:
+            entry["resource_ts_ns"] = resource_ts_ns
         for name, msg_idx in RESOURCE_INT_FIELDS.items():
             value = _field_int(fields, RESOURCE_HEADER_FIELDS + msg_idx)
             if value is not None:
@@ -315,20 +357,35 @@ def parse_resource_log(raw: str, pod: str, node: str, ts_ns: int) -> dict:
                 entry[name] = pool
         lines.append(entry)
 
-    peak: dict = {}
-    for name, _ in THREAD_POOL_FIELDS:
-        waiting = [e[name]["max_waiting"] for e in lines if name in e]
-        usage = [e[name]["usage"] for e in lines if name in e]
-        peak[name] = {
-            "max_waiting": max(waiting) if waiting else None,
-            "max_usage": max(usage) if usage else None,
-        }
+    window_lines = lines
+    coverage_ts_ns = None
+    if window_start_ns is not None and window_end_ns is not None:
+        # A resource line summarizes the preceding monitor interval. The first
+        # line emitted after measurement end is therefore the interval that
+        # contains the tail of the measured burst and is the least diluted
+        # server-side saturation sample.
+        coverage = [
+            entry for entry in lines
+            if entry.get("resource_ts_ns", -1) >= window_end_ns
+        ]
+        if coverage:
+            selected = min(coverage, key=lambda entry: entry["resource_ts_ns"])
+            coverage_ts_ns = selected["resource_ts_ns"]
+            window_lines = [selected]
+        else:
+            window_lines = []
     return {
         "pod": pod,
         "node": node,
         "ts_ns": ts_ns,
         "line_count": len(lines),
-        "peak": peak,
+        "resource_timestamp_timezone": "UTC when no offset is present",
+        "window_start_ns": window_start_ns,
+        "window_end_ns": window_end_ns,
+        "coverage_resource_ts_ns": coverage_ts_ns,
+        "window_line_count": len(window_lines),
+        "peak": _thread_pool_peak(window_lines),
+        "window_lines": window_lines,
         "lines": lines,
     }
 
@@ -357,13 +414,18 @@ def main() -> None:
     reslog.add_argument("--pod", required=True)
     reslog.add_argument("--node", required=True)
     reslog.add_argument("--ts-ns", type=int, required=True)
+    reslog.add_argument("--window-start-ns", type=int)
+    reslog.add_argument("--window-end-ns", type=int)
     reslog.add_argument("--out", type=pathlib.Path, required=True)
 
     args = parser.parse_args()
     if args.command == "parse-snapshot":
         result = parse_snapshot(args.raw.read_text(), args.pod, args.node, args.ts_ns)
     elif args.command == "parse-resource-log":
-        result = parse_resource_log(args.raw.read_text(), args.pod, args.node, args.ts_ns)
+        result = parse_resource_log(
+            args.raw.read_text(), args.pod, args.node, args.ts_ns,
+            args.window_start_ns, args.window_end_ns,
+        )
     else:
         result = compute_delta(
             json.loads(args.before.read_text()),
