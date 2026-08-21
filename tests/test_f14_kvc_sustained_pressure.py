@@ -321,7 +321,7 @@ class SustainedPressureStructureTest(unittest.TestCase):
             self.assertIn(token, wrapper)
         for token in (
             "INPROCESS_PRESSURE=${INPROCESS_PRESSURE:-0}",
-            "PAIREC_KVC_INPROCESS_BURST_C32_V1",
+            "PAIREC_KVC_INPROCESS_BURST_C32_V2",
             'die "in-process pressure requires CONCURRENCY=32"',
             'die "in-process pressure requires PRESSURE_KEY_COUNT between 1 and 31"',
             'die "in-process pressure requires OBJECT_SIZE=3670016"',

@@ -52,9 +52,9 @@ verify() {
     || die "KVC proxy V4 capability marker is missing from TensorRT-LLM"
   if [[ "$INPROCESS_PRESSURE" = 1 ]]; then
     kubectl -n "$NAMESPACE" exec "$pod" -c "$INFERENCE_CONTAINER" -- \
-      grep -aFq PAIREC_KVC_INPROCESS_BURST_C32_V1 \
+      grep -aFq PAIREC_KVC_INPROCESS_BURST_C32_V2 \
         "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
-      || die "in-process KVC c32 capability marker is missing from TensorRT-LLM"
+      || die "in-process KVC c32 V2 capability marker is missing from TensorRT-LLM"
   fi
   kubectl -n "$NAMESPACE" exec "$pod" -c "$SIDECAR_CONTAINER" -- \
     test -s /run/pairec-kvc-burst/ready \

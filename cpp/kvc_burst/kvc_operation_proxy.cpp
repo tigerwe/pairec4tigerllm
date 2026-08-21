@@ -25,7 +25,7 @@ extern "C" char const* pairecKvcBurstProxyProtocolMarker()
 
 extern "C" char const* pairecKvcInProcessBurstCapabilityMarker()
 {
-    return "PAIREC_KVC_INPROCESS_BURST_C32_V1";
+    return "PAIREC_KVC_INPROCESS_BURST_C32_V2";
 }
 
 namespace pairec::kvc_burst

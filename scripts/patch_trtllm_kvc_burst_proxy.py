@@ -45,67 +45,99 @@ def managed_sources(repo_root: Path) -> tuple[str, str, str]:
 
 
 def patch_wrapped_get(transfer: Path, attribution_prefix: str, proxy_prefix: str,
-    api: str, key_count: str, calls: tuple[str, ...]) -> None:
+    api: str, key_count: str, pressure_client: str | None, calls: tuple[str, ...]) -> None:
     text = transfer.read_text()
-    if f"auto const {proxy_prefix}Token =" in text:
-        return
     attribution = f"auto const {attribution_prefix}Token = beginDataSystemOperation(DataSystemOperation::kGet);"
     if text.count(attribution) != 1:
         raise RuntimeError(f"missing exact attribution anchor for {proxy_prefix} in {transfer}")
-    begin = (
-        f"auto const {proxy_prefix}RequestId = currentDataSystemRequestId();\n"
-        f"            auto const {proxy_prefix}Token = pairec::kvc_burst::beginBusinessGet(\n"
-        f"                {proxy_prefix}RequestId.value_or(\"\"), "
-        f"pairec::kvc_burst::BusinessApi::{api}, {key_count});\n")
-    if api == "kGet":
-        begin += (
-            f"            auto {proxy_prefix}Pressure = "
-            "pairec::kvc_burst::beginInProcessPressure(\n"
-            f"                {proxy_prefix}Token, [&kvClient1](uint32_t, std::string const& pressureKey) {{\n"
-            "                    datasystem::Optional<datasystem::Buffer> pressureBuffer;\n"
-            "                    auto const pressureStatus = kvClient1->Get(pressureKey, pressureBuffer, 0);\n"
-            "                    return !pressureStatus.IsError() && static_cast<bool>(pressureBuffer);\n"
-            "                });\n")
-    begin += f"            {attribution}"
-    replace_once(transfer, attribution, begin)
+    if f"auto const {proxy_prefix}Token =" not in text:
+        begin = (
+            f"auto const {proxy_prefix}RequestId = currentDataSystemRequestId();\n"
+            f"            auto const {proxy_prefix}Token = pairec::kvc_burst::beginBusinessGet(\n"
+            f"                {proxy_prefix}RequestId.value_or(\"\"), "
+            f"pairec::kvc_burst::BusinessApi::{api}, {key_count});\n")
+        replace_once(transfer, attribution, begin + f"            {attribution}")
 
     text = transfer.read_text()
-    matches = [call for call in calls if text.count(call) == 1]
-    if len(matches) != 1:
-        raise RuntimeError(f"expected one DataSystem Get call for {proxy_prefix} in {transfer}, found {len(matches)}")
-    call = matches[0]
-    replace_once(transfer, call,
-        f"{call}\n"
-        f"            auto const {proxy_prefix}EndedNs = pairec::kvc_burst::MonotonicNs();")
+    if pressure_client is not None and f"auto {proxy_prefix}Pressure =" not in text:
+        capture = f"&{pressure_client}"
+        pressure = (
+            f"            auto {proxy_prefix}Pressure = "
+            "pairec::kvc_burst::beginInProcessPressure(\n"
+            f"                {proxy_prefix}Token, [{capture}](uint32_t, std::string const& pressureKey) {{\n"
+            "                    datasystem::Optional<datasystem::Buffer> pressureBuffer;\n"
+            f"                    auto const pressureStatus = {pressure_client}->Get(pressureKey, pressureBuffer, 0);\n"
+            "                    return !pressureStatus.IsError() && static_cast<bool>(pressureBuffer);\n"
+            "                });\n")
+        replace_once(transfer, attribution, pressure + f"            {attribution}")
+
+    text = transfer.read_text()
+    if f"auto const {proxy_prefix}EndedNs =" not in text:
+        matches = [call for call in calls if text.count(call) == 1]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"expected one DataSystem Get call for {proxy_prefix} in {transfer}, found {len(matches)}")
+        call = matches[0]
+        replace_once(transfer, call,
+            f"{call}\n"
+            f"            auto const {proxy_prefix}EndedNs = pairec::kvc_burst::MonotonicNs();")
+
     attribution_finish = (
         f"finishDataSystemOperation({attribution_prefix}Token, DataSystemOperation::kGet, "
         f"{attribution_prefix}Us, getRet.IsError());")
-    finish = attribution_finish
-    if api == "kGet":
-        finish += f"\n            {proxy_prefix}Pressure.finish();"
-    finish += (f"\n            pairec::kvc_burst::finishBusinessGet(\n"
-               f"                {proxy_prefix}Token, !getRet.IsError(), {proxy_prefix}EndedNs);")
-    replace_once(transfer, attribution_finish, finish)
+    business_finish = (f"pairec::kvc_burst::finishBusinessGet(\n"
+                       f"                {proxy_prefix}Token, !getRet.IsError(), {proxy_prefix}EndedNs);")
+    text = transfer.read_text()
+    if business_finish not in text:
+        finish = attribution_finish
+        if pressure_client is not None:
+            finish += f"\n            {proxy_prefix}Pressure.finish();"
+        finish += f"\n            {business_finish}"
+        replace_once(transfer, attribution_finish, finish)
+    elif pressure_client is not None and f"{proxy_prefix}Pressure.finish();" not in text:
+        replace_once(transfer, business_finish,
+            f"{proxy_prefix}Pressure.finish();\n            {business_finish}")
 
 
 def patch_parallel_get(transfer: Path) -> None:
     text = transfer.read_text()
-    if "TRTLLM_DATASYSTEM_PARALLEL_GET" not in text or "kvcBurstParallelGetToken" in text:
+    if "TRTLLM_DATASYSTEM_PARALLEL_GET" not in text:
         return
     loop = "                for (auto const& key : keys)\n"
-    begin = (
-        "                auto const kvcBurstParallelGetRequestId = currentDataSystemRequestId();\n"
-        "                auto const kvcBurstParallelGetToken = pairec::kvc_burst::beginBusinessGet(\n"
-        "                    kvcBurstParallelGetRequestId.value_or(\"\"),\n"
-        "                    pairec::kvc_burst::BusinessApi::kParallelGet, keys.size());\n"
-        + loop)
-    replace_once(transfer, loop, begin)
+    if "kvcBurstParallelGetToken" not in text:
+        begin = (
+            "                auto const kvcBurstParallelGetRequestId = currentDataSystemRequestId();\n"
+            "                auto const kvcBurstParallelGetToken = pairec::kvc_burst::beginBusinessGet(\n"
+            "                    kvcBurstParallelGetRequestId.value_or(\"\"),\n"
+            "                    pairec::kvc_burst::BusinessApi::kParallelGet, keys.size());\n"
+            + loop)
+        replace_once(transfer, loop, begin)
+    text = transfer.read_text()
+    if "kvcBurstParallelGetPressure" not in text:
+        pressure = (
+            "                auto kvcBurstParallelGetPressure = "
+            "pairec::kvc_burst::beginInProcessPressure(\n"
+            "                    kvcBurstParallelGetToken, "
+            "[&kvClient](uint32_t, std::string const& pressureKey) {\n"
+            "                        datasystem::Optional<datasystem::Buffer> pressureBuffer;\n"
+            "                        auto const pressureStatus = kvClient->Get(pressureKey, pressureBuffer, 0);\n"
+            "                        return !pressureStatus.IsError() && static_cast<bool>(pressureBuffer);\n"
+            "                    });\n")
+        replace_once(transfer, loop, pressure + loop)
     completion = (
         "                activeParallelGetCallsAfter = "
         "gActiveParallelGetCalls.fetch_sub(1, std::memory_order_relaxed) - 1;\n")
-    replace_once(transfer, completion,
-        completion
-        + "                pairec::kvc_burst::finishBusinessGet(kvcBurstParallelGetToken, !getFailed);\n")
+    business_finish = (
+        "pairec::kvc_burst::finishBusinessGet(kvcBurstParallelGetToken, !getFailed);")
+    text = transfer.read_text()
+    if business_finish not in text:
+        replace_once(transfer, completion,
+            completion
+            + "                kvcBurstParallelGetPressure.finish();\n"
+            + f"                {business_finish}\n")
+    elif "kvcBurstParallelGetPressure.finish();" not in text:
+        replace_once(transfer, business_finish,
+            "kvcBurstParallelGetPressure.finish();\n                " + business_finish)
 
 
 def patch_tree(root: Path, repo_root: Path) -> None:
@@ -131,13 +163,13 @@ def patch_tree(root: Path, repo_root: Path) -> None:
         '#include "tensorrt_llm/batch_manager/datasystemRequestTracker.h"\n'
         '#include "tensorrt_llm/batch_manager/kvcOperationProxy.h"\n')
 
-    patch_wrapped_get(transfer, "attributionGet", "kvcBurstGet", "kGet", "1U", (
+    patch_wrapped_get(transfer, "attributionGet", "kvcBurstGet", "kGet", "1U", "kvClient1", (
         "datasystem::Status getRet = kvClient1->Get("
         "std::to_string(BlockKeyHasher::hash(src->getBlockKey())), buffer, 0);",
         "datasystem::Status getRet = kvClient1->Get(key, buffer, 0);",
     ))
     patch_wrapped_get(transfer, "attributionMGet", "kvcBurstMGet", "kMGet",
-        "static_cast<uint32_t>(keys.size())", (
+        "static_cast<uint32_t>(keys.size())", "kvClient", (
             "datasystem::Status getRet = kvClient->Get(keys, buffers, 0);",
             "auto const getRet = kvClient->Get(keys, buffers, 0);",
         ))
