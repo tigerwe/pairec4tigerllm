@@ -13,6 +13,7 @@ SHARED_H = ROOT / "cpp" / "kvc_burst" / "kvc_burst_shared.h"
 DEPLOY = ROOT / "scripts" / "deploy_f14_kvc_burst_overlay.sh"
 CONTENTION = ROOT / "scripts" / "benchmark_brpc_kvc_contention.sh"
 COMBINED = ROOT / "scripts" / "validate_pairec_brpc_wrapper_kvc_combined.sh"
+MATRIX = ROOT / "scripts" / "benchmark_pairec_brpc_wrapper_kvc_matrix.sh"
 COLLECTOR = ROOT / "scripts" / "collect_datasystem_worker_metrics.sh"
 METRICS_PY = ROOT / "scripts" / "datasystem_worker_metrics.py"
 DATASYSTEM_STUB = ROOT / "tests" / "stubs"
@@ -294,7 +295,7 @@ class SustainedPressureStructureTest(unittest.TestCase):
                 sys.executable, "-c", blocks[0],
                 str(deployment_path), str(patch_path), "brpc-inference", "kvc-burst-wrapper",
                 "/host", "/pod", "100", "8", "1835008", "5", "1000", "ds", "18482", "1", "0", "1", "0",
-                "1", "500", "42",
+                "1", "500", "42", "0",
             ]
             subprocess.run(argv, check=True, capture_output=True, text=True)
             patch = json.loads(patch_path.read_text())
@@ -304,6 +305,40 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn("--sustained_max_duration_ms=500", sidecar["args"])
         self.assertIn("--sustained_max_loops=42", sidecar["args"])
         self.assertIn("--pressure_lead_us=1000", sidecar["args"])
+        self.assertIn("--inprocess_pressure=false", sidecar["args"])
+
+    def test_inprocess_c32_experiment_wiring(self):
+        wrapper = WRAPPER_CPP.read_text()
+        deploy = DEPLOY.read_text()
+        combined = COMBINED.read_text()
+        matrix = MATRIX.read_text()
+        for token in (
+            "inprocess_pressure",
+            "inprocess-shared-client",
+            "clients_connected=",
+            "armed_workers=",
+        ):
+            self.assertIn(token, wrapper)
+        for token in (
+            "INPROCESS_PRESSURE=${INPROCESS_PRESSURE:-0}",
+            "PAIREC_KVC_INPROCESS_BURST_C32_V1",
+            'die "in-process pressure requires CONCURRENCY=32"',
+            'die "in-process pressure requires PRESSURE_KEY_COUNT=31"',
+            'die "in-process pressure requires OBJECT_SIZE=3670016"',
+            '"PAIREC_KVC_INPROCESS_BURST"',
+            "--inprocess_pressure=",
+            'and not entry["name"].startswith("PAIREC_KVC_INPROCESS_")',
+        ):
+            self.assertIn(token, deploy)
+        self.assertIn("KVC_INPROCESS_PRESSURE=${KVC_INPROCESS_PRESSURE:-0}", combined)
+        self.assertIn('KVC_BARRIER_TIMEOUT_MS=100', combined)
+        self.assertIn('BARRIER_TIMEOUT_MS="$KVC_BARRIER_TIMEOUT_MS"', combined)
+        self.assertIn('assert kvc["business_submit_rank"] == 32', combined)
+        self.assertIn('assert kvc["pressure_inflight_at_business_start"] == 31', combined)
+        self.assertIn('assert kvc["pressure_completed_before_business"] == 0', combined)
+        self.assertIn(
+            "COMBINED_KVC_INPROCESS_PRESSURE=${COMBINED_KVC_INPROCESS_PRESSURE:-0}", matrix)
+        self.assertIn('KVC_INPROCESS_PRESSURE="$inprocess_pressure"', matrix)
 
     def test_contention_ds_worker_hook(self):
         text = CONTENTION.read_text()

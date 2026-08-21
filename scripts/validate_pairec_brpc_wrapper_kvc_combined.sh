@@ -22,6 +22,7 @@ EXPECTED_ONBOARDS_MAX=${EXPECTED_ONBOARDS_MAX:-2}
 KVC_SUSTAINED_PRESSURE=${KVC_SUSTAINED_PRESSURE:-0}
 KVC_SUSTAINED_MAX_DURATION_MS=${KVC_SUSTAINED_MAX_DURATION_MS:-1000}
 KVC_SUSTAINED_MAX_LOOPS=${KVC_SUSTAINED_MAX_LOOPS:-100}
+KVC_INPROCESS_PRESSURE=${KVC_INPROCESS_PRESSURE:-0}
 PRIME_REQUESTS=${PRIME_REQUESTS:-195}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -43,6 +44,16 @@ mkdir -p "$OUTPUT_DIR"
   || die "KVC_SUSTAINED_MAX_DURATION_MS must be positive"
 [[ "$KVC_SUSTAINED_MAX_LOOPS" =~ ^[1-9][0-9]*$ ]] \
   || die "KVC_SUSTAINED_MAX_LOOPS must be positive"
+[[ "$KVC_INPROCESS_PRESSURE" = 0 || "$KVC_INPROCESS_PRESSURE" = 1 ]] \
+  || die "KVC_INPROCESS_PRESSURE must be 0 or 1"
+if [[ "$KVC_INPROCESS_PRESSURE" = 1 ]]; then
+  (( KVC_CONCURRENCY == 32 )) || die "in-process pressure requires KVC_CONCURRENCY=32"
+  (( KVC_PRESSURE_KEY_COUNT == 31 )) || die "in-process pressure requires KVC_PRESSURE_KEY_COUNT=31"
+  (( KVC_OBJECT_SIZE == 3670016 )) || die "in-process pressure requires KVC_OBJECT_SIZE=3670016"
+  [[ "$KVC_SUSTAINED_PRESSURE" = 0 ]] || die "in-process pressure must be one-shot"
+fi
+KVC_BARRIER_TIMEOUT_MS=5
+[[ "$KVC_INPROCESS_PRESSURE" = 0 ]] || KVC_BARRIER_TIMEOUT_MS=100
 [[ "$PRIME_REQUESTS" =~ ^[1-9][0-9]*$ ]] \
   || die "PRIME_REQUESTS must be positive"
 
@@ -60,11 +71,13 @@ NAMESPACE="$NAMESPACE" DEPLOYMENT=inference-brpc-trtllm \
   BACKUP_FILE="$KVC_OVERLAY_BACKUP" CONCURRENCY="$KVC_CONCURRENCY" \
   PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" OBJECT_SIZE="$KVC_OBJECT_SIZE" \
   PRESSURE_LEAD_US="$KVC_PRESSURE_LEAD_US" \
+  BARRIER_TIMEOUT_MS="$KVC_BARRIER_TIMEOUT_MS" \
   KVC_BURST_ENABLED=1 \
   KVC_BURST_VERBOSE=1 KVC_BURST_INITIAL_ARMED=0 \
   SUSTAINED_PRESSURE="$KVC_SUSTAINED_PRESSURE" \
   SUSTAINED_MAX_DURATION_MS="$KVC_SUSTAINED_MAX_DURATION_MS" \
   SUSTAINED_MAX_LOOPS="$KVC_SUSTAINED_MAX_LOOPS" \
+  INPROCESS_PRESSURE="$KVC_INPROCESS_PRESSURE" \
   bash scripts/deploy_f14_kvc_burst_overlay.sh apply \
   | tee "$OUTPUT_DIR/kvc-overlay.log"
 
@@ -112,7 +125,7 @@ kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper \
 python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log" \
   "$OUTPUT_DIR/summary.json" "$WRAPPER_CONCURRENCY" "$KVC_CONCURRENCY" \
   "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" "$KVC_OBJECT_SIZE" \
-  "$KVC_PRESSURE_KEY_COUNT" "$KVC_SUSTAINED_PRESSURE" <<'PY'
+  "$KVC_PRESSURE_KEY_COUNT" "$KVC_SUSTAINED_PRESSURE" "$KVC_INPROCESS_PRESSURE" <<'PY'
 import json, math, pathlib, statistics, sys
 contention = json.load(open(sys.argv[1]))
 wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
@@ -123,6 +136,7 @@ expected_onboards_max = int(sys.argv[7])
 kvc_object_size = int(sys.argv[8])
 kvc_pressure_key_count = int(sys.argv[9])
 kvc_sustained_pressure = sys.argv[10] == "1"
+kvc_inprocess_pressure = sys.argv[11] == "1"
 valid = contention.get("valid_repeats") == contention.get("expected_repeats")
 rows = []
 
@@ -172,10 +186,18 @@ for row in contention.get("rows", []):
     assert kvc["pressure_lanes"] == pressure_lanes, kvc
     assert kvc["pressure_success"] == pressure_lanes, kvc
     assert kvc["pressure_errors"] == 0, kvc
+    expected_engine = "inprocess-shared-client" if kvc_inprocess_pressure else "sidecar-exclusive-clients"
+    assert kvc.get("pressure_engine") == expected_engine, kvc
+    if kvc_inprocess_pressure:
+        assert kvc.get("shared_client_errors") == 0, kvc
     required_pressure_first = math.ceil(pressure_lanes * .95)
     assert kvc["pressure_started_before_business"] >= required_pressure_first, kvc
     assert kvc["pressure_inflight_at_business_start"] >= required_pressure_first, kvc
     assert kvc["business_submit_rank"] >= required_pressure_first + 1, kvc
+    if kvc_inprocess_pressure:
+        assert kvc["business_submit_rank"] == 32, kvc
+        assert kvc["pressure_inflight_at_business_start"] == 31, kvc
+        assert kvc["pressure_completed_before_business"] == 0, kvc
     assert kvc.get("sustained_enabled", False) is kvc_sustained_pressure, kvc
     if kvc_sustained_pressure and pressure_lanes > 0:
         assert kvc["sustained_errors"] == 0, kvc

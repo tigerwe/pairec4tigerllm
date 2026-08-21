@@ -56,8 +56,17 @@ def patch_wrapped_get(transfer: Path, attribution_prefix: str, proxy_prefix: str
         f"auto const {proxy_prefix}RequestId = currentDataSystemRequestId();\n"
         f"            auto const {proxy_prefix}Token = pairec::kvc_burst::beginBusinessGet(\n"
         f"                {proxy_prefix}RequestId.value_or(\"\"), "
-        f"pairec::kvc_burst::BusinessApi::{api}, {key_count});\n"
-        f"            {attribution}")
+        f"pairec::kvc_burst::BusinessApi::{api}, {key_count});\n")
+    if api == "kGet":
+        begin += (
+            f"            auto {proxy_prefix}Pressure = "
+            "pairec::kvc_burst::beginInProcessPressure(\n"
+            f"                {proxy_prefix}Token, [&kvClient1](uint32_t, std::string const& pressureKey) {{\n"
+            "                    datasystem::Optional<datasystem::Buffer> pressureBuffer;\n"
+            "                    auto const pressureStatus = kvClient1->Get(pressureKey, pressureBuffer, 0);\n"
+            "                    return !pressureStatus.IsError() && static_cast<bool>(pressureBuffer);\n"
+            "                });\n")
+    begin += f"            {attribution}"
     replace_once(transfer, attribution, begin)
 
     text = transfer.read_text()
@@ -71,10 +80,12 @@ def patch_wrapped_get(transfer: Path, attribution_prefix: str, proxy_prefix: str
     attribution_finish = (
         f"finishDataSystemOperation({attribution_prefix}Token, DataSystemOperation::kGet, "
         f"{attribution_prefix}Us, getRet.IsError());")
-    replace_once(transfer, attribution_finish,
-        attribution_finish
-        + f"\n            pairec::kvc_burst::finishBusinessGet(\n"
-          f"                {proxy_prefix}Token, !getRet.IsError(), {proxy_prefix}EndedNs);")
+    finish = attribution_finish
+    if api == "kGet":
+        finish += f"\n            {proxy_prefix}Pressure.finish();"
+    finish += (f"\n            pairec::kvc_burst::finishBusinessGet(\n"
+               f"                {proxy_prefix}Token, !getRet.IsError(), {proxy_prefix}EndedNs);")
+    replace_once(transfer, attribution_finish, finish)
 
 
 def patch_parallel_get(transfer: Path) -> None:

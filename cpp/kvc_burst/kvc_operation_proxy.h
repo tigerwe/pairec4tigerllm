@@ -3,6 +3,8 @@
 #include "kvc_burst_shared.h"
 
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 
 namespace pairec::kvc_burst
@@ -22,13 +24,40 @@ struct BusinessGetToken
     uint64_t businessStartedNs{0};
     bool barrierReleased{false};
     bool pressureEstablished{false};
+    bool inProcessPressure{false};
 
     [[nodiscard]] bool triggered() const { return status == TriggerStatus::kTriggered; }
+};
+
+using InProcessPressureGet = std::function<bool(uint32_t, std::string const&)>;
+
+class InProcessPressureSession
+{
+public:
+    InProcessPressureSession();
+    ~InProcessPressureSession();
+    InProcessPressureSession(InProcessPressureSession&&) noexcept;
+    InProcessPressureSession& operator=(InProcessPressureSession&&) noexcept;
+    InProcessPressureSession(InProcessPressureSession const&) = delete;
+    InProcessPressureSession& operator=(InProcessPressureSession const&) = delete;
+
+    [[nodiscard]] bool active() const;
+    void finish();
+
+private:
+    struct Impl;
+    explicit InProcessPressureSession(std::unique_ptr<Impl> impl);
+    std::unique_ptr<Impl> mImpl;
+
+    friend InProcessPressureSession beginInProcessPressure(
+        BusinessGetToken const&, InProcessPressureGet);
 };
 
 [[nodiscard]] bool kvcBurstEnabled();
 [[nodiscard]] BusinessGetToken beginBusinessGet(
     std::string const& requestId, BusinessApi api, uint32_t keyCount);
+[[nodiscard]] InProcessPressureSession beginInProcessPressure(
+    BusinessGetToken const& token, InProcessPressureGet get);
 void finishBusinessGet(BusinessGetToken const& token, bool success, uint64_t businessEndedNs = 0);
 
 } // namespace pairec::kvc_burst

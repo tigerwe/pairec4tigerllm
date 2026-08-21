@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 
 #include <cassert>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -123,6 +124,59 @@ int main()
     assert(bypass.status == TriggerStatus::kSkippedBusy);
     assert(elapsed.count() < 20);
     triggering.join();
+
+    assert(::setenv("PAIREC_KVC_INPROCESS_BURST", "1", 1) == 0);
+    control->configured_concurrency = 32;
+    control->pressure_lanes = 31;
+    control->pressure_key_count = 31;
+    control->keys_verified = 31;
+    control->clients_connected = 0;
+    control->object_size_bytes = 3670016;
+    control->prepared_generation = 3;
+    control->run_generation = 0;
+    control->state = static_cast<uint32_t>(State::kReady);
+    control->arrived_participants = 0;
+    control->release_generation = 0;
+    control->barrier_failed = 0;
+    control->pressure_started_lanes = 0;
+    control->completed_pressure_lanes = 0;
+    control->pressure_success = 0;
+    control->pressure_errors = 0;
+    control->pressure_first_failed = 0;
+    control->business_start_ns = 0;
+    control->business_end_ns = 0;
+    for (uint32_t lane = 0; lane < 31; ++lane)
+    {
+        control->pressure_start_ns[lane] = 0;
+        control->pressure_end_ns[lane] = 0;
+        control->pressure_ok[lane] = 0;
+    }
+    std::atomic<uint32_t> fakeGets{0};
+    auto inProcess = pairec::kvc_burst::beginBusinessGet(
+        "request-inprocess", BusinessApi::kGet, 1);
+    assert(inProcess.triggered());
+    assert(inProcess.inProcessPressure);
+    assert(control->business_start_ns == 0);
+    auto pressure = pairec::kvc_burst::beginInProcessPressure(inProcess,
+        [&fakeGets](uint32_t lane, std::string const& key) {
+            assert(key == "PairecKvcBurstV2_g3_pressure_" + std::to_string(lane));
+            fakeGets.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            return true;
+        });
+    assert(pressure.active());
+    assert(control->pressure_started_lanes == 31);
+    assert(control->completed_pressure_lanes == 0);
+    assert(control->pressure_first_failed == 0);
+    assert(control->business_start_ns > 0);
+    auto businessEnded = pairec::kvc_burst::MonotonicNs();
+    pressure.finish();
+    pairec::kvc_burst::finishBusinessGet(inProcess, true, businessEnded);
+    assert(fakeGets.load(std::memory_order_relaxed) == 31);
+    assert(control->completed_pressure_lanes == 31);
+    assert(control->pressure_success == 31);
+    assert(control->pressure_errors == 0);
+    assert(control->business_done_generation == 3);
 
     assert(::munmap(control, sizeof(*control)) == 0);
     assert(::close(fd) == 0);

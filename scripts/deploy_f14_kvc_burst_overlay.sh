@@ -22,6 +22,7 @@ KVC_BURST_INITIAL_ARMED=${KVC_BURST_INITIAL_ARMED:-1}
 SUSTAINED_PRESSURE=${SUSTAINED_PRESSURE:-0}
 SUSTAINED_MAX_DURATION_MS=${SUSTAINED_MAX_DURATION_MS:-1000}
 SUSTAINED_MAX_LOOPS=${SUSTAINED_MAX_LOOPS:-100}
+INPROCESS_PRESSURE=${INPROCESS_PRESSURE:-0}
 BACKUP_FILE=${BACKUP_FILE:-/tmp/f14-kvc-burst-deployment-before.json}
 ROLLOUT_TIMEOUT=${ROLLOUT_TIMEOUT:-10m}
 
@@ -49,6 +50,12 @@ verify() {
     grep -aFq PAIREC_KVC_BURST_PROXY_V4 \
       "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
     || die "KVC proxy V4 capability marker is missing from TensorRT-LLM"
+  if [[ "$INPROCESS_PRESSURE" = 1 ]]; then
+    kubectl -n "$NAMESPACE" exec "$pod" -c "$INFERENCE_CONTAINER" -- \
+      grep -aFq PAIREC_KVC_INPROCESS_BURST_C32_V1 \
+        "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
+      || die "in-process KVC c32 capability marker is missing from TensorRT-LLM"
+  fi
   kubectl -n "$NAMESPACE" exec "$pod" -c "$SIDECAR_CONTAINER" -- \
     test -s /run/pairec-kvc-burst/ready \
     || die "KVC burst sidecar is not ready"
@@ -64,6 +71,10 @@ verify() {
     || die "sidecar object size mismatch: expected=$OBJECT_SIZE"
   grep -Fq '"version":4' <<<"$ready_event" \
     || die "sidecar control protocol mismatch: expected version=4"
+  expected_engine=sidecar-exclusive-clients
+  [[ "$INPROCESS_PRESSURE" = 0 ]] || expected_engine=inprocess-shared-client
+  grep -Fq "\"pressure_engine\":\"$expected_engine\"" <<<"$ready_event" \
+    || die "sidecar pressure engine mismatch: expected=$expected_engine"
   grep -Fq "\"pressure_lead_us\":$PRESSURE_LEAD_US" <<<"$ready_event" \
     || die "sidecar pressure lead mismatch: expected=$PRESSURE_LEAD_US"
   if [[ "$SUSTAINED_PRESSURE" = 1 ]]; then
@@ -100,6 +111,15 @@ apply_overlay() {
     || die "SUSTAINED_MAX_DURATION_MS must be positive"
   [[ "$SUSTAINED_MAX_LOOPS" =~ ^[1-9][0-9]*$ ]] \
     || die "SUSTAINED_MAX_LOOPS must be positive"
+  [[ "$INPROCESS_PRESSURE" = 0 || "$INPROCESS_PRESSURE" = 1 ]] \
+    || die "INPROCESS_PRESSURE must be 0 or 1"
+  if [[ "$INPROCESS_PRESSURE" = 1 ]]; then
+    (( CONCURRENCY == 32 )) || die "in-process pressure requires CONCURRENCY=32"
+    (( PRESSURE_KEY_COUNT == 31 )) || die "in-process pressure requires PRESSURE_KEY_COUNT=31"
+    (( OBJECT_SIZE == 3670016 )) || die "in-process pressure requires OBJECT_SIZE=3670016"
+    [[ "$KVC_BURST_INITIAL_ARMED" = 0 ]] || die "in-process pressure requires dynamic arm"
+    [[ "$SUSTAINED_PRESSURE" = 0 ]] || die "in-process pressure must be one-shot"
+  fi
   [[ "$DS_ENDPOINT" == *:* ]] || die "DS_ENDPOINT must be host:port"
   ds_host=${DS_ENDPOINT%:*}
   ds_port=${DS_ENDPOINT##*:}
@@ -115,13 +135,15 @@ apply_overlay() {
       "$HOST_RUNTIME_DIR" "$POD_RUNTIME_DIR" "$CONCURRENCY" "$PRESSURE_KEY_COUNT" "$OBJECT_SIZE" \
       "$BARRIER_TIMEOUT_MS" "$PRESSURE_LEAD_US" "$ds_host" "$ds_port" "$KVC_BURST_ENABLED" "$MEASURE_DISABLED" \
       "$KVC_BURST_VERBOSE" "$KVC_BURST_INITIAL_ARMED" \
-      "$SUSTAINED_PRESSURE" "$SUSTAINED_MAX_DURATION_MS" "$SUSTAINED_MAX_LOOPS" <<'PY'
+      "$SUSTAINED_PRESSURE" "$SUSTAINED_MAX_DURATION_MS" "$SUSTAINED_MAX_LOOPS" \
+      "$INPROCESS_PRESSURE" <<'PY'
 import json, pathlib, sys
 (deployment_path, output_path, inference_name, sidecar_name, host_runtime,
  pod_runtime, concurrency, pressure_key_count, object_size, barrier_timeout, pressure_lead_us,
  ds_host, ds_port,
  enabled, measure_disabled, verbose, initially_armed,
- sustained_pressure, sustained_max_duration_ms, sustained_max_loops) = sys.argv[1:]
+ sustained_pressure, sustained_max_duration_ms, sustained_max_loops,
+ inprocess_pressure) = sys.argv[1:]
 deployment = json.loads(pathlib.Path(deployment_path).read_text())
 inference = next(c for c in deployment["spec"]["template"]["spec"]["containers"]
                  if c["name"] == inference_name)
@@ -164,6 +186,8 @@ patch = {"spec": {"template": {"metadata": {"annotations": {
              {"name": "KVC_BURST_MEASURE_DISABLED", "value": measure_disabled},
              {"name": "KVC_BURST_VERBOSE", "value": verbose},
              {"name": "KVC_BURST_CONTROL_PATH", "value": "/run/pairec-kvc-burst/control"},
+             {"name": "PAIREC_KVC_INPROCESS_BURST", "value": inprocess_pressure},
+             {"name": "PAIREC_KVC_INPROCESS_PRESSURE_PREFIX", "value": "PairecKvcBurstV2"},
          ],
          "volumeMounts": [{"name": "kvc-burst-control", "mountPath": "/run/pairec-kvc-burst"}]},
         {"name": sidecar_name, "image": image, "imagePullPolicy": "IfNotPresent",
@@ -177,7 +201,8 @@ patch = {"spec": {"template": {"metadata": {"annotations": {
                   f"--initially_armed={initially_armed}",
                   f"--sustained_pressure={'true' if sustained_pressure == '1' else 'false'}",
                   f"--sustained_max_duration_ms={sustained_max_duration_ms}",
-                  f"--sustained_max_loops={sustained_max_loops}"],
+                  f"--sustained_max_loops={sustained_max_loops}",
+                  f"--inprocess_pressure={'true' if inprocess_pressure == '1' else 'false'}"],
          "env": sidecar_env,
          "resources": {"requests": {"cpu": "4", "memory": "1Gi"},
                        "limits": {"memory": "4Gi"}},
@@ -224,6 +249,7 @@ for container in pod_spec.get("containers", []):
         container["env"] = [
             entry for entry in container.get("env", [])
             if not entry["name"].startswith("KVC_BURST_")
+            and not entry["name"].startswith("PAIREC_KVC_INPROCESS_")
         ]
         container["volumeMounts"] = [
             mount for mount in container.get("volumeMounts", [])

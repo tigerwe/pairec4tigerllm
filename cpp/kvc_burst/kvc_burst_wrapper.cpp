@@ -57,6 +57,7 @@ struct Config
     bool sustainedPressure{false};
     uint32_t sustainedMaxDurationMs{1000};
     uint32_t sustainedMaxLoops{100};
+    bool inProcessPressure{false};
 };
 
 struct Mapping
@@ -184,6 +185,10 @@ bool ParseArgs(int argc, char** argv, Config* config)
         {
             if (!ParseBool(value, &config->initiallyArmed)) return false;
         }
+        else if (name == "inprocess_pressure")
+        {
+            if (!ParseBool(value, &config->inProcessPressure)) return false;
+        }
         else if (name == "cleanup_keys")
         {
             if (!ParseBool(value, &config->cleanupKeys)) return false;
@@ -206,6 +211,16 @@ bool ParseArgs(int argc, char** argv, Config* config)
         && (config->sustainedMaxDurationMs == 0 || config->sustainedMaxLoops == 0))
     {
         std::cerr << "sustained pressure requires positive max duration and max loops" << std::endl;
+        return false;
+    }
+    if (config->inProcessPressure
+        && (config->concurrency != 32U || config->pressureKeyCount != 31U
+            || config->objectSize != 3670016ULL || config->sustainedPressure
+            || config->initiallyArmed))
+    {
+        std::cerr << "in-process pressure requires c32, 31 keys, 3670016-byte objects, "
+                     "one-shot pressure, and dynamic arm"
+                  << std::endl;
         return false;
     }
     return true;
@@ -647,6 +662,10 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
            << ",\"request_id\":\"" << control.request_id << "\",\"concurrency\":"
            << control.configured_concurrency << ",\"pressure_lanes\":" << control.pressure_lanes
            << ",\"pressure_key_count\":" << control.pressure_key_count
+           << ",\"pressure_engine\":\""
+           << (config.inProcessPressure ? "inprocess-shared-client" : "sidecar-exclusive-clients")
+           << "\",\"shared_client_errors\":"
+           << (config.inProcessPressure ? control.pressure_errors : 0U)
            << ",\"object_size_bytes\":" << config.objectSize << ",\"shuffle_seed\":"
            << control.shuffle_seed << ",\"barrier_wait_ms\":"
            << static_cast<double>(control.business_barrier_wait_us) / 1000.0
@@ -943,31 +962,32 @@ int Run(int argc, char** argv)
 
     std::vector<std::unique_ptr<datasystem::KVClient>> clients;
     clients.reserve(pressureLanes);
-    for (uint32_t i = 0; i < pressureLanes; ++i)
+    for (uint32_t i = 0; !config.inProcessPressure && i < pressureLanes; ++i)
     {
         gStartupStage = "create_pressure_clients";
         auto client = CreateClient(config, true);
         if (!client) return 1;
         clients.emplace_back(std::move(client));
     }
-    pairec::kvc_burst::Store(&control.clients_connected, pressureLanes);
+    pairec::kvc_burst::Store(
+        &control.clients_connected, config.inProcessPressure ? 0U : pressureLanes);
 
     std::vector<uint32_t> permutation(pressureLanes);
-    for (uint32_t i = 0; i < pressureLanes; ++i)
+    for (uint32_t i = 0; !config.inProcessPressure && i < pressureLanes; ++i)
     {
         permutation[i] = i % pressureKeyCount;
     }
     std::vector<SustainedLaneStats> sustainedStats(pressureLanes);
     std::vector<std::thread> workers;
     workers.reserve(pressureLanes);
-    for (uint32_t i = 0; i < pressureLanes; ++i)
+    for (uint32_t i = 0; !config.inProcessPressure && i < pressureLanes; ++i)
     {
         gStartupStage = "start_pressure_workers";
         workers.emplace_back(PressureWorker, i, &control, clients[i].get(), &keys, &permutation,
             &config, &sustainedStats[i]);
     }
 
-    while (!gStop.load(std::memory_order_relaxed)
+    while (!config.inProcessPressure && !gStop.load(std::memory_order_relaxed)
         && pairec::kvc_burst::Load(&control.armed_pressure_lanes) != pressureLanes)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -992,7 +1012,11 @@ int Run(int argc, char** argv)
             + std::to_string(config.concurrency) + " pressure_lanes=" + std::to_string(pressureLanes)
             + " pressure_key_count=" + std::to_string(pressureKeyCount)
             + " keys_verified=" + std::to_string(pressureLanes) + " clients_connected="
-            + std::to_string(pressureLanes) + " armed_workers=" + std::to_string(pressureLanes) + "\n";
+            + std::to_string(config.inProcessPressure ? 0U : pressureLanes)
+            + " armed_workers=" + std::to_string(config.inProcessPressure ? 0U : pressureLanes)
+            + " pressure_engine="
+            + (config.inProcessPressure ? "inprocess-shared-client" : "sidecar-exclusive-clients")
+            + "\n";
         if (!PublishReadyFile(config.readyFile, ready))
         {
             pairec::kvc_burst::Store(&control.state, static_cast<uint32_t>(State::kFailed));
@@ -1002,8 +1026,10 @@ int Run(int argc, char** argv)
     WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":4,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
             + ",\"pressure_lanes\":" + std::to_string(pressureLanes) + ",\"object_size_bytes\":"
             + std::to_string(config.objectSize) + ",\"pressure_key_count\":" + std::to_string(pressureKeyCount)
-            + ",\"clients_connected\":" + std::to_string(pressureLanes)
+            + ",\"clients_connected\":" + std::to_string(config.inProcessPressure ? 0U : pressureLanes)
             + ",\"keys_verified\":" + std::to_string(pressureLanes)
+            + ",\"pressure_engine\":\""
+            + (config.inProcessPressure ? "inprocess-shared-client" : "sidecar-exclusive-clients") + "\""
             + ",\"pressure_lead_us\":" + std::to_string(config.pressureLeadUs)
             + ",\"sustained_pressure\":" + (config.sustainedPressure ? "true" : "false")
             + ",\"sustained_max_duration_ms\":" + std::to_string(config.sustainedMaxDurationMs)
@@ -1117,7 +1143,7 @@ int Run(int argc, char** argv)
             if (!config.readyFile.empty()) std::remove(config.readyFile.c_str());
             break;
         }
-        while (!gStop.load(std::memory_order_relaxed)
+        while (!config.inProcessPressure && !gStop.load(std::memory_order_relaxed)
             && pairec::kvc_burst::Load(&control.armed_pressure_lanes) != pressureLanes)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
