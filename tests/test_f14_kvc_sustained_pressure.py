@@ -323,7 +323,7 @@ class SustainedPressureStructureTest(unittest.TestCase):
             "INPROCESS_PRESSURE=${INPROCESS_PRESSURE:-0}",
             "PAIREC_KVC_INPROCESS_BURST_C32_V1",
             'die "in-process pressure requires CONCURRENCY=32"',
-            'die "in-process pressure requires PRESSURE_KEY_COUNT=31"',
+            'die "in-process pressure requires PRESSURE_KEY_COUNT between 1 and 31"',
             'die "in-process pressure requires OBJECT_SIZE=3670016"',
             '"PAIREC_KVC_INPROCESS_BURST"',
             "--inprocess_pressure=",

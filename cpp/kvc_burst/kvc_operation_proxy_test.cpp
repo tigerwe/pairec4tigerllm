@@ -128,7 +128,7 @@ int main()
     assert(::setenv("PAIREC_KVC_INPROCESS_BURST", "1", 1) == 0);
     control->configured_concurrency = 32;
     control->pressure_lanes = 31;
-    control->pressure_key_count = 31;
+    control->pressure_key_count = 4;
     control->keys_verified = 31;
     control->clients_connected = 0;
     control->object_size_bytes = 3670016;
@@ -159,7 +159,7 @@ int main()
     assert(control->business_start_ns == 0);
     auto pressure = pairec::kvc_burst::beginInProcessPressure(inProcess,
         [&fakeGets](uint32_t lane, std::string const& key) {
-            assert(key == "PairecKvcBurstV2_g3_pressure_" + std::to_string(lane));
+            assert(key == "PairecKvcBurstV2_g3_pressure_" + std::to_string(lane % 4));
             fakeGets.fetch_add(1, std::memory_order_relaxed);
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             return true;

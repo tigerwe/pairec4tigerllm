@@ -115,7 +115,8 @@ apply_overlay() {
     || die "INPROCESS_PRESSURE must be 0 or 1"
   if [[ "$INPROCESS_PRESSURE" = 1 ]]; then
     (( CONCURRENCY == 32 )) || die "in-process pressure requires CONCURRENCY=32"
-    (( PRESSURE_KEY_COUNT == 31 )) || die "in-process pressure requires PRESSURE_KEY_COUNT=31"
+    (( PRESSURE_KEY_COUNT >= 1 && PRESSURE_KEY_COUNT <= 31 )) \
+      || die "in-process pressure requires PRESSURE_KEY_COUNT between 1 and 31"
     (( OBJECT_SIZE == 3670016 )) || die "in-process pressure requires OBJECT_SIZE=3670016"
     [[ "$KVC_BURST_INITIAL_ARMED" = 0 ]] || die "in-process pressure requires dynamic arm"
     [[ "$SUSTAINED_PRESSURE" = 0 ]] || die "in-process pressure must be one-shot"

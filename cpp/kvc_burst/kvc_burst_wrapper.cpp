@@ -214,11 +214,12 @@ bool ParseArgs(int argc, char** argv, Config* config)
         return false;
     }
     if (config->inProcessPressure
-        && (config->concurrency != 32U || config->pressureKeyCount != 31U
+        && (config->concurrency != 32U || config->pressureKeyCount == 0U
+            || config->pressureKeyCount > 31U
             || config->objectSize != 3670016ULL || config->sustainedPressure
             || config->initiallyArmed))
     {
-        std::cerr << "in-process pressure requires c32, 31 keys, 3670016-byte objects, "
+        std::cerr << "in-process pressure requires c32, 1..31 keys, 3670016-byte objects, "
                      "one-shot pressure, and dynamic arm"
                   << std::endl;
         return false;

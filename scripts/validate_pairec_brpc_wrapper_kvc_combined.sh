@@ -48,7 +48,8 @@ mkdir -p "$OUTPUT_DIR"
   || die "KVC_INPROCESS_PRESSURE must be 0 or 1"
 if [[ "$KVC_INPROCESS_PRESSURE" = 1 ]]; then
   (( KVC_CONCURRENCY == 32 )) || die "in-process pressure requires KVC_CONCURRENCY=32"
-  (( KVC_PRESSURE_KEY_COUNT == 31 )) || die "in-process pressure requires KVC_PRESSURE_KEY_COUNT=31"
+  (( KVC_PRESSURE_KEY_COUNT >= 1 && KVC_PRESSURE_KEY_COUNT <= 31 )) \
+    || die "in-process pressure requires KVC_PRESSURE_KEY_COUNT between 1 and 31"
   (( KVC_OBJECT_SIZE == 3670016 )) || die "in-process pressure requires KVC_OBJECT_SIZE=3670016"
   [[ "$KVC_SUSTAINED_PRESSURE" = 0 ]] || die "in-process pressure must be one-shot"
 fi

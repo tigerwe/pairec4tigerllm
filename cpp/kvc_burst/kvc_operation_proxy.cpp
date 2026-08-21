@@ -291,8 +291,9 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
     }
     auto const inProcess = inProcessPressureEnabled();
     auto const pressureLanes = Load(&control->pressure_lanes);
+    auto const pressureKeyCount = Load(&control->pressure_key_count);
     auto const inProcessShapeValid = Load(&control->configured_concurrency) == 32U
-        && pressureLanes == 31U && Load(&control->pressure_key_count) == 31U
+        && pressureLanes == 31U && pressureKeyCount > 0U && pressureKeyCount <= pressureLanes
         && Load(&control->object_size_bytes) == 3670016ULL;
     if (Load(&control->keys_verified) != pressureLanes
         || (inProcess ? !inProcessShapeValid : Load(&control->clients_connected) != pressureLanes))
@@ -378,6 +379,12 @@ InProcessPressureSession beginInProcessPressure(
     }
 
     auto const lanes = Load(&control->pressure_lanes);
+    auto const keyCount = Load(&control->pressure_key_count);
+    if (keyCount == 0U || keyCount > lanes)
+    {
+        Store(&control->pressure_first_failed, 1U);
+        return {};
+    }
     auto impl = std::make_unique<InProcessPressureSession::Impl>();
     auto* state = impl.get();
     auto getShared = std::make_shared<InProcessPressureGet>(std::move(get));
@@ -388,7 +395,7 @@ InProcessPressureSession beginInProcessPressure(
         impl->threads.reserve(lanes);
         for (uint32_t lane = 0; lane < lanes; ++lane)
         {
-            impl->threads.emplace_back([state, control, getShared, prefix, lane] {
+            impl->threads.emplace_back([state, control, getShared, prefix, lane, keyCount] {
                 {
                     std::unique_lock<std::mutex> lock(state->mutex);
                     ++state->ready;
@@ -402,7 +409,7 @@ InProcessPressureSession beginInProcessPressure(
                 bool ok = false;
                 try
                 {
-                    ok = (*getShared)(lane, prefix + std::to_string(lane));
+                    ok = (*getShared)(lane, prefix + std::to_string(lane % keyCount));
                 }
                 catch (...)
                 {
