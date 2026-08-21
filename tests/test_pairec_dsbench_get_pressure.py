@@ -21,6 +21,8 @@ class PaiRecDsbenchGetPressureScriptTest(unittest.TestCase):
             "KVC_GET_KEY_COUNT=\"$DSBENCH_KEY_COUNT\"",
             "REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION=1",
             "REQUIRE_BUSINESS_ONBOARD_GET=1",
+            "RESET_INFERENCE_AFTER_PRIME=1",
+            "RESET_INFERENCE_MODE=container-runtime",
             "KVC_NIC_BURST_SAMPLE=1",
             '"dsbench_get_max_inflight"',
             '"business_get_each_ms"',
@@ -33,6 +35,15 @@ class PaiRecDsbenchGetPressureScriptTest(unittest.TestCase):
         self.assertIn('DSBENCH_CLIENTS="${DSBENCH_CLIENTS:-64}"', text)
         self.assertIn('DSBENCH_OBJECT_SIZE="${DSBENCH_OBJECT_SIZE:-3584KB}"', text)
         self.assertIn('PRIME_REQUESTS="${PRIME_REQUESTS:-195}"', text)
+
+    def test_contention_resets_hbm_between_prime_and_pressure_release(self):
+        contention = (ROOT / "scripts" / "benchmark_brpc_kvc_contention.sh").read_text()
+        self.assertIn('RESET_INFERENCE_AFTER_PRIME="${RESET_INFERENCE_AFTER_PRIME:-0}"', contention)
+        prime = contention.index('run_prime "$round_dir"')
+        reset = contention.index('log "Reset inference HBM after DataSystem prime"')
+        release = contention.rindex('release_kvc_load "$round_dir"')
+        self.assertLess(prime, reset)
+        self.assertLess(reset, release)
 
 
 if __name__ == "__main__":

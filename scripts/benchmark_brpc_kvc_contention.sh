@@ -61,6 +61,7 @@ REPLAY_RETRY_CHURN_REQUESTS="${REPLAY_RETRY_CHURN_REQUESTS:-$REPLAY_RETRY_PRIME_
 REPLAY_RETRY_CHURN_UIDS="${REPLAY_RETRY_CHURN_UIDS:-}"
 REQUIRE_BUSINESS_ONBOARD_GET="${REQUIRE_BUSINESS_ONBOARD_GET:-0}"
 RESET_INFERENCE_BEFORE_ROUND="${RESET_INFERENCE_BEFORE_ROUND:-0}"
+RESET_INFERENCE_AFTER_PRIME="${RESET_INFERENCE_AFTER_PRIME:-0}"
 RESET_INFERENCE_MODE="${RESET_INFERENCE_MODE:-rollout}"
 INFERENCE_ROLLOUT_TIMEOUT_SECONDS="${INFERENCE_ROLLOUT_TIMEOUT_SECONDS:-600}"
 INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS="${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS:-120}"
@@ -201,6 +202,10 @@ validate() {
   case "$RESET_INFERENCE_BEFORE_ROUND" in
     0|1) ;;
     *) die "RESET_INFERENCE_BEFORE_ROUND must be 0 or 1" ;;
+  esac
+  case "$RESET_INFERENCE_AFTER_PRIME" in
+    0|1) ;;
+    *) die "RESET_INFERENCE_AFTER_PRIME must be 0 or 1" ;;
   esac
   case "$RESET_INFERENCE_MODE" in
     rollout|container-runtime|pod-recreate) ;;
@@ -1501,6 +1506,7 @@ strict_counts=${STRICT_COUNTS}
 require_exact_datasystem_attribution=${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION}
 require_business_onboard_get=${REQUIRE_BUSINESS_ONBOARD_GET}
 reset_inference_before_round=${RESET_INFERENCE_BEFORE_ROUND}
+reset_inference_after_prime=${RESET_INFERENCE_AFTER_PRIME}
 reset_inference_mode=${RESET_INFERENCE_MODE}
 inference_rollout_timeout_seconds=${INFERENCE_ROLLOUT_TIMEOUT_SECONDS}
 inference_container_restart_timeout_seconds=${INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS}
@@ -1564,6 +1570,23 @@ for round in $(seq 1 "$REPEATS"); do
     echo "ERROR: round ${round} prime failed after ${PRIME_MAX_ATTEMPTS} attempts" >&2
     stop_loads
     break
+  fi
+
+  if [ "$RESET_INFERENCE_AFTER_PRIME" = "1" ]; then
+    post_prime_reset_dir="${round_dir}/inference-after-prime-reset"
+    mkdir -p "$post_prime_reset_dir"
+    log "Reset inference HBM after DataSystem prime"
+    set +e
+    RESET_INFERENCE_BEFORE_ROUND=1 reset_inference "$post_prime_reset_dir"
+    post_prime_reset_code="$?"
+    set -e
+    if [ "$post_prime_reset_code" -ne 0 ]; then
+      echo "$post_prime_reset_code" >"${round_dir}/inference-after-prime-reset.exit_code"
+      overall_code=1
+      echo "ERROR: round ${round} inference reset after prime failed" >&2
+      stop_loads
+      break
+    fi
   fi
 
   set +e
