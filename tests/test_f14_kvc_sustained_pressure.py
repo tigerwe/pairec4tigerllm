@@ -391,7 +391,11 @@ class SustainedPressureStructureTest(unittest.TestCase):
         # key on KVC requirement + attempt budget, not on replay failure, and
         # the break must not skip a successful replay with zero onboard Gets.
         self.assertIn(
-            'if [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ] && [ "$replay_attempt" -lt "$REPLAY_MAX_ATTEMPTS" ]; then',
+            'if { [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ] || [ "$REQUIRE_BUSINESS_ONBOARD_GET" = "1" ]; }',
+            text,
+        )
+        self.assertIn(
+            'REQUIRE_BUSINESS_ONBOARD_GET="${REQUIRE_BUSINESS_ONBOARD_GET:-0}"',
             text,
         )
         self.assertIn('if [ "$retry_business_get" -ne 0 ]; then', text)

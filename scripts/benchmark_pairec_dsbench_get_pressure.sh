@@ -102,6 +102,7 @@ EXPECTED_ONBOARDS=2 \
 EXPECTED_ONBOARDS_MIN="$EXPECTED_ONBOARDS_MIN" \
 EXPECTED_ONBOARDS_MAX="$EXPECTED_ONBOARDS_MAX" \
 REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION=1 \
+REQUIRE_BUSINESS_ONBOARD_GET=1 \
 KVC_BURST_REQUIRE_COMPLETE=0 \
 KVC_BURST_DYNAMIC_ARM=0 \
 KVC_NIC_BURST_SAMPLE=1 \
@@ -123,8 +124,8 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     result = {}
 
-valid_rows = [row for row in result.get("rows", []) if row.get("valid")]
-samples = []
+rows = result.get("rows", [])
+all_samples = []
 for path_text in sorted(glob.glob(str(root / "contention" / "round-*" / "replay" / "summary.json"))):
     path = pathlib.Path(path_text)
     replay = json.loads(path.read_text())
@@ -133,7 +134,7 @@ for path_text in sorted(glob.glob(str(root / "contention" / "round-*" / "replay"
     executor = replay.get("trt_executor_request_completions") or []
     onboards = access.get("onboard_events") or []
     row = next(
-        (item for item in valid_rows if pathlib.Path(item.get("summary_path", "")) == path),
+        (item for item in rows if pathlib.Path(item.get("summary_path", "")) == path),
         None,
     )
     if row is None:
@@ -143,7 +144,8 @@ for path_text in sorted(glob.glob(str(root / "contention" / "round-*" / "replay"
         nic = json.loads(nic_path.read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         nic = {}
-    samples.append({
+    all_samples.append({
+        "valid": bool(row.get("valid")),
         "round": row.get("round"),
         "request_id": replay.get("request_id"),
         "client_e2e_ms": row.get("e2e_ms", 0.0),
@@ -160,8 +162,13 @@ for path_text in sorted(glob.glob(str(root / "contention" / "round-*" / "replay"
         "nic_peak_rx_link_pct": nic.get("peak_rx_link_pct", 0.0),
     })
 
+samples = [sample for sample in all_samples if sample["valid"]]
+
 def avg(key):
     return statistics.mean(float(sample[key]) for sample in samples) if samples else 0.0
+
+def diagnostic_avg(key):
+    return statistics.mean(float(sample[key]) for sample in all_samples) if all_samples else 0.0
 
 valid = (
     contention_code == 0
@@ -187,6 +194,19 @@ summary = {
         "nic_peak_rx_link_pct": avg("nic_peak_rx_link_pct"),
     },
     "samples": samples,
+    "diagnostic_averages": {
+        "client_e2e_ms": diagnostic_avg("client_e2e_ms"),
+        "runner_ms": diagnostic_avg("runner_ms"),
+        "business_get_total_ms": diagnostic_avg("business_get_total_ms"),
+        "datasystem_get_ms": diagnostic_avg("datasystem_get_ms"),
+        "datasystem_set_ms": diagnostic_avg("datasystem_set_ms"),
+        "dsbench_get_qps": diagnostic_avg("dsbench_get_qps"),
+        "dsbench_get_gbps": diagnostic_avg("dsbench_get_gbps"),
+        "dsbench_get_max_inflight": diagnostic_avg("dsbench_get_max_inflight"),
+        "nic_peak_rx_gbps": diagnostic_avg("nic_peak_rx_gbps"),
+        "nic_peak_rx_link_pct": diagnostic_avg("nic_peak_rx_link_pct"),
+    },
+    "diagnostic_samples": all_samples,
 }
 (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
@@ -194,6 +214,10 @@ print(summary["classification"])
 print(f"valid_repeats={len(samples)}/{summary['expected_repeats']}")
 for key, value in summary["averages"].items():
     print(f"{key}={value:.3f}")
+if not valid:
+    print("diagnostic averages (includes invalid rounds):")
+    for key, value in summary["diagnostic_averages"].items():
+        print(f"diagnostic_{key}={value:.3f}")
 print(f"summary_json={root / 'summary.json'}")
 raise SystemExit(0 if valid else 1)
 PY

@@ -59,6 +59,7 @@ REPLAY_MAX_ATTEMPTS="${REPLAY_MAX_ATTEMPTS:-2}"
 REPLAY_RETRY_PRIME_REQUESTS="${REPLAY_RETRY_PRIME_REQUESTS:-20}"
 REPLAY_RETRY_CHURN_REQUESTS="${REPLAY_RETRY_CHURN_REQUESTS:-$REPLAY_RETRY_PRIME_REQUESTS}"
 REPLAY_RETRY_CHURN_UIDS="${REPLAY_RETRY_CHURN_UIDS:-}"
+REQUIRE_BUSINESS_ONBOARD_GET="${REQUIRE_BUSINESS_ONBOARD_GET:-0}"
 RESET_INFERENCE_BEFORE_ROUND="${RESET_INFERENCE_BEFORE_ROUND:-0}"
 RESET_INFERENCE_MODE="${RESET_INFERENCE_MODE:-rollout}"
 INFERENCE_ROLLOUT_TIMEOUT_SECONDS="${INFERENCE_ROLLOUT_TIMEOUT_SECONDS:-600}"
@@ -208,6 +209,10 @@ validate() {
   case "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" in
     0|1) ;;
     *) die "REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION must be 0 or 1" ;;
+  esac
+  case "$REQUIRE_BUSINESS_ONBOARD_GET" in
+    0|1) ;;
+    *) die "REQUIRE_BUSINESS_ONBOARD_GET must be 0 or 1" ;;
   esac
   case "$KVC_BURST_DYNAMIC_ARM" in
     0|1) ;;
@@ -860,7 +865,6 @@ run_prime() {
 # than scored as a KVC burst failure.
 replay_zero_business_get() {
   local round_dir="$1"
-  [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ] || return 1
   local trt_log="${round_dir}/replay/brpc_trtllm.log"
   [ -f "$trt_log" ] || return 1
   python3 - "$trt_log" <<'PY'
@@ -1495,6 +1499,7 @@ expected_onboards_min=${EXPECTED_ONBOARDS_MIN}
 expected_onboards_max=${EXPECTED_ONBOARDS_MAX}
 strict_counts=${STRICT_COUNTS}
 require_exact_datasystem_attribution=${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION}
+require_business_onboard_get=${REQUIRE_BUSINESS_ONBOARD_GET}
 reset_inference_before_round=${RESET_INFERENCE_BEFORE_ROUND}
 reset_inference_mode=${RESET_INFERENCE_MODE}
 inference_rollout_timeout_seconds=${INFERENCE_ROLLOUT_TIMEOUT_SECONDS}
@@ -1616,7 +1621,8 @@ for round in $(seq 1 "$REPEATS"); do
     # the baseline. Detect it independently of the replay exit code, then
     # repair with the deterministic target-prime/churn/verify-and-arm sequence
     # and re-issue the replay.
-    if [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ] && [ "$replay_attempt" -lt "$REPLAY_MAX_ATTEMPTS" ]; then
+    if { [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ] || [ "$REQUIRE_BUSINESS_ONBOARD_GET" = "1" ]; } \
+        && [ "$replay_attempt" -lt "$REPLAY_MAX_ATTEMPTS" ]; then
       set +e
       replay_zero_business_get "$round_dir"
       retry_business_get=$?

@@ -20,9 +20,11 @@ class PaiRecDsbenchGetPressureScriptTest(unittest.TestCase):
             "KVC_GET_CLIENTS=\"$DSBENCH_CLIENTS\"",
             "KVC_GET_KEY_COUNT=\"$DSBENCH_KEY_COUNT\"",
             "REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION=1",
+            "REQUIRE_BUSINESS_ONBOARD_GET=1",
             "KVC_NIC_BURST_SAMPLE=1",
             '"dsbench_get_max_inflight"',
             '"business_get_each_ms"',
+            '"diagnostic_samples"',
         ):
             self.assertIn(token, text)
 
