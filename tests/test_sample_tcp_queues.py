@@ -76,6 +76,11 @@ class TcpQueueSummaryTest(unittest.TestCase):
         self.assertIn("tcp-owners-worker-after.txt", text)
         self.assertIn("tcpdump -i", text)
         self.assertIn("summarize_kvc_tcp_capture.py", text)
+        self.assertIn(
+            'KVC_TCP_PACKET_INTERFACE="${KVC_TCP_PACKET_INTERFACE:-$REMOTE_NETWORK_INTERFACE}"',
+            text,
+        )
+        self.assertIn('ssh "$KVC_LOAD_HOST" "command -v tcpdump', text)
 
 
 if __name__ == "__main__":

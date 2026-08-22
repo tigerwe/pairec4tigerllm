@@ -93,7 +93,7 @@ KVC_NIC_BURST_INTERVAL_MS="${KVC_NIC_BURST_INTERVAL_MS:-20}"
 KVC_TCP_QUEUE_SAMPLE="${KVC_TCP_QUEUE_SAMPLE:-0}"
 KVC_TCP_QUEUE_INTERVAL_MS="${KVC_TCP_QUEUE_INTERVAL_MS:-5}"
 KVC_TCP_PACKET_SAMPLE="${KVC_TCP_PACKET_SAMPLE:-0}"
-KVC_TCP_PACKET_INTERFACE="${KVC_TCP_PACKET_INTERFACE:-$NETWORK_INTERFACE}"
+KVC_TCP_PACKET_INTERFACE="${KVC_TCP_PACKET_INTERFACE:-$REMOTE_NETWORK_INTERFACE}"
 KVC_TCP_PACKET_BUCKET_MS="${KVC_TCP_PACKET_BUCKET_MS:-1}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
@@ -114,6 +114,7 @@ TCP_QUEUE_WORKER_PID=""
 TCP_QUEUE_MASTER_PID=""
 TCP_QUEUE_STOP_FILE=""
 TCP_PACKET_PID=""
+TCP_PACKET_REMOTE_PID_FILE=""
 
 log() {
   printf '\n== %s ==\n' "$*"
@@ -534,10 +535,18 @@ capture_kvc_stats() {
 
 stop_loads() {
   if [ -n "$TCP_PACKET_PID" ]; then
-    kill -INT "$TCP_PACKET_PID" >/dev/null 2>&1 || true
+    if [ -n "$TCP_PACKET_REMOTE_PID_FILE" ]; then
+      ssh "$KVC_LOAD_HOST" \
+        "if test -s '$TCP_PACKET_REMOTE_PID_FILE'; then kill -INT \$(cat '$TCP_PACKET_REMOTE_PID_FILE') 2>/dev/null || true; fi" \
+        >/dev/null 2>&1 || true
+    fi
     wait "$TCP_PACKET_PID" >/dev/null 2>&1 || true
     TCP_PACKET_PID=""
   fi
+  if [ -n "$TCP_PACKET_REMOTE_PID_FILE" ]; then
+    ssh "$KVC_LOAD_HOST" "rm -f '$TCP_PACKET_REMOTE_PID_FILE'" >/dev/null 2>&1 || true
+  fi
+  TCP_PACKET_REMOTE_PID_FILE=""
   if [ -n "$TCP_QUEUE_STOP_FILE" ]; then
     touch "$TCP_QUEUE_STOP_FILE" 2>/dev/null || true
     ssh "$KVC_LOAD_HOST" "touch '$TCP_QUEUE_STOP_FILE'" >/dev/null 2>&1 || true
@@ -947,15 +956,10 @@ run_replay() {
     ssh "$KVC_LOAD_HOST" \
       "ss -tnp 2>&1 | grep -F '$KVC_DS_ENDPOINT' || true" \
       >"${round_dir}/replay/tcp-owners-worker-before.txt" 2>&1 || true
-    (
-      if [ "$(id -u)" -eq 0 ]; then
-        exec tcpdump -i "$KVC_TCP_PACKET_INTERFACE" -nn -tt -l -U -s 96 \
-          "tcp and host ${KVC_DS_ENDPOINT%:*} and port ${KVC_DS_ENDPOINT##*:}"
-      else
-        exec sudo -n tcpdump -i "$KVC_TCP_PACKET_INTERFACE" -nn -tt -l -U -s 96 \
-          "tcp and host ${KVC_DS_ENDPOINT%:*} and port ${KVC_DS_ENDPOINT##*:}"
-      fi
-    ) >"${round_dir}/replay/tcp-packets.log" \
+    TCP_PACKET_REMOTE_PID_FILE="/tmp/pairec-tcpdump-${RUN_ID}-${RANDOM}.pid"
+    ssh "$KVC_LOAD_HOST" \
+      "rm -f '$TCP_PACKET_REMOTE_PID_FILE'; tcpdump -i '$KVC_TCP_PACKET_INTERFACE' -nn -tt -l -U -s 96 'tcp and host ${KVC_DS_ENDPOINT%:*} and port ${KVC_DS_ENDPOINT##*:}' & pid=\$!; echo \$pid >'$TCP_PACKET_REMOTE_PID_FILE'; wait \$pid" \
+      >"${round_dir}/replay/tcp-packets.log" \
       2>"${round_dir}/replay/tcp-packets.collect.log" &
     TCP_PACKET_PID=$!
     sleep 0.1
@@ -1006,9 +1010,13 @@ run_replay() {
     >"${round_dir}/replay.console.log" 2>&1 || replay_code=$?
   if [ -n "$TCP_PACKET_PID" ]; then
     local tcp_packet_code=0
-    kill -INT "$TCP_PACKET_PID" >/dev/null 2>&1 || true
+    ssh "$KVC_LOAD_HOST" \
+      "if test -s '$TCP_PACKET_REMOTE_PID_FILE'; then kill -INT \$(cat '$TCP_PACKET_REMOTE_PID_FILE') 2>/dev/null || true; fi" \
+      >/dev/null 2>&1 || true
     wait "$TCP_PACKET_PID" >/dev/null 2>&1 || tcp_packet_code=$?
     TCP_PACKET_PID=""
+    ssh "$KVC_LOAD_HOST" "rm -f '$TCP_PACKET_REMOTE_PID_FILE'" >/dev/null 2>&1 || true
+    TCP_PACKET_REMOTE_PID_FILE=""
     ssh "$KVC_LOAD_HOST" \
       "ss -tnp 2>&1 | grep -F '$KVC_DS_ENDPOINT' || true" \
       >"${round_dir}/replay/tcp-owners-worker-after.txt" 2>&1 || true
@@ -1608,11 +1616,12 @@ require_command python3
 if mode_has_kvc || [ "$KVC_TCP_QUEUE_SAMPLE" = "1" ] || [ "$KVC_TCP_PACKET_SAMPLE" = "1" ]; then
   require_command ssh
 fi
-if [ "$KVC_TCP_PACKET_SAMPLE" = "1" ]; then
-  require_command tcpdump
-fi
 validate
 resolve_kvc_load_host
+if [ "$KVC_TCP_PACKET_SAMPLE" = "1" ]; then
+  ssh "$KVC_LOAD_HOST" "command -v tcpdump >/dev/null" \
+    || die "tcpdump is required on KVC load host $KVC_LOAD_HOST"
+fi
 build_brpc_probe
 
 cat >"${OUT_DIR}/config.txt" <<EOF
