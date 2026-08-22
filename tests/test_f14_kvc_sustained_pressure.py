@@ -348,6 +348,8 @@ class SustainedPressureStructureTest(unittest.TestCase):
         trace = (ROOT / "scripts/trace_single_brpc_datasystem_request.sh").read_text()
         self.assertIn("control_pressure start-pressure", trace)
         self.assertIn("control_pressure stop-pressure", trace)
+        self.assertIn("PressureGenerationComplete(control, generation)", wrapper)
+        self.assertIn("completedGeneration != lastRunGeneration", wrapper)
         self.assertIn(
             "COMBINED_KVC_INPROCESS_PRESSURE=${COMBINED_KVC_INPROCESS_PRESSURE:-0}", matrix)
         self.assertIn('KVC_INPROCESS_PRESSURE="$inprocess_pressure"', matrix)

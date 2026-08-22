@@ -439,21 +439,30 @@ int ApplyControlAction(const Config& config)
     }
     if (config.controlAction == "stop-pressure")
     {
-        auto const generation = pairec::kvc_burst::Load(&control.pressure_command_generation);
+        auto generation = pairec::kvc_burst::Load(&control.pressure_command_generation);
         if (generation == 0U)
         {
-            std::cerr << "no in-process pressure generation is active" << std::endl;
-            return 1;
+            auto const completedGeneration = pairec::kvc_burst::Load(&control.result_generation);
+            auto const lastRunGeneration = pairec::kvc_burst::Load(&control.run_generation);
+            if (completedGeneration == 0U || completedGeneration != lastRunGeneration)
+            {
+                std::cerr << "no in-process pressure generation is active" << std::endl;
+                return 1;
+            }
+            generation = completedGeneration;
         }
-        pairec::kvc_burst::Store(&control.pressure_stop_generation, generation);
-        pairec::kvc_burst::FutexWake(&control.pressure_stop_generation);
-        auto const deadline = pairec::kvc_burst::DeadlineNs(30000);
-        while (pairec::kvc_burst::Load(&control.pressure_stopped_generation) != generation
-            && pairec::kvc_burst::MonotonicNs() < deadline)
+        if (!pairec::kvc_burst::PressureGenerationComplete(control, generation))
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            pairec::kvc_burst::Store(&control.pressure_stop_generation, generation);
+            pairec::kvc_burst::FutexWake(&control.pressure_stop_generation);
+            auto const deadline = pairec::kvc_burst::DeadlineNs(30000);
+            while (!pairec::kvc_burst::PressureGenerationComplete(control, generation)
+                && pairec::kvc_burst::MonotonicNs() < deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
         }
-        if (pairec::kvc_burst::Load(&control.pressure_stopped_generation) != generation)
+        if (!pairec::kvc_burst::PressureGenerationComplete(control, generation))
         {
             std::cerr << "in-process pressure did not stop within 30 seconds" << std::endl;
             return 1;

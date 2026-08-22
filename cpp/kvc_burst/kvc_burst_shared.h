@@ -194,6 +194,13 @@ inline T FetchSub(T* target, T value, int order = __ATOMIC_ACQ_REL)
     return __atomic_fetch_sub(target, value, order);
 }
 
+inline bool PressureGenerationComplete(const SharedControl& control, uint32_t generation)
+{
+    return generation != 0U
+        && (Load(&control.pressure_stopped_generation) == generation
+            || Load(&control.result_generation) == generation);
+}
+
 inline bool CompareExchange(uint32_t* target, uint32_t* expected, uint32_t desired)
 {
     return __atomic_compare_exchange_n(

@@ -141,6 +141,16 @@ int main()
     assert(pairec::kvc_burst::SustainedStopReason(*control, 7, loopStarted, 0, 1000, 100)
         == pairec::kvc_burst::SustainedStop::kNone);
 
+    // A published result is a durable completion acknowledgement even after
+    // the sidecar has reset transient stop fields for the next generation.
+    pairec::kvc_burst::Store(&control->pressure_stopped_generation, 7U);
+    pairec::kvc_burst::Store(&control->result_generation, 0U);
+    assert(pairec::kvc_burst::PressureGenerationComplete(*control, 7));
+    pairec::kvc_burst::Store(&control->pressure_stopped_generation, 0U);
+    pairec::kvc_burst::Store(&control->result_generation, 7U);
+    assert(pairec::kvc_burst::PressureGenerationComplete(*control, 7));
+    assert(!pairec::kvc_burst::PressureGenerationComplete(*control, 8));
+
     ::munmap(control, sizeof(SharedControl));
     std::cout << "KVC_BURST_SHARED_TEST_OK" << std::endl;
     return 0;
