@@ -657,6 +657,12 @@ SustainedReport SummarizeSustained(const Config& config, const SharedControl& co
 std::string JsonResult(const Config& config, const SharedControl& control, uint32_t generation,
     const Aggregate& result, const SustainedReport& sustained)
 {
+    auto const realtimeNow = pairec::kvc_burst::RealtimeNs();
+    auto const monotonicNow = pairec::kvc_burst::MonotonicNs();
+    auto const realtimeOffset = realtimeNow >= monotonicNow ? realtimeNow - monotonicNow : 0ULL;
+    auto const toEpochNs = [realtimeOffset](uint64_t monotonicNs) {
+        return monotonicNs == 0 ? 0ULL : realtimeOffset + monotonicNs;
+    };
     std::ostringstream output;
     output << std::fixed << std::setprecision(3);
     output << "{\"event\":\"kvc_burst_result\",\"generation\":" << generation
@@ -702,9 +708,36 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
            << pairec::kvc_burst::RequiredPressureFirst(control.pressure_lanes);
     {
         auto businessStart = pairec::kvc_burst::Load(&control.business_start_ns);
+        auto businessEnd = pairec::kvc_burst::Load(&control.business_end_ns);
         auto pressureLanes = pairec::kvc_burst::Load(&control.pressure_lanes);
-        output << ",\"pressure_start_offsets_us\":";
+        output << ",\"business_get_start_epoch_ns\":" << toEpochNs(businessStart)
+               << ",\"business_get_end_epoch_ns\":" << toEpochNs(businessEnd)
+               << ",\"clock_snapshot_realtime_ns\":" << realtimeNow
+               << ",\"clock_snapshot_monotonic_ns\":" << monotonicNow
+               << ",\"pressure_start_epoch_ns\":";
         bool firstOffset = true;
+        output << '[';
+        for (uint32_t i = 0; i < pressureLanes; ++i)
+        {
+            if (!firstOffset) output << ',';
+            firstOffset = false;
+            auto start = pairec::kvc_burst::Load(&control.pressure_start_ns[i]);
+            if (start == 0) output << "null";
+            else output << toEpochNs(start);
+        }
+        output << "],\"pressure_end_epoch_ns\":";
+        firstOffset = true;
+        output << '[';
+        for (uint32_t i = 0; i < pressureLanes; ++i)
+        {
+            if (!firstOffset) output << ',';
+            firstOffset = false;
+            auto end = pairec::kvc_burst::Load(&control.pressure_end_ns[i]);
+            if (end == 0) output << "null";
+            else output << toEpochNs(end);
+        }
+        output << "],\"pressure_start_offsets_us\":";
+        firstOffset = true;
         output << '[';
         for (uint32_t i = 0; i < pressureLanes; ++i)
         {

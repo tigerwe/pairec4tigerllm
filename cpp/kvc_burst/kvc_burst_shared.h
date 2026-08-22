@@ -194,6 +194,13 @@ inline uint64_t MonotonicNs()
     return static_cast<uint64_t>(value.tv_sec) * 1000000000ULL + static_cast<uint64_t>(value.tv_nsec);
 }
 
+inline uint64_t RealtimeNs()
+{
+    timespec value{};
+    ::clock_gettime(CLOCK_REALTIME, &value);
+    return static_cast<uint64_t>(value.tv_sec) * 1000000000ULL + static_cast<uint64_t>(value.tv_nsec);
+}
+
 inline uint64_t DeadlineNs(uint32_t timeoutMs)
 {
     return MonotonicNs() + static_cast<uint64_t>(timeoutMs) * 1000000ULL;

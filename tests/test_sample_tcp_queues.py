@@ -69,6 +69,14 @@ class TcpQueueSummaryTest(unittest.TestCase):
         self.assertIn("<scripts/sample_tcp_queues.py", text)
         self.assertIn("sample_tcp_queues.py summarize", text)
 
+    def test_contention_wires_header_capture_and_owner_snapshots(self):
+        text = (ROOT / "scripts" / "benchmark_brpc_kvc_contention.sh").read_text()
+        self.assertIn('KVC_TCP_PACKET_SAMPLE="${KVC_TCP_PACKET_SAMPLE:-0}"', text)
+        self.assertIn("tcp-owners-worker-before.txt", text)
+        self.assertIn("tcp-owners-worker-after.txt", text)
+        self.assertIn("tcpdump -i", text)
+        self.assertIn("summarize_kvc_tcp_capture.py", text)
+
 
 if __name__ == "__main__":
     unittest.main()

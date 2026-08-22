@@ -92,6 +92,9 @@ KVC_NIC_BURST_SAMPLE="${KVC_NIC_BURST_SAMPLE:-1}"
 KVC_NIC_BURST_INTERVAL_MS="${KVC_NIC_BURST_INTERVAL_MS:-20}"
 KVC_TCP_QUEUE_SAMPLE="${KVC_TCP_QUEUE_SAMPLE:-0}"
 KVC_TCP_QUEUE_INTERVAL_MS="${KVC_TCP_QUEUE_INTERVAL_MS:-5}"
+KVC_TCP_PACKET_SAMPLE="${KVC_TCP_PACKET_SAMPLE:-0}"
+KVC_TCP_PACKET_INTERFACE="${KVC_TCP_PACKET_INTERFACE:-$NETWORK_INTERFACE}"
+KVC_TCP_PACKET_BUCKET_MS="${KVC_TCP_PACKET_BUCKET_MS:-1}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT_DIR="${OUT_DIR:-/tmp/brpc-kvc-contention/${RUN_ID}-${MODE}}"
@@ -110,6 +113,7 @@ NIC_BURST_STOP_FILE=""
 TCP_QUEUE_WORKER_PID=""
 TCP_QUEUE_MASTER_PID=""
 TCP_QUEUE_STOP_FILE=""
+TCP_PACKET_PID=""
 
 log() {
   printf '\n== %s ==\n' "$*"
@@ -236,6 +240,14 @@ validate() {
     && [ "$KVC_TCP_QUEUE_INTERVAL_MS" -ge 1 ] \
     && [ "$KVC_TCP_QUEUE_INTERVAL_MS" -le 1000 ] \
     || die "KVC_TCP_QUEUE_INTERVAL_MS must be between 1 and 1000"
+  case "$KVC_TCP_PACKET_SAMPLE" in
+    0|1) ;;
+    *) die "KVC_TCP_PACKET_SAMPLE must be 0 or 1" ;;
+  esac
+  [[ "$KVC_TCP_PACKET_BUCKET_MS" =~ ^[0-9]+$ ]] \
+    && [ "$KVC_TCP_PACKET_BUCKET_MS" -ge 1 ] \
+    && [ "$KVC_TCP_PACKET_BUCKET_MS" -le 1000 ] \
+    || die "KVC_TCP_PACKET_BUCKET_MS must be between 1 and 1000"
   case "$KVC_DSBENCH_SUSTAINED" in
     0|1) ;;
     *) die "KVC_DSBENCH_SUSTAINED must be 0 or 1" ;;
@@ -521,6 +533,11 @@ capture_kvc_stats() {
 }
 
 stop_loads() {
+  if [ -n "$TCP_PACKET_PID" ]; then
+    kill -INT "$TCP_PACKET_PID" >/dev/null 2>&1 || true
+    wait "$TCP_PACKET_PID" >/dev/null 2>&1 || true
+    TCP_PACKET_PID=""
+  fi
   if [ -n "$TCP_QUEUE_STOP_FILE" ]; then
     touch "$TCP_QUEUE_STOP_FILE" 2>/dev/null || true
     ssh "$KVC_LOAD_HOST" "touch '$TCP_QUEUE_STOP_FILE'" >/dev/null 2>&1 || true
@@ -926,6 +943,23 @@ run_replay() {
   local replay_code=0
   log "Replay one PaiRec request"
   mkdir -p "${round_dir}/replay"
+  if [ "$KVC_TCP_PACKET_SAMPLE" = "1" ]; then
+    ssh "$KVC_LOAD_HOST" \
+      "ss -tnp 2>&1 | grep -F '$KVC_DS_ENDPOINT' || true" \
+      >"${round_dir}/replay/tcp-owners-worker-before.txt" 2>&1 || true
+    (
+      if [ "$(id -u)" -eq 0 ]; then
+        exec tcpdump -i "$KVC_TCP_PACKET_INTERFACE" -nn -tt -l -U -s 96 \
+          "tcp and host ${KVC_DS_ENDPOINT%:*} and port ${KVC_DS_ENDPOINT##*:}"
+      else
+        exec sudo -n tcpdump -i "$KVC_TCP_PACKET_INTERFACE" -nn -tt -l -U -s 96 \
+          "tcp and host ${KVC_DS_ENDPOINT%:*} and port ${KVC_DS_ENDPOINT##*:}"
+      fi
+    ) >"${round_dir}/replay/tcp-packets.log" \
+      2>"${round_dir}/replay/tcp-packets.collect.log" &
+    TCP_PACKET_PID=$!
+    sleep 0.1
+  fi
   if [ "$KVC_NIC_BURST_SAMPLE" = "1" ]; then
     NIC_BURST_STOP_FILE="/tmp/pairec-nic-burst-${RUN_ID}-${RANDOM}.stop"
     ssh "$KVC_LOAD_HOST" "rm -f '$NIC_BURST_STOP_FILE'" >/dev/null 2>&1 || true
@@ -970,6 +1004,31 @@ run_replay() {
     OUT_DIR="${round_dir}/replay" \
     bash scripts/trace_single_brpc_datasystem_request.sh \
     >"${round_dir}/replay.console.log" 2>&1 || replay_code=$?
+  if [ -n "$TCP_PACKET_PID" ]; then
+    local tcp_packet_code=0
+    kill -INT "$TCP_PACKET_PID" >/dev/null 2>&1 || true
+    wait "$TCP_PACKET_PID" >/dev/null 2>&1 || tcp_packet_code=$?
+    TCP_PACKET_PID=""
+    ssh "$KVC_LOAD_HOST" \
+      "ss -tnp 2>&1 | grep -F '$KVC_DS_ENDPOINT' || true" \
+      >"${round_dir}/replay/tcp-owners-worker-after.txt" 2>&1 || true
+    if [ "$tcp_packet_code" -ne 0 ]; then
+      printf 'tcpdump_exit=%s\n' "$tcp_packet_code" \
+        >"${round_dir}/replay/tcp-packets.error"
+    elif ! python3 scripts/summarize_kvc_tcp_capture.py \
+      --capture "${round_dir}/replay/tcp-packets.log" \
+      --kvc-log "${round_dir}/replay/kvc_burst.log" \
+      --endpoint "$KVC_DS_ENDPOINT" \
+      --bucket-ms "$KVC_TCP_PACKET_BUCKET_MS" \
+      --output "${round_dir}/replay/tcp-packets.json" \
+      >"${round_dir}/replay/tcp-packets.summary.log" 2>&1; then
+      {
+        echo "TCP packet summary failed"
+        cat "${round_dir}/replay/tcp-packets.collect.log" 2>/dev/null || true
+        cat "${round_dir}/replay/tcp-packets.summary.log" 2>/dev/null || true
+      } >"${round_dir}/replay/tcp-packets.error"
+    fi
+  fi
   if [ -n "$NIC_BURST_PID" ]; then
     local nic_burst_collect_code=0
     ssh "$KVC_LOAD_HOST" "touch '$NIC_BURST_STOP_FILE'" >/dev/null 2>&1 || true
@@ -1546,8 +1605,11 @@ require_command bash
 require_command go
 require_command kubectl
 require_command python3
-if mode_has_kvc || [ "$KVC_TCP_QUEUE_SAMPLE" = "1" ]; then
+if mode_has_kvc || [ "$KVC_TCP_QUEUE_SAMPLE" = "1" ] || [ "$KVC_TCP_PACKET_SAMPLE" = "1" ]; then
   require_command ssh
+fi
+if [ "$KVC_TCP_PACKET_SAMPLE" = "1" ]; then
+  require_command tcpdump
 fi
 validate
 resolve_kvc_load_host
@@ -1580,6 +1642,9 @@ kvc_load_ready_timeout_seconds=${KVC_LOAD_READY_TIMEOUT_SECONDS}
 kvc_dsbench_sustained=${KVC_DSBENCH_SUSTAINED}
 kvc_tcp_queue_sample=${KVC_TCP_QUEUE_SAMPLE}
 kvc_tcp_queue_interval_ms=${KVC_TCP_QUEUE_INTERVAL_MS}
+kvc_tcp_packet_sample=${KVC_TCP_PACKET_SAMPLE}
+kvc_tcp_packet_interface=${KVC_TCP_PACKET_INTERFACE}
+kvc_tcp_packet_bucket_ms=${KVC_TCP_PACKET_BUCKET_MS}
 expected_offloads=${EXPECTED_OFFLOADS}
 expected_onboards=${EXPECTED_ONBOARDS}
 expected_onboards_min=${EXPECTED_ONBOARDS_MIN}
