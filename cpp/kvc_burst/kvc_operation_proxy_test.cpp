@@ -143,6 +143,8 @@ int main()
     control->pressure_success = 0;
     control->pressure_errors = 0;
     control->pressure_first_failed = 0;
+    control->pressure_max_duration_ms = 5000;
+    control->pressure_max_loops = 1000;
     control->business_start_ns = 0;
     control->business_end_ns = 0;
     for (uint32_t lane = 0; lane < 31; ++lane)
@@ -152,27 +154,51 @@ int main()
         control->pressure_ok[lane] = 0;
     }
     std::atomic<uint32_t> fakeGets{0};
+    control->trigger_armed = 0;
+    auto registration = pairec::kvc_burst::beginBusinessGet(
+        "request-registration", BusinessApi::kGet, 1);
+    assert(!registration.triggered());
+    auto pressure = pairec::kvc_burst::beginInProcessPressure(registration,
+        [&fakeGets](uint32_t lane, std::string const& key) {
+            assert(key == "PairecKvcBurstV2_g3_pressure_" + std::to_string(lane % 4));
+            fakeGets.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return true;
+        });
+    assert(!pressure.active());
+    assert(control->pressure_client_registered == 1);
+    control->run_generation = 3;
+    control->pressure_command_generation = 3;
+    pairec::kvc_burst::FutexWake(&control->pressure_command_generation);
+    auto const establishedDeadline = pairec::kvc_burst::DeadlineNs(1000);
+    while (control->pressure_established_generation != 3
+        && pairec::kvc_burst::MonotonicNs() < establishedDeadline)
+    {
+        std::this_thread::yield();
+    }
+    assert(control->pressure_established_generation == 3);
+    assert(control->pressure_started_lanes == 31);
+    assert(control->completed_pressure_lanes == 0);
+    assert(control->pressure_first_failed == 0);
+
+    control->trigger_armed = 1;
     auto inProcess = pairec::kvc_burst::beginBusinessGet(
         "request-inprocess", BusinessApi::kGet, 1);
     assert(inProcess.triggered());
     assert(inProcess.inProcessPressure);
-    assert(control->business_start_ns == 0);
-    auto pressure = pairec::kvc_burst::beginInProcessPressure(inProcess,
-        [&fakeGets](uint32_t lane, std::string const& key) {
-            assert(key == "PairecKvcBurstV2_g3_pressure_" + std::to_string(lane % 4));
-            fakeGets.fetch_add(1, std::memory_order_relaxed);
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            return true;
-        });
-    assert(pressure.active());
-    assert(control->pressure_started_lanes == 31);
-    assert(control->completed_pressure_lanes == 0);
-    assert(control->pressure_first_failed == 0);
     assert(control->business_start_ns > 0);
     auto businessEnded = pairec::kvc_burst::MonotonicNs();
-    pressure.finish();
     pairec::kvc_burst::finishBusinessGet(inProcess, true, businessEnded);
-    assert(fakeGets.load(std::memory_order_relaxed) == 31);
+    control->pressure_stop_generation = 3;
+    pairec::kvc_burst::FutexWake(&control->pressure_stop_generation);
+    auto const stoppedDeadline = pairec::kvc_burst::DeadlineNs(1000);
+    while (control->pressure_stopped_generation != 3
+        && pairec::kvc_burst::MonotonicNs() < stoppedDeadline)
+    {
+        std::this_thread::yield();
+    }
+    assert(control->pressure_stopped_generation == 3);
+    assert(fakeGets.load(std::memory_order_relaxed) >= 31);
     assert(control->completed_pressure_lanes == 31);
     assert(control->pressure_success == 31);
     assert(control->pressure_errors == 0);

@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 
 #include <cstdlib>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -20,12 +21,12 @@
 
 extern "C" char const* pairecKvcBurstProxyProtocolMarker()
 {
-    return "PAIREC_KVC_BURST_PROXY_V4";
+    return "PAIREC_KVC_BURST_PROXY_V5";
 }
 
 extern "C" char const* pairecKvcInProcessBurstCapabilityMarker()
 {
-    return "PAIREC_KVC_INPROCESS_BURST_C32_V2";
+    return "PAIREC_KVC_INPROCESS_SUSTAINED_C32_V1";
 }
 
 namespace pairec::kvc_burst
@@ -193,28 +194,156 @@ bool kvcBurstEnabled()
     return enabled;
 }
 
+class InProcessPressureCoordinator
+{
+public:
+    ~InProcessPressureCoordinator()
+    {
+        mStopping.store(true, std::memory_order_release);
+        if (auto* control = mapping().get())
+        {
+            FetchAdd(&control->pressure_command_generation, 1U);
+            FutexWake(&control->pressure_command_generation);
+        }
+        for (auto& worker : mWorkers)
+        {
+            if (worker.joinable()) worker.join();
+        }
+    }
+
+    bool registerClient(InProcessPressureGet get)
+    {
+        if (!inProcessPressureEnabled() || !get) return false;
+        std::lock_guard<std::mutex> lock(mMutex);
+        if (!mGet)
+        {
+            auto* control = mapping().get();
+            if (control == nullptr) return false;
+            mGet = std::make_shared<InProcessPressureGet>(std::move(get));
+            auto const lanes = Load(&control->pressure_lanes);
+            mWorkers.reserve(lanes);
+            try
+            {
+                for (uint32_t lane = 0; lane < lanes; ++lane)
+                {
+                    mWorkers.emplace_back(&InProcessPressureCoordinator::worker, this, lane);
+                }
+            }
+            catch (...)
+            {
+                Store(&control->pressure_first_failed, 1U);
+                return false;
+            }
+        }
+        if (auto* control = mapping().get())
+        {
+            Store(&control->pressure_client_registered, 1U);
+            FutexWake(&control->pressure_client_registered);
+        }
+        return true;
+    }
+
+private:
+    void worker(uint32_t lane)
+    {
+        uint32_t previousGeneration = 0;
+        while (!mStopping.load(std::memory_order_acquire))
+        {
+            auto* control = mapping().get();
+            if (control == nullptr)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            uint32_t generation = 0;
+            if (!WaitForGenerationChange(
+                    &control->pressure_command_generation, previousGeneration, &generation))
+            {
+                continue;
+            }
+            if (mStopping.load(std::memory_order_acquire)) break;
+            previousGeneration = generation;
+            if (generation == 0 || generation != Load(&control->prepared_generation)) continue;
+
+            auto const keyCount = Load(&control->pressure_key_count);
+            auto const maxDurationMs = Load(&control->pressure_max_duration_ms);
+            auto const maxLoops = Load(&control->pressure_max_loops);
+            if (keyCount == 0 || maxDurationMs == 0 || maxLoops == 0)
+            {
+                Store(&control->pressure_first_failed, 1U);
+                continue;
+            }
+            auto const key = pressurePrefix() + "_g" + std::to_string(generation)
+                + "_pressure_" + std::to_string(lane % keyCount);
+            auto const laneStarted = MonotonicNs();
+            Store(&control->pressure_start_ns[lane], laneStarted);
+            FetchAdd(&control->pressure_started_lanes, 1U);
+            FutexWake(&control->pressure_started_lanes);
+            uint32_t loops = 0;
+            uint32_t errors = 0;
+            while (!mStopping.load(std::memory_order_acquire)
+                && Load(&control->pressure_stop_generation) != generation
+                && loops < maxLoops
+                && MonotonicNs() - laneStarted
+                    < static_cast<uint64_t>(maxDurationMs) * 1000000ULL)
+            {
+                FetchAdd(&control->pressure_active_gets, 1U);
+                maybeMarkEstablished(control, generation);
+                bool ok = false;
+                try
+                {
+                    ok = (*mGet)(lane, key);
+                }
+                catch (...)
+                {
+                    ok = false;
+                }
+                FetchSub(&control->pressure_active_gets, 1U);
+                ++loops;
+                if (!ok) ++errors;
+                Store(&control->pressure_end_ns[lane], MonotonicNs());
+                Store(&control->pressure_loop_count[lane], loops);
+                Store(&control->pressure_loop_errors[lane], errors);
+            }
+            auto const ok = loops > 0 && errors == 0;
+            Store(&control->pressure_ok[lane], ok ? 1U : 0U);
+            FetchAdd(ok ? &control->pressure_success : &control->pressure_errors, 1U);
+            auto const completed = FetchAdd(&control->completed_pressure_lanes, 1U) + 1U;
+            FutexWake(&control->completed_pressure_lanes);
+            if (completed == Load(&control->pressure_lanes))
+            {
+                Store(&control->pressure_stopped_generation, generation);
+                FutexWake(&control->pressure_stopped_generation);
+            }
+        }
+    }
+
+    static void maybeMarkEstablished(SharedControl* control, uint32_t generation)
+    {
+        auto const lanes = Load(&control->pressure_lanes);
+        auto const required = RequiredPressureFirst(lanes);
+        if (Load(&control->pressure_started_lanes) == lanes
+            && Load(&control->pressure_active_gets) >= required)
+        {
+            Store(&control->pressure_established_generation, generation);
+            FutexWake(&control->pressure_established_generation);
+        }
+    }
+
+    std::mutex mMutex;
+    std::shared_ptr<InProcessPressureGet> mGet;
+    std::vector<std::thread> mWorkers;
+    std::atomic<bool> mStopping{false};
+};
+
+InProcessPressureCoordinator& inProcessCoordinator()
+{
+    static InProcessPressureCoordinator value;
+    return value;
+}
+
 struct InProcessPressureSession::Impl
 {
-    std::mutex mutex;
-    std::condition_variable readyCondition;
-    std::condition_variable launchCondition;
-    std::vector<std::thread> threads;
-    uint32_t ready{0};
-    bool launch{false};
-
-    void finish()
-    {
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            launch = true;
-        }
-        launchCondition.notify_all();
-        for (auto& thread : threads)
-        {
-            if (thread.joinable()) thread.join();
-        }
-        threads.clear();
-    }
 };
 
 InProcessPressureSession::InProcessPressureSession() = default;
@@ -226,7 +355,6 @@ InProcessPressureSession::InProcessPressureSession(std::unique_ptr<Impl> impl)
 
 InProcessPressureSession::~InProcessPressureSession()
 {
-    finish();
 }
 
 InProcessPressureSession::InProcessPressureSession(InProcessPressureSession&&) noexcept = default;
@@ -240,8 +368,6 @@ bool InProcessPressureSession::active() const
 
 void InProcessPressureSession::finish()
 {
-    if (mImpl == nullptr) return;
-    mImpl->finish();
     mImpl.reset();
 }
 
@@ -302,11 +428,42 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
         emitSkipped(requestId, token.status);
         return token;
     }
+    if (inProcess
+        && (Load(&control->pressure_client_registered) == 0U
+            || Load(&control->pressure_established_generation)
+                != Load(&control->prepared_generation)
+            || Load(&control->completed_pressure_lanes) != 0U))
+    {
+        token.status = TriggerStatus::kInvalidControl;
+        emitSkipped(requestId, token.status);
+        return token;
+    }
     if (Load(&control->state) != static_cast<uint32_t>(State::kReady))
     {
         token.status = TriggerStatus::kSkippedBusy;
         emitSkipped(requestId, token.status);
         return token;
+    }
+    if (inProcess)
+    {
+        auto const waitStarted = MonotonicNs();
+        auto const required = RequiredPressureFirst(pressureLanes);
+        auto const deadline = DeadlineNs(Load(&control->barrier_timeout_ms));
+        while (Load(&control->pressure_active_gets) < required
+            && Load(&control->completed_pressure_lanes) == 0U && MonotonicNs() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        token.pressureWaitUs = (MonotonicNs() - waitStarted) / 1000ULL;
+        auto const active = Load(&control->pressure_active_gets);
+        Store(&control->business_pressure_wait_us, token.pressureWaitUs);
+        Store(&control->business_pressure_active_snapshot, active);
+        if (active < required)
+        {
+            token.status = TriggerStatus::kInvalidControl;
+            emitSkipped(requestId, token.status);
+            return token;
+        }
     }
 
     uint32_t expected = static_cast<uint32_t>(State::kReady);
@@ -331,8 +488,11 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
     Store(&control->trigger_started_ns, triggerStarted);
     Store(&control->business_trigger_status, static_cast<uint32_t>(TriggerStatus::kTriggered));
     Store(&control->state, static_cast<uint32_t>(State::kRunning));
-    Store(&control->run_generation, token.generation);
-    FutexWake(&control->run_generation);
+    if (!token.inProcessPressure)
+    {
+        Store(&control->run_generation, token.generation);
+        FutexWake(&control->run_generation);
+    }
     auto const triggerCompleted = MonotonicNs();
     token.triggerUs = (triggerCompleted - triggerStarted) / 1000ULL;
     Store(&control->trigger_completed_ns, triggerCompleted);
@@ -341,6 +501,9 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
 
     if (token.inProcessPressure)
     {
+        token.pressureEstablished = true;
+        token.businessStartedNs = MonotonicNs();
+        Store(&control->business_start_ns, token.businessStartedNs);
         return token;
     }
 
@@ -368,106 +531,14 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
 InProcessPressureSession beginInProcessPressure(
     BusinessGetToken const& token, InProcessPressureGet get)
 {
-    if (!token.triggered() || !token.inProcessPressure || !get)
-    {
-        return {};
-    }
-    auto* control = mapping().get();
-    if (control == nullptr || token.generation != Load(&control->run_generation))
-    {
-        return {};
-    }
-
-    auto const lanes = Load(&control->pressure_lanes);
-    auto const keyCount = Load(&control->pressure_key_count);
-    if (keyCount == 0U || keyCount > lanes)
-    {
-        Store(&control->pressure_first_failed, 1U);
-        return {};
-    }
-    auto impl = std::make_unique<InProcessPressureSession::Impl>();
-    auto* state = impl.get();
-    auto getShared = std::make_shared<InProcessPressureGet>(std::move(get));
-    auto const prefix = pressurePrefix() + "_g" + std::to_string(token.generation) + "_pressure_";
-    uint32_t created = 0;
-    try
-    {
-        impl->threads.reserve(lanes);
-        for (uint32_t lane = 0; lane < lanes; ++lane)
-        {
-            impl->threads.emplace_back([state, control, getShared, prefix, lane, keyCount] {
-                {
-                    std::unique_lock<std::mutex> lock(state->mutex);
-                    ++state->ready;
-                    state->readyCondition.notify_one();
-                    state->launchCondition.wait(lock, [state] { return state->launch; });
-                }
-                auto const started = MonotonicNs();
-                Store(&control->pressure_start_ns[lane], started);
-                FetchAdd(&control->pressure_started_lanes, 1U);
-                FutexWake(&control->pressure_started_lanes);
-                bool ok = false;
-                try
-                {
-                    ok = (*getShared)(lane, prefix + std::to_string(lane % keyCount));
-                }
-                catch (...)
-                {
-                    ok = false;
-                }
-                Store(&control->pressure_end_ns[lane], MonotonicNs());
-                Store(&control->pressure_ok[lane], ok ? 1U : 0U);
-                FetchAdd(ok ? &control->pressure_success : &control->pressure_errors, 1U);
-                FetchAdd(&control->completed_pressure_lanes, 1U);
-                FutexWake(&control->completed_pressure_lanes);
-            });
-            ++created;
-        }
-    }
-    catch (...)
-    {
-        Store(&control->pressure_first_failed, 1U);
-    }
-
-    auto const deadline = DeadlineNs(Load(&control->barrier_timeout_ms));
-    {
-        std::unique_lock<std::mutex> lock(impl->mutex);
-        while (impl->ready != created && MonotonicNs() < deadline)
-        {
-            impl->readyCondition.wait_for(lock, std::chrono::milliseconds(1));
-        }
-        impl->launch = true;
-    }
-    impl->launchCondition.notify_all();
-
-    while (Load(&control->pressure_started_lanes) < created
-        && Load(&control->completed_pressure_lanes) == 0U && MonotonicNs() < deadline)
-    {
-        std::this_thread::yield();
-    }
-    auto const started = Load(&control->pressure_started_lanes);
-    auto const completed = Load(&control->completed_pressure_lanes);
-    auto const established = created == lanes && started == lanes && completed == 0U;
-    if (!established)
-    {
-        Store(&control->pressure_first_failed, 1U);
-    }
-    for (uint32_t lane = created; lane < lanes; ++lane)
-    {
-        auto const now = MonotonicNs();
-        Store(&control->pressure_start_ns[lane], now);
-        Store(&control->pressure_end_ns[lane], now);
-        Store(&control->pressure_ok[lane], 0U);
-        FetchAdd(&control->pressure_errors, 1U);
-        FetchAdd(&control->completed_pressure_lanes, 1U);
-    }
-    Store(&control->business_barrier_wait_us, uint64_t{0});
-    Store(&control->business_pressure_wait_us, uint64_t{0});
-    Store(&control->business_lead_wait_us, uint64_t{0});
-    Store(&control->business_release_generation, token.generation);
-    FutexWake(&control->business_release_generation);
-    Store(&control->business_start_ns, MonotonicNs());
-    return InProcessPressureSession(std::move(impl));
+    // Register only the production single-key onboard client. Registering the
+    // first MGet/parallel client observed during prime would recreate the
+    // original client/socket isolation ambiguity.
+    if (token.api != BusinessApi::kGet) return {};
+    auto const registered = inProcessCoordinator().registerClient(std::move(get));
+    if (!registered) return {};
+    return InProcessPressureSession(
+        token.inProcessPressure ? std::make_unique<InProcessPressureSession::Impl>() : nullptr);
 }
 
 void finishBusinessGet(BusinessGetToken const& token, bool success, uint64_t businessEndedNs)

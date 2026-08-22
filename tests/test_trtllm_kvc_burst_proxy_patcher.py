@@ -68,7 +68,7 @@ void copy()
             with self.assertRaisesRegex(RuntimeError, "attribution patch"):
                 module.patch_tree(root, Path(__file__).resolve().parents[1])
 
-    def test_upgrades_v3_managed_files_to_v4(self):
+    def test_upgrades_v3_managed_files_to_v5(self):
         module = __import__("scripts.patch_trtllm_kvc_burst_proxy", fromlist=["write_managed"])
         with tempfile.TemporaryDirectory() as directory:
             managed = Path(directory) / "managed.cpp"
@@ -76,7 +76,7 @@ void copy()
             module.write_managed(managed, "new\n")
             result = managed.read_text()
 
-        self.assertIn("PAIREC_KVC_BURST_PROXY_V4", result)
+        self.assertIn("PAIREC_KVC_BURST_PROXY_V5", result)
         self.assertNotIn("PAIREC_KVC_BURST_PROXY_V3", result)
         self.assertTrue(result.endswith("new\n"))
 

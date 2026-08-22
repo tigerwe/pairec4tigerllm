@@ -20,8 +20,8 @@ MEASURE_DISABLED=${MEASURE_DISABLED:-0}
 KVC_BURST_VERBOSE=${KVC_BURST_VERBOSE:-0}
 KVC_BURST_INITIAL_ARMED=${KVC_BURST_INITIAL_ARMED:-1}
 SUSTAINED_PRESSURE=${SUSTAINED_PRESSURE:-0}
-SUSTAINED_MAX_DURATION_MS=${SUSTAINED_MAX_DURATION_MS:-1000}
-SUSTAINED_MAX_LOOPS=${SUSTAINED_MAX_LOOPS:-100}
+SUSTAINED_MAX_DURATION_MS=${SUSTAINED_MAX_DURATION_MS:-5000}
+SUSTAINED_MAX_LOOPS=${SUSTAINED_MAX_LOOPS:-1000}
 INPROCESS_PRESSURE=${INPROCESS_PRESSURE:-0}
 BACKUP_FILE=${BACKUP_FILE:-/tmp/f14-kvc-burst-deployment-before.json}
 ROLLOUT_TIMEOUT=${ROLLOUT_TIMEOUT:-10m}
@@ -47,14 +47,14 @@ verify() {
   [[ -n "$pod" ]] || die "inference Pod not found"
   kubectl -n "$NAMESPACE" get pod "$pod" -o wide
   kubectl -n "$NAMESPACE" exec "$pod" -c "$INFERENCE_CONTAINER" -- \
-    grep -aFq PAIREC_KVC_BURST_PROXY_V4 \
+    grep -aFq PAIREC_KVC_BURST_PROXY_V5 \
       "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
-    || die "KVC proxy V4 capability marker is missing from TensorRT-LLM"
+    || die "KVC proxy V5 capability marker is missing from TensorRT-LLM"
   if [[ "$INPROCESS_PRESSURE" = 1 ]]; then
     kubectl -n "$NAMESPACE" exec "$pod" -c "$INFERENCE_CONTAINER" -- \
-      grep -aFq PAIREC_KVC_INPROCESS_BURST_C32_V2 \
+      grep -aFq PAIREC_KVC_INPROCESS_SUSTAINED_C32_V1 \
         "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
-      || die "in-process KVC c32 V2 capability marker is missing from TensorRT-LLM"
+      || die "in-process sustained KVC c32 capability marker is missing from TensorRT-LLM"
   fi
   kubectl -n "$NAMESPACE" exec "$pod" -c "$SIDECAR_CONTAINER" -- \
     test -s /run/pairec-kvc-burst/ready \
@@ -69,8 +69,8 @@ verify() {
   echo "$ready_event"
   grep -Fq "\"object_size_bytes\":$OBJECT_SIZE" <<<"$ready_event" \
     || die "sidecar object size mismatch: expected=$OBJECT_SIZE"
-  grep -Fq '"version":4' <<<"$ready_event" \
-    || die "sidecar control protocol mismatch: expected version=4"
+  grep -Fq '"version":5' <<<"$ready_event" \
+    || die "sidecar control protocol mismatch: expected version=5"
   expected_engine=sidecar-exclusive-clients
   [[ "$INPROCESS_PRESSURE" = 0 ]] || expected_engine=inprocess-shared-client
   grep -Fq "\"pressure_engine\":\"$expected_engine\"" <<<"$ready_event" \
@@ -119,7 +119,7 @@ apply_overlay() {
       || die "in-process pressure requires PRESSURE_KEY_COUNT between 1 and 31"
     (( OBJECT_SIZE == 3670016 )) || die "in-process pressure requires OBJECT_SIZE=3670016"
     [[ "$KVC_BURST_INITIAL_ARMED" = 0 ]] || die "in-process pressure requires dynamic arm"
-    [[ "$SUSTAINED_PRESSURE" = 0 ]] || die "in-process pressure must be one-shot"
+    [[ "$SUSTAINED_PRESSURE" = 1 ]] || die "in-process pressure must be sustained"
   fi
   [[ "$DS_ENDPOINT" == *:* ]] || die "DS_ENDPOINT must be host:port"
   ds_host=${DS_ENDPOINT%:*}

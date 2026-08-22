@@ -7,6 +7,10 @@ BRPC_TARGET="${BRPC_TARGET:-deployment/inference-brpc-trtllm}"
 BRPC_CONTAINER="${BRPC_CONTAINER:-brpc-inference}"
 KVC_BURST_CONTAINER="${KVC_BURST_CONTAINER:-}"
 KVC_BURST_REQUIRE_COMPLETE="${KVC_BURST_REQUIRE_COMPLETE:-0}"
+KVC_BURST_PRESTART_PRESSURE="${KVC_BURST_PRESTART_PRESSURE:-0}"
+KVC_BURST_CONTROL_BIN="${KVC_BURST_CONTROL_BIN:-/opt/pairec-f19/bin/kvc_burst_wrapper}"
+KVC_DS_ENDPOINT="${KVC_DS_ENDPOINT:-}"
+KVC_PRESSURE_STARTED=0
 
 USER_ID="${USER_ID:-6312}"
 SIZE="${SIZE:-1}"
@@ -52,10 +56,35 @@ cleanup_pid() {
 }
 
 cleanup() {
+  if [ "$KVC_PRESSURE_STARTED" = 1 ]; then
+    control_pressure stop-pressure >/dev/null 2>&1 || true
+    KVC_PRESSURE_STARTED=0
+  fi
   cleanup_pid "$PAIREC_LOG_PID"
   cleanup_pid "$TRT_LOG_PID"
   cleanup_pid "$KVC_BURST_LOG_PID"
   cleanup_pid "$PORT_FORWARD_PID"
+}
+
+control_pressure() {
+  local action="$1"
+  [ -n "$KVC_BURST_CONTAINER" ] || return 1
+  [ -n "$KVC_DS_ENDPOINT" ] || return 1
+  local pod ds_host ds_port
+  ds_host="${KVC_DS_ENDPOINT%:*}"
+  ds_port="${KVC_DS_ENDPOINT##*:}"
+  pod="$(kubectl -n "$NAMESPACE" get pod -l app=inference-brpc-trtllm \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1].metadata.name}')"
+  [ -n "$pod" ] || return 1
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$KVC_BURST_CONTAINER" -- \
+    "$KVC_BURST_CONTROL_BIN" \
+    "--control_action=${action}" \
+    "--host=${ds_host}" \
+    "--port=${ds_port}" \
+    "--prefix=PairecKvcBurstV2" \
+    "--control_path=/run/pairec-kvc-burst/control" \
+    >>"${OUT_DIR}/kvc-burst-pressure-control.log" 2>&1
 }
 
 trap cleanup EXIT
@@ -597,6 +626,11 @@ kubectl -n "$NAMESPACE" get svc pairec inference-brpc-trtllm -o wide \
 
 start_port_forward
 start_log_collectors
+if [[ "$KVC_BURST_PRESTART_PRESSURE" = 1 ]]; then
+  log "Establish sustained in-process KVC pressure"
+  control_pressure start-pressure
+  KVC_PRESSURE_STARTED=1
+fi
 send_request
 REQUEST_ID="$(python3 - "$CLIENT_JSON" <<'PY'
 import json
@@ -619,6 +653,12 @@ if [[ "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" = 1 ]]; then
   done
 else
   sleep 3
+fi
+
+if [[ "$KVC_PRESSURE_STARTED" = 1 ]]; then
+  log "Stop sustained in-process KVC pressure"
+  control_pressure stop-pressure
+  KVC_PRESSURE_STARTED=0
 fi
 
 if [[ "$KVC_BURST_REQUIRE_COMPLETE" = 1 ]]; then

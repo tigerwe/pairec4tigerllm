@@ -20,8 +20,8 @@ MIN_ROOT_AVAILABLE_KB=${MIN_ROOT_AVAILABLE_KB:-5242880}
 EXPECTED_ONBOARDS_MIN=${EXPECTED_ONBOARDS_MIN:-2}
 EXPECTED_ONBOARDS_MAX=${EXPECTED_ONBOARDS_MAX:-2}
 KVC_SUSTAINED_PRESSURE=${KVC_SUSTAINED_PRESSURE:-0}
-KVC_SUSTAINED_MAX_DURATION_MS=${KVC_SUSTAINED_MAX_DURATION_MS:-1000}
-KVC_SUSTAINED_MAX_LOOPS=${KVC_SUSTAINED_MAX_LOOPS:-100}
+KVC_SUSTAINED_MAX_DURATION_MS=${KVC_SUSTAINED_MAX_DURATION_MS:-5000}
+KVC_SUSTAINED_MAX_LOOPS=${KVC_SUSTAINED_MAX_LOOPS:-1000}
 KVC_INPROCESS_PRESSURE=${KVC_INPROCESS_PRESSURE:-0}
 PRIME_REQUESTS=${PRIME_REQUESTS:-195}
 
@@ -51,7 +51,11 @@ if [[ "$KVC_INPROCESS_PRESSURE" = 1 ]]; then
   (( KVC_PRESSURE_KEY_COUNT >= 1 && KVC_PRESSURE_KEY_COUNT <= 31 )) \
     || die "in-process pressure requires KVC_PRESSURE_KEY_COUNT between 1 and 31"
   (( KVC_OBJECT_SIZE == 3670016 )) || die "in-process pressure requires KVC_OBJECT_SIZE=3670016"
-  [[ "$KVC_SUSTAINED_PRESSURE" = 0 ]] || die "in-process pressure must be one-shot"
+  KVC_SUSTAINED_PRESSURE=1
+  (( KVC_SUSTAINED_MAX_DURATION_MS >= 2000 )) \
+    || die "in-process sustained pressure requires at least 2000ms max duration"
+  (( KVC_SUSTAINED_MAX_LOOPS >= 100 )) \
+    || die "in-process sustained pressure requires at least 100 loops"
 fi
 KVC_BARRIER_TIMEOUT_MS=5
 [[ "$KVC_INPROCESS_PRESSURE" = 0 ]] || KVC_BARRIER_TIMEOUT_MS=100
@@ -101,6 +105,7 @@ STARTED_AT="$(date --iso-8601=seconds)"
 set +e
 NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE=baseline \
   KVC_BURST_CONTAINER=kvc-burst-wrapper KVC_BURST_REQUIRE_COMPLETE=1 \
+  KVC_BURST_PRESTART_PRESSURE="$KVC_INPROCESS_PRESSURE" \
   KVC_BURST_DYNAMIC_ARM=1 KVC_BURST_PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" \
   EXPECTED_OFFLOADS=3 EXPECTED_ONBOARDS=2 STRICT_COUNTS=1 \
   EXPECTED_ONBOARDS_MIN="$EXPECTED_ONBOARDS_MIN" \
@@ -197,7 +202,7 @@ for row in contention.get("rows", []):
     assert kvc["business_submit_rank"] >= required_pressure_first + 1, kvc
     if kvc_inprocess_pressure:
         assert kvc["business_submit_rank"] == 32, kvc
-        assert kvc["pressure_inflight_at_business_start"] == 31, kvc
+        assert kvc["pressure_inflight_at_business_start"] >= required_pressure_first, kvc
         assert kvc["pressure_completed_before_business"] == 0, kvc
     assert kvc.get("sustained_enabled", False) is kvc_sustained_pressure, kvc
     if kvc_sustained_pressure and pressure_lanes > 0:

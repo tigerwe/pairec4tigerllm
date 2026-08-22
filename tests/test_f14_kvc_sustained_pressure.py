@@ -208,9 +208,9 @@ class DataSystemWorkerMetricsTest(unittest.TestCase):
 
 
 class SustainedPressureStructureTest(unittest.TestCase):
-    def test_apply_script_requires_v4_managed_proxy(self):
+    def test_apply_script_requires_v5_managed_proxy(self):
         script = (ROOT / "scripts/apply_trtllm_kvc_burst_proxy_patch.sh").read_text()
-        self.assertIn("grep -q PAIREC_KVC_BURST_PROXY_V4", script)
+        self.assertIn("grep -q PAIREC_KVC_BURST_PROXY_V5", script)
         self.assertNotIn("grep -q PAIREC_KVC_BURST_PROXY_V3", script)
 
     def test_shared_header_helpers(self):
@@ -221,7 +221,10 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn("WaitForPressureStarted", text)
         self.assertIn("RequiredPressureFirst", text)
         self.assertIn("kPressureNotEstablished", text)
-        self.assertIn("constexpr uint32_t kVersion = 4", text)
+        self.assertIn("constexpr uint32_t kVersion = 5", text)
+        self.assertIn("pressure_command_generation", text)
+        self.assertIn("pressure_active_gets", text)
+        self.assertIn("pressure_loop_count", text)
         self.assertIn("constexpr uint32_t kMaxConcurrency = 256", text)
         self.assertNotIn("uint32_t reserved", text)
 
@@ -261,15 +264,15 @@ class SustainedPressureStructureTest(unittest.TestCase):
         text = DEPLOY.read_text()
         for token in (
             "SUSTAINED_PRESSURE=${SUSTAINED_PRESSURE:-0}",
-            "SUSTAINED_MAX_DURATION_MS=${SUSTAINED_MAX_DURATION_MS:-1000}",
-            "SUSTAINED_MAX_LOOPS=${SUSTAINED_MAX_LOOPS:-100}",
+            "SUSTAINED_MAX_DURATION_MS=${SUSTAINED_MAX_DURATION_MS:-5000}",
+            "SUSTAINED_MAX_LOOPS=${SUSTAINED_MAX_LOOPS:-1000}",
             "PRESSURE_LEAD_US=${PRESSURE_LEAD_US:-1000}",
             'die "SUSTAINED_PRESSURE must be 0 or 1"',
             "--sustained_pressure=",
             "--sustained_max_duration_ms=",
             "--sustained_max_loops=",
             "--pressure_lead_us=",
-            "expected version=4",
+            "expected version=5",
             '\"sustained_pressure\":true',
         ):
             self.assertIn(token, text)
@@ -325,7 +328,7 @@ class SustainedPressureStructureTest(unittest.TestCase):
             self.assertIn(token, wrapper)
         for token in (
             "INPROCESS_PRESSURE=${INPROCESS_PRESSURE:-0}",
-            "PAIREC_KVC_INPROCESS_BURST_C32_V2",
+            "PAIREC_KVC_INPROCESS_SUSTAINED_C32_V1",
             'die "in-process pressure requires CONCURRENCY=32"',
             'die "in-process pressure requires PRESSURE_KEY_COUNT between 1 and 31"',
             'die "in-process pressure requires OBJECT_SIZE=3670016"',
@@ -338,8 +341,13 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn('KVC_BARRIER_TIMEOUT_MS=100', combined)
         self.assertIn('BARRIER_TIMEOUT_MS="$KVC_BARRIER_TIMEOUT_MS"', combined)
         self.assertIn('assert kvc["business_submit_rank"] == 32', combined)
-        self.assertIn('assert kvc["pressure_inflight_at_business_start"] == 31', combined)
+        self.assertIn(
+            'assert kvc["pressure_inflight_at_business_start"] >= required_pressure_first', combined)
         self.assertIn('assert kvc["pressure_completed_before_business"] == 0', combined)
+        self.assertIn('KVC_BURST_PRESTART_PRESSURE="$KVC_INPROCESS_PRESSURE"', combined)
+        trace = (ROOT / "scripts/trace_single_brpc_datasystem_request.sh").read_text()
+        self.assertIn("control_pressure start-pressure", trace)
+        self.assertIn("control_pressure stop-pressure", trace)
         self.assertIn(
             "COMBINED_KVC_INPROCESS_PRESSURE=${COMBINED_KVC_INPROCESS_PRESSURE:-0}", matrix)
         self.assertIn('KVC_INPROCESS_PRESSURE="$inprocess_pressure"', matrix)

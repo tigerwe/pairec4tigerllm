@@ -15,7 +15,7 @@ namespace pairec::kvc_burst
 {
 
 constexpr uint64_t kMagic = 0x5041495245434b56ULL;
-constexpr uint32_t kVersion = 4;
+constexpr uint32_t kVersion = 5;
 constexpr uint32_t kMaxConcurrency = 256;
 constexpr uint32_t kMaxPressureLanes = kMaxConcurrency - 1;
 constexpr size_t kRequestIdSize = 128;
@@ -120,6 +120,17 @@ struct alignas(64) SharedControl
     uint32_t business_release_generation;
     uint32_t pressure_lead_us;
 
+    uint32_t pressure_client_registered;
+    uint32_t pressure_command_generation;
+    uint32_t pressure_established_generation;
+    uint32_t pressure_stop_generation;
+
+    uint32_t pressure_stopped_generation;
+    uint32_t pressure_active_gets;
+    uint32_t pressure_max_duration_ms;
+    uint32_t pressure_max_loops;
+    uint32_t business_pressure_active_snapshot;
+
     uint32_t result_business_submit_rank;
     uint32_t result_pressure_started_before_business;
     uint32_t result_pressure_inflight_at_business_start;
@@ -153,6 +164,8 @@ struct alignas(64) SharedControl
     uint64_t pressure_start_ns[kMaxPressureLanes];
     uint64_t pressure_end_ns[kMaxPressureLanes];
     uint32_t pressure_ok[kMaxPressureLanes];
+    uint32_t pressure_loop_count[kMaxPressureLanes];
+    uint32_t pressure_loop_errors[kMaxPressureLanes];
 };
 
 static_assert(sizeof(SharedControl) < 16384, "shared KVC burst control block unexpectedly large");

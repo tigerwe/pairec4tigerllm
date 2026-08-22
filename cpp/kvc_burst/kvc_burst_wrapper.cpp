@@ -216,11 +216,11 @@ bool ParseArgs(int argc, char** argv, Config* config)
     if (config->inProcessPressure
         && (config->concurrency != 32U || config->pressureKeyCount == 0U
             || config->pressureKeyCount > 31U
-            || config->objectSize != 3670016ULL || config->sustainedPressure
+            || config->objectSize != 3670016ULL || !config->sustainedPressure
             || config->initiallyArmed))
     {
         std::cerr << "in-process pressure requires c32, 1..31 keys, 3670016-byte objects, "
-                     "one-shot pressure, and dynamic arm"
+                     "sustained pressure, and dynamic arm"
                   << std::endl;
         return false;
     }
@@ -341,6 +341,8 @@ bool CreateMapping(const Config& config, Mapping* mapping)
         = config.pressureKeyCount == 0 ? config.concurrency - 1 : config.pressureKeyCount;
     mapping->control->barrier_timeout_ms = config.barrierTimeoutMs;
     mapping->control->pressure_lead_us = config.pressureLeadUs;
+    mapping->control->pressure_max_duration_ms = config.sustainedMaxDurationMs;
+    mapping->control->pressure_max_loops = config.sustainedMaxLoops;
     mapping->control->object_size_bytes = config.objectSize;
     pairec::kvc_burst::Store(&mapping->control->trigger_armed, config.initiallyArmed ? 1U : 0U);
     pairec::kvc_burst::Store(&mapping->control->state, static_cast<uint32_t>(State::kStarting));
@@ -380,8 +382,85 @@ int ApplyControlAction(const Config& config)
     if (config.controlAction == "disarm")
     {
         pairec::kvc_burst::Store(&control.trigger_armed, 0U);
+        auto const generation = pairec::kvc_burst::Load(&control.pressure_command_generation);
+        if (generation != 0U)
+        {
+            pairec::kvc_burst::Store(&control.pressure_stop_generation, generation);
+            pairec::kvc_burst::FutexWake(&control.pressure_stop_generation);
+        }
         std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"disarm\",\"armed\":false}"
                   << std::endl;
+        return 0;
+    }
+    if (config.controlAction == "start-pressure")
+    {
+        if (pairec::kvc_burst::Load(&control.trigger_armed) == 0U
+            || pairec::kvc_burst::Load(&control.state) != static_cast<uint32_t>(State::kReady))
+        {
+            std::cerr << "cannot start in-process pressure unless burst is armed and ready" << std::endl;
+            return 1;
+        }
+        auto const generation = pairec::kvc_burst::Load(&control.prepared_generation);
+        auto const deadline = pairec::kvc_burst::DeadlineNs(30000);
+        while (pairec::kvc_burst::Load(&control.pressure_client_registered) == 0U
+            && pairec::kvc_burst::MonotonicNs() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (pairec::kvc_burst::Load(&control.pressure_client_registered) == 0U)
+        {
+            std::cerr << "real business KVClient was not registered during prime" << std::endl;
+            return 1;
+        }
+        pairec::kvc_burst::Store(&control.run_generation, generation);
+        pairec::kvc_burst::Store(&control.pressure_command_generation, generation);
+        pairec::kvc_burst::FutexWake(&control.pressure_command_generation);
+        auto const required = pairec::kvc_burst::RequiredPressureFirst(
+            pairec::kvc_burst::Load(&control.pressure_lanes));
+        while ((pairec::kvc_burst::Load(&control.pressure_established_generation) != generation
+                   || pairec::kvc_burst::Load(&control.pressure_active_gets) < required)
+            && pairec::kvc_burst::MonotonicNs() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        auto const active = pairec::kvc_burst::Load(&control.pressure_active_gets);
+        if (pairec::kvc_burst::Load(&control.pressure_established_generation) != generation
+            || active < required)
+        {
+            pairec::kvc_burst::Store(&control.pressure_stop_generation, generation);
+            pairec::kvc_burst::FutexWake(&control.pressure_stop_generation);
+            std::cerr << "in-process pressure did not establish before replay" << std::endl;
+            return 1;
+        }
+        std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"start-pressure\""
+                  << ",\"generation\":" << generation << ",\"active_gets\":" << active
+                  << ",\"required_active\":" << required << "}" << std::endl;
+        return 0;
+    }
+    if (config.controlAction == "stop-pressure")
+    {
+        auto const generation = pairec::kvc_burst::Load(&control.pressure_command_generation);
+        if (generation == 0U)
+        {
+            std::cerr << "no in-process pressure generation is active" << std::endl;
+            return 1;
+        }
+        pairec::kvc_burst::Store(&control.pressure_stop_generation, generation);
+        pairec::kvc_burst::FutexWake(&control.pressure_stop_generation);
+        auto const deadline = pairec::kvc_burst::DeadlineNs(30000);
+        while (pairec::kvc_burst::Load(&control.pressure_stopped_generation) != generation
+            && pairec::kvc_burst::MonotonicNs() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (pairec::kvc_burst::Load(&control.pressure_stopped_generation) != generation)
+        {
+            std::cerr << "in-process pressure did not stop within 30 seconds" << std::endl;
+            return 1;
+        }
+        std::cout << "{\"event\":\"kvc_burst_control\",\"action\":\"stop-pressure\""
+                  << ",\"generation\":" << generation << ",\"completed_lanes\":"
+                  << pairec::kvc_burst::Load(&control.completed_pressure_lanes) << "}" << std::endl;
         return 0;
     }
     if (config.controlAction == "arm")
@@ -396,8 +475,8 @@ int ApplyControlAction(const Config& config)
     auto verifyAndArm = config.controlAction == "verify-and-arm";
     if (!refreshOnly && !refreshAndArm && !verifyAndArm)
     {
-        std::cerr << "control_action must be arm, disarm, refresh, refresh-and-arm, or "
-                     "verify-and-arm"
+        std::cerr << "control_action must be arm, disarm, start-pressure, stop-pressure, refresh, "
+                     "refresh-and-arm, or verify-and-arm"
                   << std::endl;
         return 2;
     }
@@ -536,6 +615,12 @@ Aggregate AggregateResult(SharedControl& control)
             ++result.businessOverlap;
         }
     }
+    auto const activeSnapshot
+        = pairec::kvc_burst::Load(&control.business_pressure_active_snapshot);
+    if (activeSnapshot > 0U)
+    {
+        result.pressureInflightAtBusinessStart = activeSnapshot;
+    }
     if (!starts.empty())
     {
         auto [minimum, maximum] = std::minmax_element(starts.begin(), starts.end());
@@ -618,18 +703,22 @@ SustainedReport SummarizeSustained(const Config& config, const SharedControl& co
     for (uint32_t i = 0; i < pressureLanes && i < lanes.size(); ++i)
     {
         const auto& lane = lanes[i];
-        report.loopGets += lane.loops;
-        report.errors += lane.errors;
+        auto const loops = config.inProcessPressure
+            ? pairec::kvc_burst::Load(&control.pressure_loop_count[i]) : lane.loops;
+        auto const errors = config.inProcessPressure
+            ? pairec::kvc_burst::Load(&control.pressure_loop_errors[i]) : lane.errors;
+        report.loopGets += loops;
+        report.errors += errors;
         if (!haveLane)
         {
-            report.minLaneLoops = lane.loops;
-            report.maxLaneLoops = lane.loops;
+            report.minLaneLoops = loops;
+            report.maxLaneLoops = loops;
             haveLane = true;
         }
         else
         {
-            report.minLaneLoops = std::min(report.minLaneLoops, lane.loops);
-            report.maxLaneLoops = std::max(report.maxLaneLoops, lane.loops);
+            report.minLaneLoops = std::min(report.minLaneLoops, loops);
+            report.maxLaneLoops = std::max(report.maxLaneLoops, loops);
         }
         switch (static_cast<pairec::kvc_burst::SustainedStop>(lane.stopReason))
         {
@@ -849,6 +938,12 @@ void ResetGeneration(SharedControl& control, uint32_t generation, uint64_t shuff
     pairec::kvc_burst::Store(&control.business_success, 0U);
     pairec::kvc_burst::Store(&control.pressure_success, 0U);
     pairec::kvc_burst::Store(&control.pressure_errors, 0U);
+    pairec::kvc_burst::Store(&control.pressure_command_generation, 0U);
+    pairec::kvc_burst::Store(&control.pressure_established_generation, 0U);
+    pairec::kvc_burst::Store(&control.pressure_stop_generation, 0U);
+    pairec::kvc_burst::Store(&control.pressure_stopped_generation, 0U);
+    pairec::kvc_burst::Store(&control.pressure_active_gets, 0U);
+    pairec::kvc_burst::Store(&control.business_pressure_active_snapshot, 0U);
     pairec::kvc_burst::Store(&control.business_barrier_wait_us, uint64_t{0});
     pairec::kvc_burst::Store(&control.business_pressure_wait_us, uint64_t{0});
     pairec::kvc_burst::Store(&control.business_lead_wait_us, uint64_t{0});
@@ -871,6 +966,8 @@ void ResetGeneration(SharedControl& control, uint32_t generation, uint64_t shuff
         pairec::kvc_burst::Store(&control.pressure_start_ns[i], uint64_t{0});
         pairec::kvc_burst::Store(&control.pressure_end_ns[i], uint64_t{0});
         pairec::kvc_burst::Store(&control.pressure_ok[i], 0U);
+        pairec::kvc_burst::Store(&control.pressure_loop_count[i], 0U);
+        pairec::kvc_burst::Store(&control.pressure_loop_errors[i], 0U);
     }
     pairec::kvc_burst::Store(&control.prepared_generation, generation);
 }
@@ -1057,7 +1154,7 @@ int Run(int argc, char** argv)
             return 1;
         }
     }
-    WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":4,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
+    WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":5,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
             + ",\"pressure_lanes\":" + std::to_string(pressureLanes) + ",\"object_size_bytes\":"
             + std::to_string(config.objectSize) + ",\"pressure_key_count\":" + std::to_string(pressureKeyCount)
             + ",\"clients_connected\":" + std::to_string(config.inProcessPressure ? 0U : pressureLanes)

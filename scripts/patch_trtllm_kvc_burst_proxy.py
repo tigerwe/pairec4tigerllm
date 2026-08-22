@@ -7,8 +7,9 @@ import argparse
 from pathlib import Path
 
 
-MARKER = "PAIREC_KVC_BURST_PROXY_V4"
-LEGACY_MARKERS = ("PAIREC_KVC_BURST_PROXY_V3", "PAIREC_KVC_BURST_PROXY_V2")
+MARKER = "PAIREC_KVC_BURST_PROXY_V5"
+LEGACY_MARKERS = (
+    "PAIREC_KVC_BURST_PROXY_V4", "PAIREC_KVC_BURST_PROXY_V3", "PAIREC_KVC_BURST_PROXY_V2")
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
@@ -60,7 +61,7 @@ def patch_wrapped_get(transfer: Path, attribution_prefix: str, proxy_prefix: str
 
     text = transfer.read_text()
     if pressure_client is not None and f"auto {proxy_prefix}Pressure =" not in text:
-        capture = f"&{pressure_client}"
+        capture = pressure_client
         pressure = (
             f"            auto {proxy_prefix}Pressure = "
             "pairec::kvc_burst::beginInProcessPressure(\n"
@@ -118,7 +119,7 @@ def patch_parallel_get(transfer: Path) -> None:
             "                auto kvcBurstParallelGetPressure = "
             "pairec::kvc_burst::beginInProcessPressure(\n"
             "                    kvcBurstParallelGetToken, "
-            "[&kvClient](uint32_t, std::string const& pressureKey) {\n"
+            "[kvClient](uint32_t, std::string const& pressureKey) {\n"
             "                        datasystem::Optional<datasystem::Buffer> pressureBuffer;\n"
             "                        auto const pressureStatus = kvClient->Get(pressureKey, pressureBuffer, 0);\n"
             "                        return !pressureStatus.IsError() && static_cast<bool>(pressureBuffer);\n"
@@ -162,6 +163,14 @@ def patch_tree(root: Path, repo_root: Path) -> None:
         '#include "tensorrt_llm/batch_manager/datasystemRequestTracker.h"\n',
         '#include "tensorrt_llm/batch_manager/datasystemRequestTracker.h"\n'
         '#include "tensorrt_llm/batch_manager/kvcOperationProxy.h"\n')
+
+    # Persistent workers retain this callback after the Get stack returns.
+    text = transfer.read_text()
+    text = text.replace("[&kvClient1](uint32_t, std::string const& pressureKey)",
+                        "[kvClient1](uint32_t, std::string const& pressureKey)")
+    text = text.replace("[&kvClient](uint32_t, std::string const& pressureKey)",
+                        "[kvClient](uint32_t, std::string const& pressureKey)")
+    transfer.write_text(text)
 
     patch_wrapped_get(transfer, "attributionGet", "kvcBurstGet", "kGet", "1U", "kvClient1", (
         "datasystem::Status getRet = kvClient1->Get("
