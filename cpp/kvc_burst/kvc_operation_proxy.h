@@ -22,6 +22,7 @@ struct BusinessGetToken
     uint64_t pressureWaitUs{0};
     uint64_t leadWaitUs{0};
     uint64_t businessStartedNs{0};
+    uint32_t businessGetOrdinal{0};
     bool barrierReleased{false};
     bool pressureEstablished{false};
     bool inProcessPressure{false};
@@ -59,5 +60,8 @@ private:
 [[nodiscard]] InProcessPressureSession beginInProcessPressure(
     BusinessGetToken const& token, InProcessPressureGet get);
 void finishBusinessGet(BusinessGetToken const& token, bool success, uint64_t businessEndedNs = 0);
+void observeAddTokenStart(std::string const& requestId);
+void observeAddTokenEnd(std::string const& requestId);
+void observeBusinessRequestComplete(std::string const& requestId);
 
 } // namespace pairec::kvc_burst

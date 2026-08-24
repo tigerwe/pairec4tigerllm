@@ -583,7 +583,13 @@ Aggregate AggregateResult(SharedControl& control)
     auto pressureLanes = pairec::kvc_burst::Load(&control.pressure_lanes);
     auto businessStart = pairec::kvc_burst::Load(&control.business_start_ns);
     auto businessEnd = pairec::kvc_burst::Load(&control.business_end_ns);
-    result.businessGetUs = businessEnd > businessStart ? (businessEnd - businessStart) / 1000ULL : 0;
+    result.businessGetUs = pairec::kvc_burst::Load(&control.business_get_1_us)
+        + pairec::kvc_burst::Load(&control.business_get_2_us);
+    if (result.businessGetUs == 0U)
+    {
+        result.businessGetUs
+            = businessEnd > businessStart ? (businessEnd - businessStart) / 1000ULL : 0;
+    }
     result.businessSubmitRank = pairec::kvc_burst::BusinessSubmitRank(control);
 
     std::vector<uint64_t> starts;
@@ -666,6 +672,12 @@ Aggregate AggregateResult(SharedControl& control)
     if (pairec::kvc_burst::Load(&control.barrier_failed) != 0)
     {
         result.failure = Failure::kBarrierTimeout;
+    }
+    else if (pairec::kvc_burst::Load(&control.pressure_client_registered) != 0U
+        && (pairec::kvc_burst::Load(&control.business_get_completed_count) != 2U
+            || pairec::kvc_burst::Load(&control.business_get_success_count) != 2U))
+    {
+        result.failure = Failure::kBusinessGetCountMismatch;
     }
     else if (pairec::kvc_burst::Load(&control.business_success) == 0)
     {
@@ -761,6 +773,18 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
     auto const toEpochNs = [realtimeOffset](uint64_t monotonicNs) {
         return monotonicNs == 0 ? 0ULL : realtimeOffset + monotonicNs;
     };
+    auto const addTokenWindowNs = control.add_token_last_end_ns > control.add_token_first_start_ns
+        ? control.add_token_last_end_ns - control.add_token_first_start_ns : 0ULL;
+    auto const stopToFirstAddTokenNs
+        = control.add_token_first_start_ns > control.pressure_stop_ns
+        ? control.add_token_first_start_ns - control.pressure_stop_ns : 0ULL;
+    auto const pressureAddTokenOverlapStart
+        = std::max(control.pressure_stop_ns, control.add_token_first_start_ns);
+    auto const pressureAddTokenOverlapEnd
+        = std::min(control.pressure_last_end_ns, control.add_token_last_end_ns);
+    auto const pressureAddTokenOverlapNs
+        = pressureAddTokenOverlapEnd > pressureAddTokenOverlapStart
+        ? pressureAddTokenOverlapEnd - pressureAddTokenOverlapStart : 0ULL;
     std::ostringstream output;
     output << std::fixed << std::setprecision(3);
     output << "{\"event\":\"kvc_burst_result\",\"generation\":" << generation
@@ -789,6 +813,38 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
            << "\",\"business_key_count\":" << control.business_key_count
            << ",\"business_bytes\":" << control.business_bytes
            << ",\"business_get_ms\":" << static_cast<double>(result.businessGetUs) / 1000.0
+           << ",\"business_get_count\":" << control.business_get_completed_count
+           << ",\"business_get_success_count\":" << control.business_get_success_count
+           << ",\"business_get_1_ms\":" << static_cast<double>(control.business_get_1_us) / 1000.0
+           << ",\"business_get_2_ms\":" << static_cast<double>(control.business_get_2_us) / 1000.0
+           << ",\"pressure_active_at_stop\":" << control.pressure_active_at_stop
+           << ",\"pressure_active_at_second_get_start\":"
+           << control.pressure_active_at_second_get_start
+           << ",\"pressure_completed_at_second_get_start\":"
+           << control.pressure_completed_at_second_get_start
+           << ",\"pressure_completed_gets\":" << control.pressure_completed_gets
+           << ",\"pressure_completed_at_stop\":" << control.pressure_completed_at_stop
+           << ",\"pressure_completions_after_stop\":"
+           << control.pressure_completions_after_stop
+           << ",\"pressure_tail_after_stop_ms\":"
+           << static_cast<double>(control.pressure_last_end_ns > control.pressure_stop_ns
+                  ? control.pressure_last_end_ns - control.pressure_stop_ns : 0ULL) / 1000000.0
+           << ",\"pressure_stop_signal_delay_us\":"
+           << (control.pressure_stop_ns > control.business_get_2_end_ns
+                  ? (control.pressure_stop_ns - control.business_get_2_end_ns) / 1000ULL : 0ULL)
+           << ",\"pressure_active_at_first_add_token\":"
+           << control.pressure_active_at_first_add_token
+           << ",\"pressure_active_at_last_add_token\":"
+           << control.pressure_active_at_last_add_token
+           << ",\"add_token_observation_count\":" << control.add_token_observation_count
+           << ",\"pressure_stop_to_first_add_token_ms\":"
+           << static_cast<double>(stopToFirstAddTokenNs) / 1000000.0
+           << ",\"add_token_window_ms\":"
+           << static_cast<double>(addTokenWindowNs) / 1000000.0
+           << ",\"pressure_add_token_overlap_ms\":"
+           << static_cast<double>(pressureAddTokenOverlapNs) / 1000000.0
+           << ",\"business_lifecycle_done\":"
+           << (control.business_lifecycle_done_generation == generation ? "true" : "false")
            << ",\"pressure_get_avg_ms\":" << static_cast<double>(result.pressureAvgUs) / 1000.0
            << ",\"pressure_get_p95_ms\":" << static_cast<double>(result.pressureP95Us) / 1000.0
            << ",\"pressure_get_p99_ms\":" << static_cast<double>(result.pressureP99Us) / 1000.0
@@ -810,6 +866,23 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
         auto pressureLanes = pairec::kvc_burst::Load(&control.pressure_lanes);
         output << ",\"business_get_start_epoch_ns\":" << toEpochNs(businessStart)
                << ",\"business_get_end_epoch_ns\":" << toEpochNs(businessEnd)
+               << ",\"business_get_1_start_epoch_ns\":"
+               << toEpochNs(control.business_get_1_start_ns)
+               << ",\"business_get_1_end_epoch_ns\":"
+               << toEpochNs(control.business_get_1_end_ns)
+               << ",\"business_get_2_start_epoch_ns\":"
+               << toEpochNs(control.business_get_2_start_ns)
+               << ",\"business_get_2_end_epoch_ns\":"
+               << toEpochNs(control.business_get_2_end_ns)
+               << ",\"pressure_stop_epoch_ns\":" << toEpochNs(control.pressure_stop_ns)
+               << ",\"pressure_last_end_epoch_ns\":"
+               << toEpochNs(control.pressure_last_end_ns)
+               << ",\"add_token_first_start_epoch_ns\":"
+               << toEpochNs(control.add_token_first_start_ns)
+               << ",\"add_token_last_end_epoch_ns\":"
+               << toEpochNs(control.add_token_last_end_ns)
+               << ",\"business_lifecycle_done_epoch_ns\":"
+               << toEpochNs(control.business_lifecycle_done_ns)
                << ",\"clock_snapshot_realtime_ns\":" << realtimeNow
                << ",\"clock_snapshot_monotonic_ns\":" << monotonicNow
                << ",\"pressure_start_epoch_ns\":";
@@ -953,6 +1026,19 @@ void ResetGeneration(SharedControl& control, uint32_t generation, uint64_t shuff
     pairec::kvc_burst::Store(&control.pressure_stopped_generation, 0U);
     pairec::kvc_burst::Store(&control.pressure_active_gets, 0U);
     pairec::kvc_burst::Store(&control.business_pressure_active_snapshot, 0U);
+    pairec::kvc_burst::Store(&control.business_get_started_count, 0U);
+    pairec::kvc_burst::Store(&control.business_get_completed_count, 0U);
+    pairec::kvc_burst::Store(&control.business_get_success_count, 0U);
+    pairec::kvc_burst::Store(&control.pressure_active_at_stop, 0U);
+    pairec::kvc_burst::Store(&control.pressure_completed_gets, 0U);
+    pairec::kvc_burst::Store(&control.pressure_completed_at_stop, 0U);
+    pairec::kvc_burst::Store(&control.pressure_completions_after_stop, 0U);
+    pairec::kvc_burst::Store(&control.pressure_active_at_first_add_token, 0U);
+    pairec::kvc_burst::Store(&control.pressure_active_at_last_add_token, 0U);
+    pairec::kvc_burst::Store(&control.add_token_observation_count, 0U);
+    pairec::kvc_burst::Store(&control.business_lifecycle_done_generation, 0U);
+    pairec::kvc_burst::Store(&control.pressure_active_at_second_get_start, 0U);
+    pairec::kvc_burst::Store(&control.pressure_completed_at_second_get_start, 0U);
     pairec::kvc_burst::Store(&control.business_barrier_wait_us, uint64_t{0});
     pairec::kvc_burst::Store(&control.business_pressure_wait_us, uint64_t{0});
     pairec::kvc_burst::Store(&control.business_lead_wait_us, uint64_t{0});
@@ -968,6 +1054,17 @@ void ResetGeneration(SharedControl& control, uint32_t generation, uint64_t shuff
     pairec::kvc_burst::Store(&control.claim_started_ns, uint64_t{0});
     pairec::kvc_burst::Store(&control.business_start_ns, uint64_t{0});
     pairec::kvc_burst::Store(&control.business_end_ns, uint64_t{0});
+    pairec::kvc_burst::Store(&control.business_get_1_start_ns, uint64_t{0});
+    pairec::kvc_burst::Store(&control.business_get_1_end_ns, uint64_t{0});
+    pairec::kvc_burst::Store(&control.business_get_2_start_ns, uint64_t{0});
+    pairec::kvc_burst::Store(&control.business_get_2_end_ns, uint64_t{0});
+    pairec::kvc_burst::Store(&control.business_get_1_us, uint64_t{0});
+    pairec::kvc_burst::Store(&control.business_get_2_us, uint64_t{0});
+    pairec::kvc_burst::Store(&control.pressure_stop_ns, uint64_t{0});
+    pairec::kvc_burst::Store(&control.pressure_last_end_ns, uint64_t{0});
+    pairec::kvc_burst::Store(&control.add_token_first_start_ns, uint64_t{0});
+    pairec::kvc_burst::Store(&control.add_token_last_end_ns, uint64_t{0});
+    pairec::kvc_burst::Store(&control.business_lifecycle_done_ns, uint64_t{0});
     pairec::kvc_burst::Store(&control.shuffle_seed, shuffleSeed);
     pairec::kvc_burst::CopyRequestId(control.request_id, nullptr);
     for (uint32_t i = 0; i < pairec::kvc_burst::kMaxPressureLanes; ++i)
@@ -1163,7 +1260,7 @@ int Run(int argc, char** argv)
             return 1;
         }
     }
-    WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":5,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
+    WriteLine(config, "{\"event\":\"kvc_burst_ready\",\"version\":6,\"trigger_operation\":\"get\",\"concurrency\":" + std::to_string(config.concurrency)
             + ",\"pressure_lanes\":" + std::to_string(pressureLanes) + ",\"object_size_bytes\":"
             + std::to_string(config.objectSize) + ",\"pressure_key_count\":" + std::to_string(pressureKeyCount)
             + ",\"clients_connected\":" + std::to_string(config.inProcessPressure ? 0U : pressureLanes)
@@ -1246,7 +1343,10 @@ int Run(int argc, char** argv)
         auto deadline = pairec::kvc_burst::DeadlineNs(120000);
         while (!gStop.load(std::memory_order_relaxed)
             && (pairec::kvc_burst::Load(&control.completed_pressure_lanes) != pressureLanes
-                || pairec::kvc_burst::Load(&control.business_done_generation) != runningGeneration)
+                || pairec::kvc_burst::Load(&control.business_done_generation) != runningGeneration
+                || (config.inProcessPressure
+                    && pairec::kvc_burst::Load(&control.business_lifecycle_done_generation)
+                        != runningGeneration))
             && pairec::kvc_burst::MonotonicNs() < deadline)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));

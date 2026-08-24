@@ -15,7 +15,7 @@ namespace pairec::kvc_burst
 {
 
 constexpr uint64_t kMagic = 0x5041495245434b56ULL;
-constexpr uint32_t kVersion = 5;
+constexpr uint32_t kVersion = 6;
 constexpr uint32_t kMaxConcurrency = 256;
 constexpr uint32_t kMaxPressureLanes = kMaxConcurrency - 1;
 constexpr size_t kRequestIdSize = 128;
@@ -38,6 +38,7 @@ enum class Failure : uint32_t
     kBusinessGetFailed = 3,
     kInvalidControl = 4,
     kPressureNotEstablished = 5,
+    kBusinessGetCountMismatch = 6,
 };
 
 enum class BusinessApi : uint32_t
@@ -131,6 +132,22 @@ struct alignas(64) SharedControl
     uint32_t pressure_max_loops;
     uint32_t business_pressure_active_snapshot;
 
+    uint32_t business_get_started_count;
+    uint32_t business_get_completed_count;
+    uint32_t business_get_success_count;
+    uint32_t pressure_active_at_stop;
+
+    uint32_t pressure_completed_gets;
+    uint32_t pressure_completed_at_stop;
+    uint32_t pressure_completions_after_stop;
+    uint32_t pressure_active_at_first_add_token;
+
+    uint32_t pressure_active_at_last_add_token;
+    uint32_t add_token_observation_count;
+    uint32_t business_lifecycle_done_generation;
+    uint32_t pressure_active_at_second_get_start;
+    uint32_t pressure_completed_at_second_get_start;
+
     uint32_t result_business_submit_rank;
     uint32_t result_pressure_started_before_business;
     uint32_t result_pressure_inflight_at_business_start;
@@ -158,6 +175,20 @@ struct alignas(64) SharedControl
     uint64_t result_pressure_p95_us;
     uint64_t result_pressure_p99_us;
     uint64_t result_pressure_max_us;
+
+    uint64_t business_get_1_start_ns;
+    uint64_t business_get_1_end_ns;
+    uint64_t business_get_2_start_ns;
+    uint64_t business_get_2_end_ns;
+
+    uint64_t business_get_1_us;
+    uint64_t business_get_2_us;
+    uint64_t pressure_stop_ns;
+    uint64_t pressure_last_end_ns;
+
+    uint64_t add_token_first_start_ns;
+    uint64_t add_token_last_end_ns;
+    uint64_t business_lifecycle_done_ns;
 
     char request_id[kRequestIdSize];
 
@@ -192,6 +223,17 @@ template <typename T>
 inline T FetchSub(T* target, T value, int order = __ATOMIC_ACQ_REL)
 {
     return __atomic_fetch_sub(target, value, order);
+}
+
+template <typename T>
+inline void AtomicMax(T* target, T value)
+{
+    auto observed = Load(target, __ATOMIC_RELAXED);
+    while (observed < value
+        && !__atomic_compare_exchange_n(
+            target, &observed, value, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+    {
+    }
 }
 
 inline bool PressureGenerationComplete(const SharedControl& control, uint32_t generation)

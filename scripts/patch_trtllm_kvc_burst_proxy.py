@@ -7,9 +7,10 @@ import argparse
 from pathlib import Path
 
 
-MARKER = "PAIREC_KVC_BURST_PROXY_V5"
+MARKER = "PAIREC_KVC_BURST_PROXY_V6"
 LEGACY_MARKERS = (
-    "PAIREC_KVC_BURST_PROXY_V4", "PAIREC_KVC_BURST_PROXY_V3", "PAIREC_KVC_BURST_PROXY_V2")
+    "PAIREC_KVC_BURST_PROXY_V5", "PAIREC_KVC_BURST_PROXY_V4",
+    "PAIREC_KVC_BURST_PROXY_V3", "PAIREC_KVC_BURST_PROXY_V2")
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
@@ -141,13 +142,54 @@ def patch_parallel_get(transfer: Path) -> None:
             "kvcBurstParallelGetPressure.finish();\n                " + business_finish)
 
 
+def patch_add_token_observation(manager: Path) -> None:
+    replace_once(manager,
+        '#include "tensorrt_llm/batch_manager/datasystemRequestTracker.h"\n',
+        '#include "tensorrt_llm/batch_manager/datasystemRequestTracker.h"\n'
+        '#include "tensorrt_llm/batch_manager/kvcOperationProxy.h"\n')
+    start_anchor = (
+        "    DataSystemRequestScope attributionScope(clientId);\n"
+        "    auto const attributionSequenceLookupStarted = attributionEnabled\n")
+    if "kvcBurstAddTokenRequestId" not in manager.read_text():
+        replace_once(manager, start_anchor,
+            "    DataSystemRequestScope attributionScope(clientId);\n"
+            "    auto const kvcBurstAddTokenRequestId = currentDataSystemRequestId();\n"
+            "    pairec::kvc_burst::observeAddTokenStart(\n"
+            "        kvcBurstAddTokenRequestId.value_or(\"\"));\n"
+            "    auto const attributionSequenceLookupStarted = attributionEnabled\n")
+    end_anchor = (
+        "        recordDataSystemRequestPhase(clientId, DataSystemRequestPhase::kAddToken, attributionAddTokenUs,\n"
+        "            attributionLookupUs, attributionSequenceLookupUs, attributionKvUpdateUs);\n")
+    if "observeAddTokenEnd" not in manager.read_text():
+        replace_once(manager, end_anchor,
+            "        pairec::kvc_burst::observeAddTokenEnd(\n"
+            "            kvcBurstAddTokenRequestId.value_or(\"\"));\n"
+            + end_anchor)
+
+    remove_start_anchor = (
+        "    DataSystemRequestScope attributionScope(clientId);\n"
+        "    TLLM_LOG_TRACE(\"[%s]::%s start\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n")
+    if "kvcBurstRemoveSequenceRequestId" not in manager.read_text():
+        replace_once(manager, remove_start_anchor,
+            "    DataSystemRequestScope attributionScope(clientId);\n"
+            "    auto const kvcBurstRemoveSequenceRequestId = currentDataSystemRequestId();\n"
+            "    TLLM_LOG_TRACE(\"[%s]::%s start\", isCrossKv() ? \"CROSS\" : \"SELF\", __PRETTY_FUNCTION__);\n")
+    remove_end_anchor = "    if (clientId) finishDataSystemRequest(*clientId);\n"
+    if "observeBusinessRequestComplete" not in manager.read_text():
+        replace_once(manager, remove_end_anchor,
+            "    pairec::kvc_burst::observeBusinessRequestComplete(\n"
+            "        kvcBurstRemoveSequenceRequestId.value_or(\"\"));\n"
+            + remove_end_anchor)
+
+
 def patch_tree(root: Path, repo_root: Path) -> None:
     include_dir = root / "cpp/include/tensorrt_llm/batch_manager"
     source_dir = root / "cpp/tensorrt_llm/batch_manager"
     cmake = source_dir / "CMakeLists.txt"
     transfer = source_dir / "kvCacheTransferManager.cpp"
+    manager = source_dir / "kvCacheManager.cpp"
     tracker_header = include_dir / "datasystemRequestTracker.h"
-    for path in (cmake, transfer, tracker_header):
+    for path in (cmake, transfer, manager, tracker_header):
         if not path.is_file():
             raise RuntimeError(f"missing prerequisite TensorRT-LLM file: {path}")
     if "currentDataSystemRequestId" not in tracker_header.read_text():
@@ -183,6 +225,7 @@ def patch_tree(root: Path, repo_root: Path) -> None:
             "auto const getRet = kvClient->Get(keys, buffers, 0);",
         ))
     patch_parallel_get(transfer)
+    patch_add_token_observation(manager)
 
 
 def main() -> None:

@@ -21,12 +21,12 @@
 
 extern "C" char const* pairecKvcBurstProxyProtocolMarker()
 {
-    return "PAIREC_KVC_BURST_PROXY_V5";
+    return "PAIREC_KVC_BURST_PROXY_V6";
 }
 
 extern "C" char const* pairecKvcInProcessBurstCapabilityMarker()
 {
-    return "PAIREC_KVC_INPROCESS_SUSTAINED_C32_V1";
+    return "PAIREC_KVC_INPROCESS_GET_BOUNDARY_C32_V2";
 }
 
 namespace pairec::kvc_burst
@@ -186,6 +186,11 @@ void emitSkipped(std::string const& requestId, TriggerStatus status)
               << std::endl;
 }
 
+bool requestMatches(SharedControl const& control, std::string const& requestId)
+{
+    return !requestId.empty() && requestId == control.request_id;
+}
+
 } // namespace
 
 bool kvcBurstEnabled()
@@ -301,7 +306,15 @@ private:
                 FetchSub(&control->pressure_active_gets, 1U);
                 ++loops;
                 if (!ok) ++errors;
-                Store(&control->pressure_end_ns[lane], MonotonicNs());
+                auto const ended = MonotonicNs();
+                FetchAdd(&control->pressure_completed_gets, 1U);
+                auto const stopNs = Load(&control->pressure_stop_ns);
+                if (stopNs != 0U && ended >= stopNs)
+                {
+                    FetchAdd(&control->pressure_completions_after_stop, 1U);
+                }
+                AtomicMax(&control->pressure_last_end_ns, ended);
+                Store(&control->pressure_end_ns[lane], ended);
                 Store(&control->pressure_loop_count[lane], loops);
                 Store(&control->pressure_loop_errors[lane], errors);
             }
@@ -396,16 +409,41 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
         return token;
     }
     std::unique_lock<std::mutex> claimLock(claimMutex());
-    if (seenRequests().contains(requestId))
-    {
-        token.status = TriggerStatus::kSkippedAlreadyTriggered;
-        emitSkipped(requestId, token.status);
-        return token;
-    }
     auto* control = mapping().get();
     if (control == nullptr)
     {
         token.status = TriggerStatus::kInvalidControl;
+        emitSkipped(requestId, token.status);
+        return token;
+    }
+    auto const inProcess = inProcessPressureEnabled();
+    if (inProcess && Load(&control->state) == static_cast<uint32_t>(State::kRunning)
+        && requestMatches(*control, requestId))
+    {
+        auto const started = Load(&control->business_get_started_count);
+        if (started == 1U)
+        {
+            token.status = TriggerStatus::kTriggered;
+            token.inProcessPressure = true;
+            token.generation = Load(&control->run_generation);
+            token.businessGetOrdinal = 2U;
+            token.bytes = static_cast<uint64_t>(keyCount) * Load(&control->object_size_bytes);
+            Store(&control->business_get_started_count, 2U);
+            Store(&control->pressure_active_at_second_get_start,
+                Load(&control->pressure_active_gets));
+            Store(&control->pressure_completed_at_second_get_start,
+                Load(&control->pressure_completed_gets));
+            token.businessStartedNs = MonotonicNs();
+            Store(&control->business_get_2_start_ns, token.businessStartedNs);
+            return token;
+        }
+        token.status = TriggerStatus::kSkippedAlreadyTriggered;
+        emitSkipped(requestId, token.status);
+        return token;
+    }
+    if (seenRequests().contains(requestId))
+    {
+        token.status = TriggerStatus::kSkippedAlreadyTriggered;
         emitSkipped(requestId, token.status);
         return token;
     }
@@ -415,7 +453,6 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
         emitSkipped(requestId, token.status);
         return token;
     }
-    auto const inProcess = inProcessPressureEnabled();
     auto const pressureLanes = Load(&control->pressure_lanes);
     auto const pressureKeyCount = Load(&control->pressure_key_count);
     auto const inProcessShapeValid = Load(&control->configured_concurrency) == 32U
@@ -430,9 +467,8 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
     }
     if (inProcess
         && (Load(&control->pressure_client_registered) == 0U
-            || Load(&control->pressure_established_generation)
-                != Load(&control->prepared_generation)
-            || Load(&control->completed_pressure_lanes) != 0U))
+            || Load(&control->completed_pressure_lanes) != 0U
+            || Load(&control->pressure_command_generation) != 0U))
     {
         token.status = TriggerStatus::kInvalidControl;
         emitSkipped(requestId, token.status);
@@ -444,28 +480,6 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
         emitSkipped(requestId, token.status);
         return token;
     }
-    if (inProcess)
-    {
-        auto const waitStarted = MonotonicNs();
-        auto const required = RequiredPressureFirst(pressureLanes);
-        auto const deadline = DeadlineNs(Load(&control->barrier_timeout_ms));
-        while (Load(&control->pressure_active_gets) < required
-            && Load(&control->completed_pressure_lanes) == 0U && MonotonicNs() < deadline)
-        {
-            std::this_thread::yield();
-        }
-        token.pressureWaitUs = (MonotonicNs() - waitStarted) / 1000ULL;
-        auto const active = Load(&control->pressure_active_gets);
-        Store(&control->business_pressure_wait_us, token.pressureWaitUs);
-        Store(&control->business_pressure_active_snapshot, active);
-        if (active < required)
-        {
-            token.status = TriggerStatus::kInvalidControl;
-            emitSkipped(requestId, token.status);
-            return token;
-        }
-    }
-
     uint32_t expected = static_cast<uint32_t>(State::kReady);
     auto const triggerStarted = MonotonicNs();
     Store(&control->claim_started_ns, triggerStarted);
@@ -478,6 +492,7 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
 
     token.status = TriggerStatus::kTriggered;
     token.inProcessPressure = inProcess;
+    token.businessGetOrdinal = 1U;
     seenRequests().insert(requestId);
     token.generation = Load(&control->prepared_generation);
     token.bytes = static_cast<uint64_t>(keyCount) * Load(&control->object_size_bytes);
@@ -488,7 +503,14 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
     Store(&control->trigger_started_ns, triggerStarted);
     Store(&control->business_trigger_status, static_cast<uint32_t>(TriggerStatus::kTriggered));
     Store(&control->state, static_cast<uint32_t>(State::kRunning));
-    if (!token.inProcessPressure)
+    Store(&control->business_get_started_count, 1U);
+    if (token.inProcessPressure)
+    {
+        Store(&control->run_generation, token.generation);
+        Store(&control->pressure_command_generation, token.generation);
+        FutexWake(&control->pressure_command_generation);
+    }
+    else
     {
         Store(&control->run_generation, token.generation);
         FutexWake(&control->run_generation);
@@ -501,9 +523,29 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
 
     if (token.inProcessPressure)
     {
-        token.pressureEstablished = true;
+        auto const waitStarted = MonotonicNs();
+        auto const required = RequiredPressureFirst(pressureLanes);
+        auto const deadline = DeadlineNs(Load(&control->barrier_timeout_ms));
+        while ((Load(&control->pressure_established_generation) != token.generation
+                   || Load(&control->pressure_active_gets) < required)
+            && Load(&control->completed_pressure_lanes) == 0U && MonotonicNs() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        token.pressureWaitUs = (MonotonicNs() - waitStarted) / 1000ULL;
+        auto const active = Load(&control->pressure_active_gets);
+        token.pressureEstablished
+            = Load(&control->pressure_established_generation) == token.generation
+            && active >= required;
+        Store(&control->business_pressure_wait_us, token.pressureWaitUs);
+        Store(&control->business_pressure_active_snapshot, active);
+        if (!token.pressureEstablished)
+        {
+            Store(&control->pressure_first_failed, 1U);
+        }
         token.businessStartedNs = MonotonicNs();
         Store(&control->business_start_ns, token.businessStartedNs);
+        Store(&control->business_get_1_start_ns, token.businessStartedNs);
         return token;
     }
 
@@ -547,10 +589,72 @@ void finishBusinessGet(BusinessGetToken const& token, bool success, uint64_t bus
     auto* control = mapping().get();
     if (control == nullptr || token.generation != Load(&control->run_generation)) return;
     auto const ended = businessEndedNs == 0 ? MonotonicNs() : businessEndedNs;
+    auto const elapsedUs = static_cast<uint64_t>(ended > token.businessStartedNs
+        ? (ended - token.businessStartedNs) / 1000ULL : 0ULL);
+    if (!token.inProcessPressure)
+    {
+        Store(&control->business_end_ns, ended);
+        Store(&control->business_success, success ? 1U : 0U);
+        Store(&control->business_done_generation, token.generation);
+        FutexWake(&control->business_done_generation);
+        return;
+    }
+    FetchAdd(&control->business_get_completed_count, 1U);
+    if (success) FetchAdd(&control->business_get_success_count, 1U);
+    if (token.businessGetOrdinal == 1U)
+    {
+        Store(&control->business_get_1_end_ns, ended);
+        Store(&control->business_get_1_us, elapsedUs);
+        return;
+    }
+    if (token.businessGetOrdinal != 2U) return;
+    Store(&control->business_get_2_end_ns, ended);
+    Store(&control->business_get_2_us, elapsedUs);
     Store(&control->business_end_ns, ended);
-    Store(&control->business_success, success ? 1U : 0U);
+    Store(&control->business_success,
+        Load(&control->business_get_success_count) == 2U ? 1U : 0U);
+    auto const stopNs = MonotonicNs();
+    Store(&control->pressure_active_at_stop, Load(&control->pressure_active_gets));
+    Store(&control->pressure_completed_at_stop, Load(&control->pressure_completed_gets));
+    Store(&control->pressure_stop_ns, stopNs);
+    Store(&control->pressure_stop_generation, token.generation);
+    FutexWake(&control->pressure_stop_generation);
     Store(&control->business_done_generation, token.generation);
     FutexWake(&control->business_done_generation);
+}
+
+void observeAddTokenStart(std::string const& requestId)
+{
+    auto* control = mapping().get();
+    if (control == nullptr || !requestMatches(*control, requestId)) return;
+    auto const started = MonotonicNs();
+    uint64_t expected = 0;
+    if (__atomic_compare_exchange_n(&control->add_token_first_start_ns, &expected, started,
+            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    {
+        Store(&control->pressure_active_at_first_add_token,
+            Load(&control->pressure_active_gets));
+    }
+    FetchAdd(&control->add_token_observation_count, 1U);
+}
+
+void observeAddTokenEnd(std::string const& requestId)
+{
+    auto* control = mapping().get();
+    if (control == nullptr || !requestMatches(*control, requestId)) return;
+    Store(&control->pressure_active_at_last_add_token,
+        Load(&control->pressure_active_gets));
+    AtomicMax(&control->add_token_last_end_ns, MonotonicNs());
+}
+
+void observeBusinessRequestComplete(std::string const& requestId)
+{
+    auto* control = mapping().get();
+    if (control == nullptr || !requestMatches(*control, requestId)) return;
+    Store(&control->business_lifecycle_done_ns, MonotonicNs());
+    auto const generation = Load(&control->run_generation);
+    Store(&control->business_lifecycle_done_generation, generation);
+    FutexWake(&control->business_lifecycle_done_generation);
 }
 
 } // namespace pairec::kvc_burst

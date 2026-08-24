@@ -43,12 +43,24 @@ import json, pathlib, sys
 baseline = json.load(open(sys.argv[1]))
 combined = json.load(open(sys.argv[2]))
 names = (
-    "client_e2e_ms", "pairec_total_ms", "vector_recall_ms", "generative_recall_ms",
+    "client_e2e_ms", "client_e2e_adjusted_ms", "pairec_total_ms", "vector_recall_ms", "generative_recall_ms",
     "deepfm_rank_ms", "rerank_ms", "front_brpc_ms", "wrapper_total_ms",
-    "backend_brpc_ms", "runner_ms", "kvc_business_get_ms", "kvc_pressure_p99_ms",
+    "backend_brpc_ms", "runner_ms", "runner_adjusted_ms", "kvc_business_get_ms",
+    "kvc_business_get_1_ms", "kvc_business_get_2_ms", "kvc_pressure_p99_ms",
     "kvc_barrier_ms", "kvc_pressure_first_wait_ms", "kvc_pressure_lead_wait_ms",
-    "kvc_coordination_wait_ms", "kvc_pressure_inflight_at_business_start",
-    "datasystem_get_ms", "datasystem_set_ms",
+    "kvc_coordination_wait_ms", "kvc_pressure_tail_after_stop_ms",
+    "kvc_pressure_stop_signal_delay_ms", "kvc_pressure_stop_to_first_add_token_ms",
+    "kvc_add_token_window_ms", "kvc_pressure_add_token_overlap_ms",
+    "kvc_pressure_active_at_stop", "kvc_pressure_active_at_second_get_start",
+    "kvc_pressure_completed_at_second_get_start", "kvc_pressure_completed_at_stop",
+    "kvc_pressure_completed_gets", "kvc_pressure_completions_after_stop",
+    "kvc_pressure_active_at_first_add_token", "kvc_pressure_active_at_last_add_token",
+    "kvc_add_token_observation_count",
+    "kvc_pressure_inflight_at_business_start", "datasystem_get_ms", "datasystem_set_ms",
+    "native_add_token_ms", "native_kv_update_ms",
+    "native_executor_queue_ms", "native_add_sequence_ms", "native_prefill_gap_ms",
+    "native_decode_gap_ms", "native_finalization_gap_ms", "native_remove_sequence_ms",
+    "native_lifecycle_ms", "native_accounted_ms",
     "wrapper_pressure_p95_ms", "wrapper_max_active",
 )
 rows = []

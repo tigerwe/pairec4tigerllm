@@ -105,7 +105,7 @@ STARTED_AT="$(date --iso-8601=seconds)"
 set +e
 NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE=baseline \
   KVC_BURST_CONTAINER=kvc-burst-wrapper KVC_BURST_REQUIRE_COMPLETE=1 \
-  KVC_BURST_PRESTART_PRESSURE="$KVC_INPROCESS_PRESSURE" \
+  KVC_BURST_PRESTART_PRESSURE=0 \
   KVC_BURST_DYNAMIC_ARM=1 KVC_BURST_PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" \
   EXPECTED_OFFLOADS=3 EXPECTED_ONBOARDS=2 STRICT_COUNTS=1 \
   EXPECTED_ONBOARDS_MIN="$EXPECTED_ONBOARDS_MIN" \
@@ -204,6 +204,19 @@ for row in contention.get("rows", []):
         assert kvc["business_submit_rank"] == 32, kvc
         assert kvc["pressure_inflight_at_business_start"] >= required_pressure_first, kvc
         assert kvc["pressure_completed_before_business"] == 0, kvc
+        assert kvc["business_get_count"] == 2, kvc
+        assert kvc["business_get_success_count"] == 2, kvc
+        assert kvc["business_get_1_ms"] > 0, kvc
+        assert kvc["business_get_2_ms"] > 0, kvc
+        assert kvc["pressure_active_at_second_get_start"] >= required_pressure_first, kvc
+        assert kvc["pressure_active_at_stop"] >= required_pressure_first, kvc
+        assert kvc["pressure_completed_at_stop"] >= kvc["pressure_completed_at_second_get_start"], kvc
+        assert kvc["pressure_completions_after_stop"] > 0, kvc
+        assert kvc["pressure_tail_after_stop_ms"] > 0, kvc
+        assert kvc["pressure_stop_epoch_ns"] >= kvc["business_get_2_end_epoch_ns"], kvc
+        assert kvc["pressure_last_end_epoch_ns"] >= kvc["pressure_stop_epoch_ns"], kvc
+        assert kvc["business_lifecycle_done"] is True, kvc
+        assert kvc["business_lifecycle_done_epoch_ns"] >= kvc["business_get_2_end_epoch_ns"], kvc
     assert kvc.get("sustained_enabled", False) is kvc_sustained_pressure, kvc
     if kvc_sustained_pressure and pressure_lanes > 0:
         assert kvc["sustained_errors"] == 0, kvc
@@ -212,13 +225,20 @@ for row in contention.get("rows", []):
     assert exact["set_count"] == 3, exact
     assert expected_onboards_min <= exact["get_count"] <= expected_onboards_max, exact
     assert len(executor) == 1, executor
+    if kvc_inprocess_pressure:
+        assert exact["get_count"] == 2, exact
+        assert kvc["add_token_observation_count"] == exact["add_token_count"], (kvc, exact)
     matches = [line for line in wrapper_log.splitlines()
                if "method=Recommend" in line and f"request_id={request_id}" in line]
     if len(matches) != 1 or " code=200 " not in matches[0]:
         valid = False
+    coordination_ms = float(kvc["coordination_wait_ms"])
+    client_e2e_actual_ms = float(trace["client"]["client_e2e_ms"])
+    runner_actual_ms = executor[0]["runner_us"] / 1000.0
     rows.append({
         "request_id": request_id,
-        "client_e2e_ms": float(trace["client"]["client_e2e_ms"]),
+        "client_e2e_ms": client_e2e_actual_ms,
+        "client_e2e_adjusted_ms": max(0.0, client_e2e_actual_ms - coordination_ms),
         "pairec_total_ms": pipeline["pairec_total_us"] / 1000.0,
         "vector_recall_ms": spans["vector_recall"]["duration_us"] / 1000.0,
         "generative_recall_ms": spans["generative_recall"]["duration_us"] / 1000.0,
@@ -227,13 +247,41 @@ for row in contention.get("rows", []):
         "front_brpc_ms": business["business_front_brpc_ms"],
         "wrapper_total_ms": business["wrapper_total_ms"],
         "backend_brpc_ms": business["wrapper_backend_brpc_ms"],
-        "runner_ms": executor[0]["runner_us"] / 1000.0,
+        "runner_ms": runner_actual_ms,
+        "runner_adjusted_ms": max(0.0, runner_actual_ms - coordination_ms),
         "kvc_business_get_ms": kvc["business_get_ms"],
+        "kvc_business_get_1_ms": float(kvc.get("business_get_1_ms", 0.0)),
+        "kvc_business_get_2_ms": float(kvc.get("business_get_2_ms", 0.0)),
         "kvc_pressure_p99_ms": kvc["pressure_get_p99_ms"],
         "kvc_barrier_ms": kvc["barrier_wait_ms"],
         "kvc_pressure_first_wait_ms": kvc["pressure_first_wait_ms"],
         "kvc_pressure_lead_wait_ms": kvc["pressure_lead_wait_ms"],
         "kvc_coordination_wait_ms": kvc["coordination_wait_ms"],
+        "kvc_pressure_tail_after_stop_ms": float(
+            kvc.get("pressure_tail_after_stop_ms", 0.0)),
+        "kvc_pressure_stop_signal_delay_ms": float(
+            kvc.get("pressure_stop_signal_delay_us", 0.0)) / 1000.0,
+        "kvc_pressure_stop_to_first_add_token_ms": float(
+            kvc.get("pressure_stop_to_first_add_token_ms", 0.0)),
+        "kvc_add_token_window_ms": float(kvc.get("add_token_window_ms", 0.0)),
+        "kvc_pressure_add_token_overlap_ms": float(
+            kvc.get("pressure_add_token_overlap_ms", 0.0)),
+        "kvc_pressure_active_at_stop": float(kvc.get("pressure_active_at_stop", 0)),
+        "kvc_pressure_active_at_second_get_start": float(
+            kvc.get("pressure_active_at_second_get_start", 0)),
+        "kvc_pressure_completed_at_second_get_start": float(
+            kvc.get("pressure_completed_at_second_get_start", 0)),
+        "kvc_pressure_completed_at_stop": float(
+            kvc.get("pressure_completed_at_stop", 0)),
+        "kvc_pressure_completed_gets": float(kvc.get("pressure_completed_gets", 0)),
+        "kvc_pressure_completions_after_stop": float(
+            kvc.get("pressure_completions_after_stop", 0)),
+        "kvc_pressure_active_at_first_add_token": float(
+            kvc.get("pressure_active_at_first_add_token", 0)),
+        "kvc_pressure_active_at_last_add_token": float(
+            kvc.get("pressure_active_at_last_add_token", 0)),
+        "kvc_add_token_observation_count": float(
+            kvc.get("add_token_observation_count", 0)),
         "kvc_business_submit_rank": float(kvc.get("business_submit_rank", 0)),
         "kvc_pressure_inflight_at_business_start": float(
             kvc.get("pressure_inflight_at_business_start", 0)),
@@ -241,6 +289,16 @@ for row in contention.get("rows", []):
         "kvc_sustained_window_ms": float(kvc.get("sustained_window_ms", 0.0)),
         "datasystem_get_ms": exact["get_us"] / 1000.0,
         "datasystem_set_ms": exact["set_us"] / 1000.0,
+        "native_add_token_ms": exact["add_token_us"] / 1000.0,
+        "native_kv_update_ms": exact["kv_update_us"] / 1000.0,
+        "native_executor_queue_ms": exact["executor_queue_us"] / 1000.0,
+        "native_add_sequence_ms": exact["add_sequence_us"] / 1000.0,
+        "native_prefill_gap_ms": exact["prefill_gap_us"] / 1000.0,
+        "native_decode_gap_ms": exact["decode_gap_us"] / 1000.0,
+        "native_finalization_gap_ms": exact["finalization_gap_us"] / 1000.0,
+        "native_remove_sequence_ms": exact["remove_sequence_us"] / 1000.0,
+        "native_lifecycle_ms": exact["native_lifecycle_us"] / 1000.0,
+        "native_accounted_ms": exact["native_accounted_us"] / 1000.0,
         "wrapper_pressure_p95_ms": wrapper_burst["pressure_latency_p95_ms"],
         "wrapper_max_active": wrapper_burst["max_active_workers"],
         "wrapper_log_matches": len(matches),

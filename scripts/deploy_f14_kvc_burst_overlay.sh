@@ -47,12 +47,12 @@ verify() {
   [[ -n "$pod" ]] || die "inference Pod not found"
   kubectl -n "$NAMESPACE" get pod "$pod" -o wide
   kubectl -n "$NAMESPACE" exec "$pod" -c "$INFERENCE_CONTAINER" -- \
-    grep -aFq PAIREC_KVC_BURST_PROXY_V5 \
+    grep -aFq PAIREC_KVC_BURST_PROXY_V6 \
       "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
-    || die "KVC proxy V5 capability marker is missing from TensorRT-LLM"
+    || die "KVC proxy V6 capability marker is missing from TensorRT-LLM"
   if [[ "$INPROCESS_PRESSURE" = 1 ]]; then
     kubectl -n "$NAMESPACE" exec "$pod" -c "$INFERENCE_CONTAINER" -- \
-      grep -aFq PAIREC_KVC_INPROCESS_SUSTAINED_C32_V1 \
+      grep -aFq PAIREC_KVC_INPROCESS_GET_BOUNDARY_C32_V2 \
         "$POD_RUNTIME_DIR/lib/libtensorrt_llm.so" \
       || die "in-process sustained KVC c32 capability marker is missing from TensorRT-LLM"
   fi
@@ -69,8 +69,8 @@ verify() {
   echo "$ready_event"
   grep -Fq "\"object_size_bytes\":$OBJECT_SIZE" <<<"$ready_event" \
     || die "sidecar object size mismatch: expected=$OBJECT_SIZE"
-  grep -Fq '"version":5' <<<"$ready_event" \
-    || die "sidecar control protocol mismatch: expected version=5"
+  grep -Fq '"version":6' <<<"$ready_event" \
+    || die "sidecar control protocol mismatch: expected version=6"
   expected_engine=sidecar-exclusive-clients
   [[ "$INPROCESS_PRESSURE" = 0 ]] || expected_engine=inprocess-shared-client
   grep -Fq "\"pressure_engine\":\"$expected_engine\"" <<<"$ready_event" \
