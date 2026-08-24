@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import json
 import pathlib
@@ -377,8 +378,78 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn("PressureGenerationComplete(control, generation)", wrapper)
         self.assertIn("completedGeneration != lastRunGeneration", wrapper)
         self.assertIn(
-            "COMBINED_KVC_INPROCESS_PRESSURE=${COMBINED_KVC_INPROCESS_PRESSURE:-0}", matrix)
+            "COMBINED_KVC_INPROCESS_PRESSURE=${COMBINED_KVC_INPROCESS_PRESSURE:-1}", matrix)
         self.assertIn('KVC_INPROCESS_PRESSURE="$inprocess_pressure"', matrix)
+
+    def test_matrix_is_four_case_factorial(self):
+        matrix = MATRIX.read_text()
+        for token in (
+            "COMBINED_KVC_CONCURRENCY=${COMBINED_KVC_CONCURRENCY:-32}",
+            "COMBINED_KVC_INPROCESS_PRESSURE=${COMBINED_KVC_INPROCESS_PRESSURE:-1}",
+            "PRIME_REQUESTS=${PRIME_REQUESTS:-20}",
+            "BRPC_PRESSURE_PAYLOAD_BYTES=${BRPC_PRESSURE_PAYLOAD_BYTES:-102400}",
+            "run_case baseline 1 1",
+            'run_case brpc_only "$BRPC_WRAPPER_CONCURRENCY" 1',
+            "run_case kvc_only 1",
+            'run_case combined "$BRPC_WRAPPER_CONCURRENCY"',
+            '"design": "2x2_factorial"',
+            '"pressure_health_requests": 999',
+            '"pressure_lanes": 31',
+            '"interaction": (averages["combined"] - averages["brpc_only"]',
+            '"classification": "PAIREC_BRPC_WRAPPER_KVC_FACTORIAL_OK"',
+        ):
+            self.assertIn(token, matrix)
+
+    def test_matrix_factorial_summary_math(self):
+        text = MATRIX.read_text()
+        blocks = re.findall(r"<<'PY'\n(.*?)\nPY", text, re.DOTALL)
+        self.assertEqual(1, len(blocks))
+        block = blocks[0]
+        names_match = re.search(r"names = (\(.*?\n\))\n\nrows", block, re.DOTALL)
+        self.assertIsNotNone(names_match)
+        metric_names = ast.literal_eval(names_match.group(1))
+
+        def case(wrapper, kvc, value):
+            return {
+                "classification": f"PAIREC_BRPC_WRAPPER_C{wrapper}_KVC_C{kvc}_OK",
+                "wrapper_concurrency": wrapper,
+                "kvc_concurrency": kvc,
+                "kvc_object_size_bytes": 3670016,
+                "kvc_pressure_key_count": 4 if kvc == 32 else 0,
+                "metrics": {
+                    name: {"avg": value, "p99": value * 10}
+                    for name in metric_names
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            inputs = [
+                case(1, 1, 10.0),
+                case(1000, 1, 13.0),
+                case(1, 32, 15.0),
+                case(1000, 32, 21.0),
+            ]
+            paths = []
+            for index, payload in enumerate(inputs):
+                path = root / f"case-{index}.json"
+                path.write_text(json.dumps(payload))
+                paths.append(path)
+            output = root / "summary.json"
+            subprocess.run(
+                [sys.executable, "-", *map(str, paths), str(output), "102400"],
+                input=block, text=True, capture_output=True, check=True)
+            summary = json.loads(output.read_text())
+
+        self.assertEqual("PAIREC_BRPC_WRAPPER_KVC_FACTORIAL_OK", summary["classification"])
+        row = next(item for item in summary["comparison"]
+                   if item["metric"] == "datasystem_get_ms")
+        self.assertEqual(
+            {"brpc": 3.0, "kvc": 5.0, "combined": 11.0, "interaction": 3.0},
+            row["effects_avg"],
+        )
+        self.assertEqual(30.0, row["effects_p99"]["interaction"])
+        self.assertFalse(summary["pressure_profiles"]["brpc"]["backend_forwarded"])
 
     def test_contention_ds_worker_hook(self):
         text = CONTENTION.read_text()
@@ -522,11 +593,11 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertNotIn("PRIME_REQUESTS=195 \\", text)
 
     def test_shell_syntax(self):
-        for script in (DEPLOY, CONTENTION, COMBINED, COLLECTOR):
+        for script in (DEPLOY, CONTENTION, COMBINED, MATRIX, COLLECTOR):
             subprocess.run(["bash", "-n", str(script)], check=True, capture_output=True)
 
     def test_embedded_python_compiles(self):
-        for script in (DEPLOY, CONTENTION, COMBINED):
+        for script in (DEPLOY, CONTENTION, COMBINED, MATRIX):
             text = script.read_text()
             for block in re.findall(r"<<'PY'\n(.*?)\nPY", text, re.DOTALL):
                 compile(block, str(script), "exec")
