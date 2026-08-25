@@ -53,6 +53,8 @@ type Trace struct {
 	Sampled            bool                  `json:"sampled"`
 	Valid              bool                  `json:"valid"`
 	InvalidReasons     []string              `json:"invalid_reasons,omitempty"`
+	StartEpochNS       int64                 `json:"start_epoch_ns"`
+	EndEpochNS         int64                 `json:"end_epoch_ns"`
 	PaiRecTotalUS      int64                 `json:"pairec_total_us"`
 	AccountedUS        int64                 `json:"accounted_us"`
 	ClosureErrorUS     int64                 `json:"closure_error_us"`
@@ -219,7 +221,8 @@ func (r *Recorder) Finalize(status string) Trace {
 		return Trace{Event: "pipeline_trace_complete", RequestID: r.requestID, Status: "duplicate_finalize", Valid: false}
 	}
 	r.closed = true
-	totalUS := time.Since(r.started).Microseconds()
+	ended := time.Now()
+	totalUS := ended.Sub(r.started).Microseconds()
 	accountedUS := int64(0)
 	for _, span := range r.spans {
 		if span.Enabled && span.Accounted {
@@ -255,6 +258,7 @@ func (r *Recorder) Finalize(status string) Trace {
 		Event: "pipeline_trace_complete", ContractVersion: ContractVersion,
 		RequestID: r.requestID, Status: status, Sampled: r.sampled,
 		Valid: len(r.invalid) == 0, InvalidReasons: append([]string(nil), r.invalid...),
+		StartEpochNS: r.started.UnixNano(), EndEpochNS: ended.UnixNano(),
 		PaiRecTotalUS: totalUS, AccountedUS: accountedUS, ClosureErrorUS: closureErrorUS,
 		ClosureThresholdUS: thresholdUS, Spans: append([]Span(nil), r.spans...), DataSystem: r.ds,
 	}

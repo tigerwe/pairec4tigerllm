@@ -34,6 +34,7 @@ docker run --rm --entrypoint /bin/bash "$IMAGE" -lc '
       /opt/pairec-brpc/bin/brpc_inference_server \
       /opt/pairec-brpc/bin/brpc_vector_recall_adapter \
       /opt/pairec-brpc/bin/brpc_deepfm_rank_adapter \
+      /opt/pairec-brpc/bin/brpc_rank_burst_wrapper \
       /opt/pairec-brpc/bin/brpc_pipeline_client; do
     echo "== ldd $bin =="
     ldd "$bin" | tee "/tmp/$(basename "$bin").ldd"

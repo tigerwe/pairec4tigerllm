@@ -51,7 +51,7 @@ spec:
                   wget -q -T 2 -O - http://127.0.0.1:18080/ping | grep -q success
                   nc -z -w 2 __WRAPPER_HOST__ __WRAPPER_PORT__
                   nc -z -w 2 __VECTOR_HOST__ 18201
-                  nc -z -w 2 __RANK_HOST__ 18211
+                  nc -z -w 2 __RANK_HOST__ __RANK_PORT__
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 2

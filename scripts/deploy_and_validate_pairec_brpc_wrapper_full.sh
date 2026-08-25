@@ -8,6 +8,8 @@ WRAPPER_DEPLOYMENT="${WRAPPER_DEPLOYMENT:-brpc-burst-wrapper}"
 INFERENCE_DEPLOYMENT="${INFERENCE_DEPLOYMENT:-inference-brpc-trtllm}"
 VECTOR_DEPLOYMENT="${VECTOR_DEPLOYMENT:-vector-recall-brpc}"
 RANK_DEPLOYMENT="${RANK_DEPLOYMENT:-deepfm-rank-brpc}"
+RANK_SERVICE="${RANK_SERVICE:-$RANK_DEPLOYMENT}"
+RANK_PORT="${RANK_PORT:-18211}"
 WRAPPER_ENDPOINT="${WRAPPER_ENDPOINT:-192.168.100.11:18103}"
 BURST_CONCURRENCY="${BURST_CONCURRENCY:-1}"
 BURST_POOL_SIZE="${BURST_POOL_SIZE:-$BURST_CONCURRENCY}"
@@ -15,6 +17,14 @@ BURST_ACTIVE_CONNECTIONS="${BURST_ACTIVE_CONNECTIONS:-$BURST_CONCURRENCY}"
 BURST_CPU_SHARDS="${BURST_CPU_SHARDS:-[]}"
 BURST_PAYLOAD_BYTES="${BURST_PAYLOAD_BYTES:-102400}"
 BUSINESS_PAYLOAD_BYTES="${BUSINESS_PAYLOAD_BYTES:-0}"
+RANK_TIMEOUT_MS="${RANK_TIMEOUT_MS:-100}"
+RANK_BUSINESS_PAYLOAD_BYTES="${RANK_BUSINESS_PAYLOAD_BYTES:-0}"
+RANK_BURST_ENABLED="${RANK_BURST_ENABLED:-0}"
+RANK_BURST_CONCURRENCY="${RANK_BURST_CONCURRENCY:-1}"
+RANK_BURST_POOL_SIZE="${RANK_BURST_POOL_SIZE:-$RANK_BURST_CONCURRENCY}"
+RANK_BURST_PAYLOAD_BYTES="${RANK_BURST_PAYLOAD_BYTES:-102400}"
+RANK_BURST_PRECONNECT="${RANK_BURST_PRECONNECT:-1}"
+RANK_BURST_PRESSURE_TIMEOUT_MS="${RANK_BURST_PRESSURE_TIMEOUT_MS:-5000}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
 QUALIFICATION_REQUESTS="${QUALIFICATION_REQUESTS:-0}"
 REQUESTS="${REQUESTS:-3}"
@@ -51,6 +61,21 @@ die() { echo "ERROR: $*" >&2; exit 1; }
   || die "BURST_PAYLOAD_BYTES must be in [0,1048576]"
 [[ "$BUSINESS_PAYLOAD_BYTES" =~ ^[0-9]+$ ]] && (( BUSINESS_PAYLOAD_BYTES <= 1048576 )) \
   || die "BUSINESS_PAYLOAD_BYTES must be in [0,1048576]"
+[[ "$RANK_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] || die "RANK_TIMEOUT_MS must be positive"
+[[ "$RANK_BUSINESS_PAYLOAD_BYTES" =~ ^[0-9]+$ ]] && (( RANK_BUSINESS_PAYLOAD_BYTES <= 1048576 )) \
+  || die "RANK_BUSINESS_PAYLOAD_BYTES must be in [0,1048576]"
+[[ "$RANK_BURST_ENABLED" = 0 || "$RANK_BURST_ENABLED" = 1 ]] \
+  || die "RANK_BURST_ENABLED must be 0 or 1"
+[[ "$RANK_BURST_CONCURRENCY" =~ ^(1|1000)$ ]] \
+  || die "RANK_BURST_CONCURRENCY must be 1 or 1000"
+[[ "$RANK_BURST_POOL_SIZE" =~ ^[1-9][0-9]*$ ]] && (( RANK_BURST_POOL_SIZE >= RANK_BURST_CONCURRENCY && RANK_BURST_POOL_SIZE <= 1000 )) \
+  || die "RANK_BURST_POOL_SIZE must be in [rank_concurrency,1000]"
+[[ "$RANK_BURST_PAYLOAD_BYTES" =~ ^[0-9]+$ ]] && (( RANK_BURST_PAYLOAD_BYTES <= 1048576 )) \
+  || die "RANK_BURST_PAYLOAD_BYTES must be in [0,1048576]"
+[[ "$RANK_BURST_PRECONNECT" = 0 || "$RANK_BURST_PRECONNECT" = 1 ]] \
+  || die "RANK_BURST_PRECONNECT must be 0 or 1"
+[[ "$RANK_BURST_PRESSURE_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] \
+  || die "RANK_BURST_PRESSURE_TIMEOUT_MS must be positive"
 python3 -c 'import json,sys; value=json.loads(sys.argv[1]); assert isinstance(value,list); assert all(isinstance(x,int) and x>=0 for x in value); assert len(value)==len(set(value))' \
   "$BURST_CPU_SHARDS" || die "BURST_CPU_SHARDS must be a JSON array of unique non-negative CPU IDs"
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
@@ -179,13 +204,13 @@ done
 WRAPPER_HOST="${WRAPPER_ENDPOINT%:*}"
 WRAPPER_PORT="${WRAPPER_ENDPOINT##*:}"
 VECTOR_IP="$(kubectl -n "$NAMESPACE" get service vector-recall-brpc -o jsonpath='{.spec.clusterIP}')"
-RANK_IP="$(kubectl -n "$NAMESPACE" get service deepfm-rank-brpc -o jsonpath='{.spec.clusterIP}')"
+RANK_IP="$(kubectl -n "$NAMESPACE" get service "$RANK_SERVICE" -o jsonpath='{.spec.clusterIP}')"
 [[ -n "$WRAPPER_HOST" && -n "$WRAPPER_PORT" && -n "$VECTOR_IP" && -n "$RANK_IP" ]] \
   || die "dependency endpoint is empty"
 
 echo "== Full-chain BRPC Wrapper configuration =="
 echo "wrapper_endpoint=$WRAPPER_ENDPOINT burst_concurrency=$BURST_CONCURRENCY pool_size=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS cpu_shards=$BURST_CPU_SHARDS pressure_payload_bytes=$BURST_PAYLOAD_BYTES business_payload_bytes=$BUSINESS_PAYLOAD_BYTES"
-echo "vector_endpoint=${VECTOR_IP}:18201 rank_endpoint=${RANK_IP}:18211"
+echo "vector_endpoint=${VECTOR_IP}:18201 rank_endpoint=${RANK_IP}:${RANK_PORT}"
 echo "deployment=$PAIREC_DEPLOYMENT output_dir=$OUTPUT_DIR"
 
 if [[ "$BUILD_PAIREC_IMAGE" = 1 ]]; then
@@ -201,11 +226,14 @@ fi
 echo "== Render strict full-chain configuration =="
 python3 - "$CONFIG_TEMPLATE" "$OUTPUT_DIR/pairec_config.json" \
   "$WRAPPER_ENDPOINT" "$BURST_CONCURRENCY" "${VECTOR_IP}:18201" \
-  "${RANK_IP}:18211" "$DEEPFM_MODEL_ROLE" "$BURST_POOL_SIZE" \
+  "${RANK_IP}:${RANK_PORT}" "$DEEPFM_MODEL_ROLE" "$BURST_POOL_SIZE" \
   "$BURST_ACTIVE_CONNECTIONS" "$BURST_CPU_SHARDS" "$BURST_PAYLOAD_BYTES" \
-  "$BUSINESS_PAYLOAD_BYTES" <<'PY'
+  "$BUSINESS_PAYLOAD_BYTES" "$RANK_TIMEOUT_MS" "$RANK_BUSINESS_PAYLOAD_BYTES" \
+  "$RANK_BURST_ENABLED" "$RANK_BURST_CONCURRENCY" "$RANK_BURST_POOL_SIZE" \
+  "$RANK_BURST_PAYLOAD_BYTES" "$RANK_BURST_PRECONNECT" \
+  "$RANK_BURST_PRESSURE_TIMEOUT_MS" <<'PY'
 import json, pathlib, sys
-source,target,wrapper,concurrency,vector,rank,role,pool,active,cpu_shards,payload_bytes,business_payload_bytes=sys.argv[1:]
+source,target,wrapper,concurrency,vector,rank,role,pool,active,cpu_shards,payload_bytes,business_payload_bytes,rank_timeout,rank_business_bytes,rank_burst_enabled,rank_burst_concurrency,rank_burst_pool,rank_burst_bytes,rank_preconnect,rank_pressure_timeout=sys.argv[1:]
 text=pathlib.Path(source).read_text()
 for old,new in {
     "__WRAPPER_ENDPOINT__": wrapper,
@@ -218,6 +246,14 @@ for old,new in {
     "__BURST_CPU_SHARDS__": cpu_shards,
     "__BURST_PAYLOAD_BYTES__": payload_bytes,
     "__BUSINESS_PAYLOAD_BYTES__": business_payload_bytes,
+    "__RANK_TIMEOUT_MS__": rank_timeout,
+    "__RANK_BUSINESS_PAYLOAD_BYTES__": rank_business_bytes,
+    "__RANK_BURST_ENABLED__": "true" if rank_burst_enabled == "1" else "false",
+    "__RANK_BURST_CONCURRENCY__": rank_burst_concurrency,
+    "__RANK_BURST_POOL_SIZE__": rank_burst_pool,
+    "__RANK_BURST_PAYLOAD_BYTES__": rank_burst_bytes,
+    "__RANK_BURST_PRECONNECT__": "true" if rank_preconnect == "1" else "false",
+    "__RANK_BURST_PRESSURE_TIMEOUT_MS__": rank_pressure_timeout,
 }.items():
     text=text.replace(old,new)
 assert "__" not in text
@@ -236,7 +272,16 @@ assert gen["brpc_burst_preconnect"] is True
 assert gen["brpc_burst_payload_bytes"]==int(payload_bytes)
 assert gen["brpc_payload_bytes"]==int(business_payload_bytes)
 assert recalls["milvus_recall"]["brpc_endpoint"]==vector
-assert config["UserDefineConfs"]["DeepFMRankSorts"][0]["brpc_endpoint"]==rank
+ranker=config["UserDefineConfs"]["DeepFMRankSorts"][0]
+assert ranker["brpc_endpoint"]==rank
+assert ranker["timeout_ms"]==int(rank_timeout)
+assert ranker["brpc_payload_bytes"]==int(rank_business_bytes)
+assert ranker["brpc_burst_enabled"] is (rank_burst_enabled == "1")
+assert ranker["brpc_burst_concurrency"]==int(rank_burst_concurrency)
+assert ranker["brpc_burst_pool_size"]==int(rank_burst_pool)
+assert ranker["brpc_burst_payload_bytes"]==int(rank_burst_bytes)
+assert ranker["brpc_burst_preconnect"] is (rank_preconnect == "1")
+assert ranker["brpc_burst_pressure_timeout_ms"]==int(rank_pressure_timeout)
 rerank=config["UserDefineConfs"]["RerankConfs"][0]
 assert rerank["fail_closed"] is True and rerank["minimum_generative"]==1
 pathlib.Path(target).write_text(json.dumps(config, indent=2)+"\n")
@@ -247,13 +292,14 @@ kubectl -n "$NAMESPACE" create configmap "$PAIREC_CONFIGMAP" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 python3 - "$PAIREC_MANIFEST" "$OUTPUT_DIR/pairec.yaml" \
-  "$WRAPPER_HOST" "$WRAPPER_PORT" "$VECTOR_IP" "$RANK_IP" <<'PY'
+  "$WRAPPER_HOST" "$WRAPPER_PORT" "$VECTOR_IP" "$RANK_IP" "$RANK_PORT" <<'PY'
 import pathlib, sys
-source,target,wrapper_host,wrapper_port,vector_host,rank_host=sys.argv[1:]
+source,target,wrapper_host,wrapper_port,vector_host,rank_host,rank_port=sys.argv[1:]
 text=pathlib.Path(source).read_text()
 for old,new in {
     "__WRAPPER_HOST__":wrapper_host, "__WRAPPER_PORT__":wrapper_port,
     "__VECTOR_HOST__":vector_host, "__RANK_HOST__":rank_host,
+    "__RANK_PORT__":rank_port,
 }.items():
     text=text.replace(old,new)
 assert "__" not in text
@@ -412,13 +458,14 @@ done
 echo "== Run strict full-chain c${BURST_CONCURRENCY} pressure: $REQUESTS requests =="
 STARTED_AT="$(date --iso-8601=seconds)"
 WORKLOAD_STARTED_AT="$(date +%s.%N)"
-printf 'index\te2e_ms\trequest_id\n' >"$OUTPUT_DIR/requests.tsv"
+printf 'index\te2e_ms\trequest_id\tresponse_end_epoch_ns\n' >"$OUTPUT_DIR/requests.tsv"
 for index in $(seq 1 "$REQUESTS"); do
   response="$OUTPUT_DIR/response-${index}.json"
   seconds="$(curl --noproxy '*' -sS --connect-timeout 2 --max-time 10 \
     "$PAIREC_URL" -H 'Content-Type: application/json' \
     -d "{\"scene_id\":\"$SCENE_ID\",\"uid\":\"$USER_ID\",\"size\":$SIZE}" \
     -o "$response" -w '%{time_total}')"
+  response_end_epoch_ns="$(date +%s%N)"
   request_id="$(python3 - "$response" "$SIZE" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1])); size=int(sys.argv[2]); items=data.get("items", [])
@@ -432,7 +479,8 @@ print(data["request_id"])
 PY
 )"
   e2e_ms="$(python3 -c 'import sys; print(round(float(sys.argv[1])*1000,3))' "$seconds")"
-  printf '%s\t%s\t%s\n' "$index" "$e2e_ms" "$request_id" | tee -a "$OUTPUT_DIR/requests.tsv"
+  printf '%s\t%s\t%s\t%s\n' "$index" "$e2e_ms" "$request_id" \
+    "$response_end_epoch_ns" | tee -a "$OUTPUT_DIR/requests.tsv"
 done
 WORKLOAD_FINISHED_AT="$(date +%s.%N)"
 WORKLOAD_ELAPSED_SECONDS="$(python3 -c \

@@ -412,6 +412,18 @@ target_link_libraries(
     Threads::Threads
 )
 
+add_executable(brpc_rank_burst_wrapper brpc_rank_burst_wrapper.cpp)
+target_include_directories(brpc_rank_burst_wrapper PRIVATE ${BRPC_INCLUDE_DIR})
+target_link_libraries(
+  brpc_rank_burst_wrapper
+  PRIVATE
+    pairec_pipeline_proto
+    ${BRPC_LIBRARY}
+    ${ABSL_EXTRA_LIBS}
+    ${BRPC_EXTRA_LIBS}
+    Threads::Threads
+)
+
 add_executable(brpc_pipeline_client pipeline_service_client.cpp)
 target_include_directories(brpc_pipeline_client PRIVATE ${BRPC_INCLUDE_DIR})
 target_link_libraries(
@@ -472,6 +484,7 @@ install(
     brpc_inference_server
     brpc_vector_recall_adapter
     brpc_deepfm_rank_adapter
+    brpc_rank_burst_wrapper
     brpc_pipeline_client
   RUNTIME DESTINATION bin
 )

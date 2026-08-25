@@ -26,3 +26,18 @@ func TestRankResponseRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected round trip: %s", got.String())
 	}
 }
+
+func TestRankAndHealthPayloadPaddingRoundTrip(t *testing.T) {
+	for _, message := range []proto.Message{
+		&RankRequest{PayloadPadding: make([]byte, 102400)},
+		&HealthRequest{PayloadPadding: make([]byte, 102400)},
+	} {
+		encoded, err := proto.Marshal(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(encoded) < 102400 {
+			t.Fatalf("payload padding was not serialized: bytes=%d", len(encoded))
+		}
+	}
+}

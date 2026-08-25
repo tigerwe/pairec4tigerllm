@@ -1108,6 +1108,9 @@ class TrtllmCppBackend final : public InferenceBackend {
         const int64_t gateway_closure_error_us = runner_us >= gateway_accounted_us
             ? runner_us - gateway_accounted_us
             : gateway_accounted_us - runner_us;
+        const int64_t completion_epoch_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
         std::cout << "{\"event\":\"trt_executor_request_complete\""
                   << ",\"request_id\":\""
                   << EscapeJsonString(request.request_id()) << "\""
@@ -1124,6 +1127,7 @@ class TrtllmCppBackend final : public InferenceBackend {
                   << ",\"gateway_accounted_us\":" << gateway_accounted_us
                   << ",\"gateway_closure_error_us\":"
                   << gateway_closure_error_us
+                  << ",\"completion_epoch_ns\":" << completion_epoch_ns
                   << "}" << std::endl;
       }
       if (datasystem_lifecycle) {

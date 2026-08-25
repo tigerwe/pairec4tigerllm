@@ -35,6 +35,7 @@ message ServiceTrace {
 
 message HealthRequest {
   optional TraceContext context = 1;
+  optional bytes payload_padding = 101;
 }
 
 message HealthResponse {
@@ -71,6 +72,7 @@ message RankRequest {
   optional TraceContext context = 1;
   optional string user_id = 2;
   repeated RankCandidate items = 3;
+  optional bytes payload_padding = 101;
 }
 
 message RankedItem {

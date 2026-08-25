@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepfm-rank-burst-wrapper
+  namespace: pairec
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: deepfm-rank-burst-wrapper}
+  template:
+    metadata:
+      labels: {app: deepfm-rank-burst-wrapper}
+    spec:
+      nodeName: worker1
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: rank-burst-wrapper
+          image: docker.io/library/pairec-brpc-inference:k8s-arm64-v1
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: LD_PRELOAD, value: ""}
+          command: [/opt/pairec-brpc/bin/brpc_rank_burst_wrapper]
+          args:
+            - --listen_port=18213
+            - --backend=__RANK_BACKEND_ENDPOINT__
+            - --backend_timeout_ms=250
+            - --idle_timeout_sec=-1
+          ports:
+            - {name: brpc-wrapper, containerPort: 18213, hostPort: 18213}
+          resources:
+            requests: {cpu: "8", memory: "2Gi"}
+            limits: {cpu: "8", memory: "2Gi"}
+          volumeMounts:
+            - name: rank-burst-wrapper-bin
+              mountPath: /opt/pairec-brpc/bin/brpc_rank_burst_wrapper
+              readOnly: true
+          startupProbe:
+            tcpSocket: {port: 18213}
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: [/opt/pairec-brpc/bin/brpc_pipeline_client, --server=127.0.0.1:18213, --service=rank, --timeout_ms=1000]
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket: {port: 18213}
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
+      volumes:
+        - name: rank-burst-wrapper-bin
+          hostPath: {path: /home/zcx/bin/brpc_rank_burst_wrapper, type: File}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepfm-rank-burst-wrapper
+  namespace: pairec
+spec:
+  selector: {app: deepfm-rank-burst-wrapper}
+  ports:
+    - {name: brpc, port: 18213, targetPort: 18213}

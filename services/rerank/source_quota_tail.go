@@ -157,12 +157,13 @@ func ApplyConfigured(ctx *paireccontext.RecommendContext, items []*module.Item, 
 		}
 		resultItems = []*module.Item{}
 	}
-	duration := time.Since(started)
+	ended := time.Now()
+	duration := ended.Sub(started)
 	observability.RecordDuration(ctx, "rerank", "pairec", "in_process", "recommend_service", false,
 		started, status, attributes)
 	rerankDuration.WithLabelValues(PolicyName, status).Observe(duration.Seconds())
 	rerankTotal.WithLabelValues(PolicyName, status).Inc()
-	writeTrace(ctx, result, status, duration, err)
+	writeTrace(ctx, result, status, started, ended, err)
 	return resultItems, true, err
 }
 
@@ -243,7 +244,7 @@ func (r Result) attributes(config Config) map[string]interface{} {
 }
 
 func writeTrace(ctx *paireccontext.RecommendContext, result Result, status string,
-	duration time.Duration, err error) {
+	started, ended time.Time, err error) {
 	if os.Getenv("PAIREC_TRACE_STDOUT") != "1" {
 		return
 	}
@@ -253,7 +254,8 @@ func writeTrace(ctx *paireccontext.RecommendContext, result Result, status strin
 	}
 	event := map[string]interface{}{
 		"event": "source_quota_rerank_complete", "request_id": requestID,
-		"policy": PolicyName, "status": status, "duration_us": duration.Microseconds(),
+		"policy": PolicyName, "status": status, "duration_us": ended.Sub(started).Microseconds(),
+		"start_epoch_ns": started.UnixNano(), "end_epoch_ns": ended.UnixNano(),
 		"input_count": result.InputCount, "output_count": result.OutputCount,
 		"generative_input": result.GenerativeInput, "vector_input": result.VectorInput,
 		"generative_selected": result.GenerativeSelected, "vector_selected": result.VectorSelected,

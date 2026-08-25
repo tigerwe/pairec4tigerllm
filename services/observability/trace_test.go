@@ -21,6 +21,9 @@ func TestRecorderClosesAndPreservesParallelDiagnostics(t *testing.T) {
 		t.Fatalf("trace did not close: total=%d accounted=%d error=%d",
 			trace.PaiRecTotalUS, trace.AccountedUS, trace.ClosureErrorUS)
 	}
+	if trace.StartEpochNS <= 0 || trace.EndEpochNS < trace.StartEpochNS {
+		t.Fatalf("invalid trace epochs: start=%d end=%d", trace.StartEpochNS, trace.EndEpochNS)
+	}
 }
 
 func TestDataSystemStrictAttributionGate(t *testing.T) {

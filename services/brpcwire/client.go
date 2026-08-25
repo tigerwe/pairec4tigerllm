@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,6 +29,15 @@ type Client struct {
 	timeout  time.Duration
 	attempts int
 	nextID   int64
+}
+
+// Session keeps one baidu_std TCP connection alive across sequential calls.
+// Calls on one session are serialized; concurrency is expressed with multiple
+// preconnected sessions.
+type Session struct {
+	client *Client
+	mu     sync.Mutex
+	conn   net.Conn
 }
 
 func NewClient(endpoint, service string, timeout time.Duration, attempts int) (*Client, error) {
@@ -64,6 +74,67 @@ func (c *Client) Call(ctx context.Context, method string, request, response prot
 	return fmt.Errorf("brpc %s failed after %d attempt(s): %w", method, c.attempts, lastErr)
 }
 
+func (c *Client) NewSession() *Session { return &Session{client: c} }
+
+func (s *Session) Connect(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.conn != nil {
+		return nil
+	}
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp", s.client.endpoint)
+	if err != nil {
+		return fmt.Errorf("dial %s failed: %w", s.client.endpoint, err)
+	}
+	s.conn = conn
+	return nil
+}
+
+func (s *Session) Call(ctx context.Context, method string, request, response proto.Message) error {
+	if strings.TrimSpace(method) == "" || request == nil || response == nil {
+		return fmt.Errorf("brpc method, request, and response are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var lastErr error
+	for attempt := 0; attempt < s.client.attempts; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, s.client.timeout)
+		lastErr = nil
+		if s.conn == nil {
+			var dialer net.Dialer
+			s.conn, lastErr = dialer.DialContext(attemptCtx, "tcp", s.client.endpoint)
+		}
+		if lastErr == nil {
+			lastErr = s.client.callOnConn(attemptCtx, s.conn, method, request, response)
+		}
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		_ = s.closeLocked()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return fmt.Errorf("brpc %s failed after %d attempt(s): %w", method, s.client.attempts, lastErr)
+}
+
+func (s *Session) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeLocked()
+}
+
+func (s *Session) closeLocked() error {
+	if s.conn == nil {
+		return nil
+	}
+	err := s.conn.Close()
+	s.conn = nil
+	return err
+}
+
 func (c *Client) callOnce(ctx context.Context, method string, request, response proto.Message) error {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "tcp", c.endpoint)
@@ -71,6 +142,10 @@ func (c *Client) callOnce(ctx context.Context, method string, request, response 
 		return fmt.Errorf("dial %s failed: %w", c.endpoint, err)
 	}
 	defer conn.Close()
+	return c.callOnConn(ctx, conn, method, request, response)
+}
+
+func (c *Client) callOnConn(ctx context.Context, conn net.Conn, method string, request, response proto.Message) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := conn.SetDeadline(deadline); err != nil {
 			return fmt.Errorf("set deadline failed: %w", err)

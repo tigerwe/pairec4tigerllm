@@ -45,7 +45,8 @@ func (m *ServiceTrace) String() string { return proto.CompactTextString(m) }
 func (*ServiceTrace) ProtoMessage()    {}
 
 type HealthRequest struct {
-	Context *TraceContext `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
+	Context        *TraceContext `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
+	PayloadPadding []byte        `protobuf:"bytes,101,opt,name=payload_padding,json=payloadPadding" json:"payload_padding,omitempty"`
 }
 
 func (m *HealthRequest) Reset()         { *m = HealthRequest{} }
@@ -103,9 +104,10 @@ func (m *RankCandidate) String() string { return proto.CompactTextString(m) }
 func (*RankCandidate) ProtoMessage()    {}
 
 type RankRequest struct {
-	Context *TraceContext    `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
-	UserID  *string          `protobuf:"bytes,2,opt,name=user_id,json=userId" json:"user_id,omitempty"`
-	Items   []*RankCandidate `protobuf:"bytes,3,rep,name=items" json:"items,omitempty"`
+	Context        *TraceContext    `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
+	UserID         *string          `protobuf:"bytes,2,opt,name=user_id,json=userId" json:"user_id,omitempty"`
+	Items          []*RankCandidate `protobuf:"bytes,3,rep,name=items" json:"items,omitempty"`
+	PayloadPadding []byte           `protobuf:"bytes,101,opt,name=payload_padding,json=payloadPadding" json:"payload_padding,omitempty"`
 }
 
 func (m *RankRequest) Reset()         { *m = RankRequest{} }

@@ -49,7 +49,14 @@
         "protocol": "brpc",
         "brpc_endpoint": "__RANK_ENDPOINT__",
         "brpc_service_name": "pairec.pipeline.DeepFMRankService",
-        "timeout_ms": 100,
+        "timeout_ms": __RANK_TIMEOUT_MS__,
+        "brpc_payload_bytes": __RANK_BUSINESS_PAYLOAD_BYTES__,
+        "brpc_burst_enabled": __RANK_BURST_ENABLED__,
+        "brpc_burst_concurrency": __RANK_BURST_CONCURRENCY__,
+        "brpc_burst_pool_size": __RANK_BURST_POOL_SIZE__,
+        "brpc_burst_payload_bytes": __RANK_BURST_PAYLOAD_BYTES__,
+        "brpc_burst_preconnect": __RANK_BURST_PRECONNECT__,
+        "brpc_burst_pressure_timeout_ms": __RANK_BURST_PRESSURE_TIMEOUT_MS__,
         "expected_candidates": 50,
         "required_model_role": "__DEEPFM_MODEL_ROLE__"
       }

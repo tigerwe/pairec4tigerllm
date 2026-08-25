@@ -240,7 +240,8 @@
       ],
       "validation_method": "隔离实验链路中向量召回和 DeepFM 精排只允许 BRPC、禁止 HTTP fallback/retry；1000 请求业务输出与 HTTP 基线一致，完整请求级 Trace 有效率至少 99.9%，PaiRec 阶段闭合误差不超过 max(3000us, 5%)，并输出低基数 Prometheus 指标、资源门禁和 HTTP/BRPC p99 A/B。",
       "validation_evidence": "2026-08-08: 工程与正式远端验收完成。统一 pipeline_service.proto、Go baidu_std BRPC wire/client、两个独立 C++ adapter、Python service trace、PaiRec Controller 单一 TraceRecorder、低基数 Prometheus、隔离双容器 K8s 和一键 A/B/资源门禁均已实现；向量与精排零重试且禁止 HTTP fallback，vector Ready 强制 milvus=true。静态验证包含 Python/汇总 unittest 12/12、相关 Go race 与完整 services build。ARM64/Kubernetes 正式工作负载 1000/1000 请求成功，trace valid=1000/1000、missing=0、invalid=0、无 fallback。E2E avg/p50/p95/p99/max=109.784/108.774/117.382/120.622/126.589ms；PaiRec total p99=119.627ms；生成式/向量/DeepFM span p99=108.794/11.923/12.081ms。HTTP 基线100请求p99=118.422ms，纯BRPC p99增量=2.200ms。五容器无重启/OOM/健康故障；PaiRec CPU throttled period=0.068%，其余为0%，全部通过<=5%门禁。QuotaMultiRecall 每请求确认生成式候选在召回阶段被选中。DataSystem attribution_complete=0/1000，按设计明确标记 native TRT KVC request identity 未传播，未从聚合日志伪造归因。最终 classification=PAIREC_PURE_BRPC_OBSERVABILITY_OK。",
-      "next_step": "F18 工程范围已完成。native TRT KVC 精确 request identity 与每请求 Get/Set 归因转入 F19；完成前继续保持 REQUIRE_DATASYSTEM_ATTRIBUTION=0。",
+      "session_progress": "2026-08-25: 完成DeepFM Rank BRPC one-shot压力扩展的本地实现。实验固定1路真实Rank加999路本地终结Health，二者前端均为100KiB protobuf负载；Rank Wrapper剥离padding后才转发后端，保留50候选业务语义。新增worker1 Rank与Wrapper部署、旧master Rank回滚保留、模型SHA一致性检查、Guaranteed QoS和与inference/KVC实际cpuset无交集硬门禁；新增Rank尾流对rerank、pipeline与HTTP响应的请求级归因。Go services全量和Python全量138项通过（skip1）；本机缺BRPC SDK，C++及Kubernetes真机门禁待远端完成。",
+      "next_step": "在master构建包含brpc_rank_burst_wrapper的inference镜像并分发到worker1；先跑REQUESTS=1，要求CPU隔离、模型SHA、业务前端100KiB/后端0B、pressure 999/999、50候选正确性和尾流时序全部通过，再跑REQUESTS=3。native TRT KVC精确归因仍由F19维护。",
       "done_date": "2026-08-08"
     },
     {

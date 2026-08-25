@@ -184,6 +184,17 @@ text = text.replace("__INFERENCE_ENDPOINT__", inference)
 text = text.replace("__DEEPFM_MODEL_ROLE__", role)
 text = text.replace("__VECTOR_ENDPOINT__", vector_endpoint)
 text = text.replace("__RANK_ENDPOINT__", rank_endpoint)
+for old, new in {
+    "__RANK_TIMEOUT_MS__": "100",
+    "__RANK_BUSINESS_PAYLOAD_BYTES__": "0",
+    "__RANK_BURST_ENABLED__": "false",
+    "__RANK_BURST_CONCURRENCY__": "1",
+    "__RANK_BURST_POOL_SIZE__": "1",
+    "__RANK_BURST_PAYLOAD_BYTES__": "102400",
+    "__RANK_BURST_PRECONNECT__": "true",
+    "__RANK_BURST_PRESSURE_TIMEOUT_MS__": "5000",
+}.items():
+    text = text.replace(old, new)
 assert "__" not in text
 config = json.loads(text)
 recalls = {entry["Name"]: json.loads(entry["RecallAlgo"])
@@ -216,6 +227,7 @@ source, target, host, port, vector_host, rank_host = sys.argv[1:]
 text = pathlib.Path(source).read_text()
 text = text.replace("__INFERENCE_HOST__", host).replace("__INFERENCE_PORT__", port)
 text = text.replace("__VECTOR_HOST__", vector_host).replace("__RANK_HOST__", rank_host)
+text = text.replace("__RANK_PORT__", "18211")
 assert "__" not in text
 pathlib.Path(target).write_text(text)
 PY

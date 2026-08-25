@@ -29,14 +29,21 @@ const (
 )
 
 type Config struct {
-	Name               string `json:"name"`
-	Protocol           string `json:"protocol"`
-	ServerURL          string `json:"server_url"`
-	BRPCEndpoint       string `json:"brpc_endpoint"`
-	BRPCServiceName    string `json:"brpc_service_name"`
-	TimeoutMS          int    `json:"timeout_ms"`
-	ExpectedCandidates int    `json:"expected_candidates"`
-	RequiredModelRole  string `json:"required_model_role"`
+	Name                       string `json:"name"`
+	Protocol                   string `json:"protocol"`
+	ServerURL                  string `json:"server_url"`
+	BRPCEndpoint               string `json:"brpc_endpoint"`
+	BRPCServiceName            string `json:"brpc_service_name"`
+	TimeoutMS                  int    `json:"timeout_ms"`
+	ExpectedCandidates         int    `json:"expected_candidates"`
+	RequiredModelRole          string `json:"required_model_role"`
+	BRPCPayloadBytes           int    `json:"brpc_payload_bytes"`
+	BRPCBurstEnabled           bool   `json:"brpc_burst_enabled"`
+	BRPCBurstConcurrency       int    `json:"brpc_burst_concurrency"`
+	BRPCBurstPoolSize          int    `json:"brpc_burst_pool_size"`
+	BRPCBurstPayloadBytes      int    `json:"brpc_burst_payload_bytes"`
+	BRPCBurstPreconnect        bool   `json:"brpc_burst_preconnect"`
+	BRPCBurstPressureTimeoutMS int    `json:"brpc_burst_pressure_timeout_ms"`
 }
 
 type userDefineConfig struct {
@@ -60,25 +67,28 @@ type responseItem struct {
 }
 
 type responseTrace struct {
-	FeatureMS         float64 `json:"feature_ms"`
-	ForwardMS         float64 `json:"forward_ms"`
-	TotalMS           float64 `json:"total_ms"`
-	ProfileMissing    bool    `json:"profile_missing"`
-	UserOOV           bool    `json:"user_oov"`
-	ItemOOVCount      int     `json:"item_oov_count"`
-	CategoryOOVCount  int     `json:"category_oov_count"`
-	GenderOOV         bool    `json:"gender_oov"`
-	AgeOOV            bool    `json:"age_oov"`
-	HistoryValidCount int     `json:"history_valid_count"`
-	HistoryOOVCount   int     `json:"history_oov_count"`
-	ScoreUniqueCount  int     `json:"score_unique_count"`
-	ScoreMin          float64 `json:"score_min"`
-	ScoreMax          float64 `json:"score_max"`
-	FeatureUS         int64   `json:"feature_us"`
-	ComputeUS         int64   `json:"compute_us"`
-	BackendRPCUS      int64   `json:"backend_rpc_us"`
-	BackendTotalUS    int64   `json:"backend_total_us"`
-	TotalUS           int64   `json:"total_us"`
+	FeatureMS            float64 `json:"feature_ms"`
+	ForwardMS            float64 `json:"forward_ms"`
+	TotalMS              float64 `json:"total_ms"`
+	ProfileMissing       bool    `json:"profile_missing"`
+	UserOOV              bool    `json:"user_oov"`
+	ItemOOVCount         int     `json:"item_oov_count"`
+	CategoryOOVCount     int     `json:"category_oov_count"`
+	GenderOOV            bool    `json:"gender_oov"`
+	AgeOOV               bool    `json:"age_oov"`
+	HistoryValidCount    int     `json:"history_valid_count"`
+	HistoryOOVCount      int     `json:"history_oov_count"`
+	ScoreUniqueCount     int     `json:"score_unique_count"`
+	ScoreMin             float64 `json:"score_min"`
+	ScoreMax             float64 `json:"score_max"`
+	FeatureUS            int64   `json:"feature_us"`
+	ComputeUS            int64   `json:"compute_us"`
+	BackendRPCUS         int64   `json:"backend_rpc_us"`
+	BackendTotalUS       int64   `json:"backend_total_us"`
+	TotalUS              int64   `json:"total_us"`
+	ClientStartEpochNS   int64   `json:"client_start_epoch_ns"`
+	ClientEndEpochNS     int64   `json:"client_end_epoch_ns"`
+	BusinessPayloadBytes int     `json:"business_payload_bytes"`
 }
 
 type rankResponse struct {
@@ -95,6 +105,7 @@ type DeepFMRankSort struct {
 	config     Config
 	client     *http.Client
 	brpcClient *pipelineclient.RankClient
+	brpcBurst  *RankBurstCoordinator
 }
 
 func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
@@ -122,6 +133,26 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 	if config.RequiredModelRole == "" {
 		return nil, errors.New("DeepFM required_model_role is required")
 	}
+	if config.BRPCPayloadBytes < 0 || config.BRPCPayloadBytes > 1<<20 {
+		return nil, errors.New("DeepFM rank brpc_payload_bytes must be in [0,1048576]")
+	}
+	if config.BRPCBurstEnabled {
+		if config.BRPCBurstConcurrency < 1 || config.BRPCBurstConcurrency > 1000 {
+			return nil, errors.New("DeepFM rank burst concurrency must be in [1,1000]")
+		}
+		if config.BRPCBurstPoolSize == 0 {
+			config.BRPCBurstPoolSize = config.BRPCBurstConcurrency
+		}
+		if config.BRPCBurstPayloadBytes < 0 || config.BRPCBurstPayloadBytes > 1<<20 {
+			return nil, errors.New("DeepFM rank burst payload bytes must be in [0,1048576]")
+		}
+		if !config.BRPCBurstPreconnect {
+			return nil, errors.New("DeepFM rank burst requires strict preconnect")
+		}
+		if config.BRPCBurstPressureTimeoutMS <= 0 {
+			return nil, errors.New("DeepFM rank burst pressure timeout must be positive")
+		}
+	}
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: (&net.Dialer{
@@ -143,6 +174,20 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 			return nil, err
 		}
 		ranker.brpcClient = client
+		if config.BRPCBurstEnabled {
+			burst, err := NewRankBurstCoordinator(client, RankBurstConfig{
+				Concurrency:     config.BRPCBurstConcurrency,
+				PoolSize:        config.BRPCBurstPoolSize,
+				PressureBytes:   config.BRPCBurstPayloadBytes,
+				BusinessBytes:   config.BRPCPayloadBytes,
+				BusinessTimeout: time.Duration(config.TimeoutMS) * time.Millisecond,
+				PressureTimeout: time.Duration(config.BRPCBurstPressureTimeoutMS) * time.Millisecond,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("initialize DeepFM rank burst: %w", err)
+			}
+			ranker.brpcBurst = burst
+		}
 	}
 	return ranker, nil
 }
@@ -263,6 +308,9 @@ func (s *DeepFMRankSort) Sort(sortData *pairecsort.SortData) error {
 		"service_feature_us":     ranked.Trace.FeatureUS,
 		"service_compute_us":     ranked.Trace.ComputeUS,
 		"adapter_backend_rpc_us": ranked.Trace.BackendRPCUS,
+		"client_start_epoch_ns":  ranked.Trace.ClientStartEpochNS,
+		"client_end_epoch_ns":    ranked.Trace.ClientEndEpochNS,
+		"business_payload_bytes": ranked.Trace.BusinessPayloadBytes,
 		"client_total_ms":        clientTotalMS,
 		"reordered":              reordered,
 		"profile_missing":        ranked.Trace.ProfileMissing,
@@ -280,27 +328,30 @@ func (s *DeepFMRankSort) Sort(sortData *pairecsort.SortData) error {
 	sortData.Context.AddContextParam(RankTraceContextKey, trace)
 	if os.Getenv("PAIREC_TRACE_STDOUT") == "1" {
 		encoded, _ := json.Marshal(map[string]interface{}{
-			"event":               "deepfm_rank_complete",
-			"request_id":          payload.RequestID,
-			"model_version":       ranked.ModelVersion,
-			"model_role":          ranked.ModelRole,
-			"candidate_count":     len(items),
-			"service_feature_ms":  ranked.Trace.FeatureMS,
-			"service_forward_ms":  ranked.Trace.ForwardMS,
-			"service_total_ms":    ranked.Trace.TotalMS,
-			"client_total_ms":     clientTotalMS,
-			"reordered":           reordered,
-			"profile_missing":     ranked.Trace.ProfileMissing,
-			"user_oov":            ranked.Trace.UserOOV,
-			"item_oov_count":      ranked.Trace.ItemOOVCount,
-			"category_oov_count":  ranked.Trace.CategoryOOVCount,
-			"gender_oov":          ranked.Trace.GenderOOV,
-			"age_oov":             ranked.Trace.AgeOOV,
-			"history_valid_count": ranked.Trace.HistoryValidCount,
-			"history_oov_count":   ranked.Trace.HistoryOOVCount,
-			"score_unique_count":  ranked.Trace.ScoreUniqueCount,
-			"score_min":           ranked.Trace.ScoreMin,
-			"score_max":           ranked.Trace.ScoreMax,
+			"event":                  "deepfm_rank_complete",
+			"request_id":             payload.RequestID,
+			"model_version":          ranked.ModelVersion,
+			"model_role":             ranked.ModelRole,
+			"candidate_count":        len(items),
+			"service_feature_ms":     ranked.Trace.FeatureMS,
+			"service_forward_ms":     ranked.Trace.ForwardMS,
+			"service_total_ms":       ranked.Trace.TotalMS,
+			"client_total_ms":        clientTotalMS,
+			"client_start_epoch_ns":  ranked.Trace.ClientStartEpochNS,
+			"client_end_epoch_ns":    ranked.Trace.ClientEndEpochNS,
+			"business_payload_bytes": ranked.Trace.BusinessPayloadBytes,
+			"reordered":              reordered,
+			"profile_missing":        ranked.Trace.ProfileMissing,
+			"user_oov":               ranked.Trace.UserOOV,
+			"item_oov_count":         ranked.Trace.ItemOOVCount,
+			"category_oov_count":     ranked.Trace.CategoryOOVCount,
+			"gender_oov":             ranked.Trace.GenderOOV,
+			"age_oov":                ranked.Trace.AgeOOV,
+			"history_valid_count":    ranked.Trace.HistoryValidCount,
+			"history_oov_count":      ranked.Trace.HistoryOOVCount,
+			"score_unique_count":     ranked.Trace.ScoreUniqueCount,
+			"score_min":              ranked.Trace.ScoreMin,
+			"score_max":              ranked.Trace.ScoreMax,
 		})
 		fmt.Println(string(encoded))
 	}
@@ -349,16 +400,25 @@ func (s *DeepFMRankSort) callBRPC(payload rankRequest) (rankResponse, error) {
 	}
 	timeout := time.Duration(s.config.TimeoutMS) * time.Millisecond
 	request := &pipelinepb.RankRequest{
-		Context: pipelineclient.NewTraceContext(payload.RequestID, "deepfm-rank", "sort", timeout),
-		UserID:  proto.String(payload.UserID),
-		Items:   make([]*pipelinepb.RankCandidate, 0, len(payload.Items)),
+		Context:        pipelineclient.NewTraceContext(payload.RequestID, "deepfm-rank", "sort", timeout),
+		UserID:         proto.String(payload.UserID),
+		Items:          make([]*pipelinepb.RankCandidate, 0, len(payload.Items)),
+		PayloadPadding: make([]byte, s.config.BRPCPayloadBytes),
 	}
 	for _, item := range payload.Items {
 		request.Items = append(request.Items, &pipelinepb.RankCandidate{ItemID: proto.String(item.ItemID)})
 	}
-	callContext, cancel := stdcontext.WithTimeout(stdcontext.Background(), timeout)
-	defer cancel()
-	response, err := s.brpcClient.Rank(callContext, request)
+	callStarted := time.Now()
+	var response *pipelinepb.RankResponse
+	var err error
+	if s.brpcBurst != nil {
+		response, err = s.brpcBurst.Rank(request, payload.RequestID)
+	} else {
+		callContext, cancel := stdcontext.WithTimeout(stdcontext.Background(), timeout)
+		response, err = s.brpcClient.Rank(callContext, request)
+		cancel()
+	}
+	callEnded := time.Now()
 	if err != nil {
 		return rankResponse{}, fmt.Errorf("call BRPC rank service: %w", err)
 	}
@@ -369,6 +429,9 @@ func (s *DeepFMRankSort) callBRPC(payload rankRequest) (rankResponse, error) {
 		ModelVersion: pipelinepb.String(response.ModelVersion),
 		ModelRole:    pipelinepb.String(response.ModelRole),
 	}
+	ranked.Trace.ClientStartEpochNS = callStarted.UnixNano()
+	ranked.Trace.ClientEndEpochNS = callEnded.UnixNano()
+	ranked.Trace.BusinessPayloadBytes = len(request.PayloadPadding)
 	for _, item := range response.Items {
 		ranked.Items = append(ranked.Items, responseItem{
 			ItemID: pipelinepb.String(item.ItemID), Score: pipelinepb.Float64(item.Score),
