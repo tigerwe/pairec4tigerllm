@@ -24,6 +24,11 @@ kubectl get node worker1 >/dev/null 2>&1 || die "Kubernetes node worker1 does no
 ssh "$WRAPPER_WORKER" \
   "test -x '${WRAPPER_HOST_BIN}' && ls -lh '${WRAPPER_HOST_BIN}'" \
   || die "wrapper binary is missing on worker1: ${WRAPPER_HOST_BIN}"
+expected_wrapper_sha="$(ssh "$WRAPPER_WORKER" \
+  "sha256sum '${WRAPPER_HOST_BIN}'" | awk '{print $1}')"
+[[ "$expected_wrapper_sha" =~ ^[0-9a-f]{64}$ ]] \
+  || die "failed to read wrapper SHA256 on worker1"
+echo "worker_wrapper_sha256=${expected_wrapper_sha}"
 
 echo "== Backend preflight =="
 backend_host="${BACKEND_ENDPOINT%:*}"
@@ -33,12 +38,28 @@ timeout 3 bash -c "cat </dev/null >/dev/tcp/${backend_host}/${backend_port}" \
 
 echo "== Deploy BRPC burst wrapper =="
 kubectl apply -f "$MANIFEST"
+# The executable is a hostPath File mount. Replacing the host file preserves
+# the old bind-mount inode in an existing Pod, so every deployment must restart.
+kubectl -n "$NAMESPACE" rollout restart "deployment/${DEPLOYMENT}"
 kubectl -n "$NAMESPACE" rollout status "deployment/${DEPLOYMENT}" --timeout="$ROLLOUT_TIMEOUT"
 kubectl -n "$NAMESPACE" get pod -l "app=${DEPLOYMENT}" -o wide
 
 POD="$(kubectl -n "$NAMESPACE" get pod -l "app=${DEPLOYMENT}" \
   -o jsonpath='{.items[0].metadata.name}')"
 [ -n "$POD" ] || die "wrapper pod was not found"
+
+echo "== Wrapper binary identity =="
+mounted_wrapper_sha="$(kubectl -n "$NAMESPACE" exec "$POD" -- \
+  env -u LD_PRELOAD sha256sum /opt/pairec-brpc/bin/brpc_burst_wrapper \
+  | awk '{print $1}')"
+running_wrapper_sha="$(kubectl -n "$NAMESPACE" exec "$POD" -- \
+  env -u LD_PRELOAD sha256sum /proc/1/exe | awk '{print $1}')"
+echo "mounted_wrapper_sha256=${mounted_wrapper_sha}"
+echo "running_wrapper_sha256=${running_wrapper_sha}"
+[[ "$mounted_wrapper_sha" = "$expected_wrapper_sha" ]] \
+  || die "Pod-mounted Wrapper binary does not match worker1 host binary"
+[[ "$running_wrapper_sha" = "$expected_wrapper_sha" ]] \
+  || die "running Wrapper process does not match worker1 host binary"
 
 echo "== Wrapper runtime and CPU placement =="
 qos_class="$(kubectl -n "$NAMESPACE" get pod "$POD" \

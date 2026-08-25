@@ -18,6 +18,7 @@ MATRIX = ROOT / "scripts" / "benchmark_pairec_brpc_wrapper_kvc_matrix.sh"
 BRPC_PROBE = ROOT / "scripts" / "probe_go_brpc_client.go"
 FULL_DEPLOY = ROOT / "scripts" / "deploy_and_validate_pairec_brpc_wrapper_full.sh"
 BRPC_WRAPPER_CPP = ROOT / "cpp" / "brpc_gateway" / "brpc_burst_wrapper.cpp"
+BRPC_WRAPPER_APPLY = ROOT / "scripts" / "k8s_apply_brpc_burst_wrapper_188.sh"
 FULL_CONFIG = ROOT / "configs" / "pairec_config.brpc_wrapper_full.json"
 COLLECTOR = ROOT / "scripts" / "collect_datasystem_worker_metrics.sh"
 METRICS_PY = ROOT / "scripts" / "datasystem_worker_metrics.py"
@@ -501,6 +502,13 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn('backend_payload_bytes=', wrapper)
         self.assertIn('health_calls_during_recommend=', wrapper)
         self.assertIn('health_payload_bytes_during_recommend=', wrapper)
+
+    def test_wrapper_hostpath_deploy_restarts_and_verifies_binary_identity(self):
+        deploy = BRPC_WRAPPER_APPLY.read_text()
+        self.assertIn('rollout restart "deployment/${DEPLOYMENT}"', deploy)
+        self.assertIn('sha256sum /opt/pairec-brpc/bin/brpc_burst_wrapper', deploy)
+        self.assertIn('sha256sum /proc/1/exe', deploy)
+        self.assertIn('running Wrapper process does not match', deploy)
 
     def test_contention_ds_worker_hook(self):
         text = CONTENTION.read_text()
