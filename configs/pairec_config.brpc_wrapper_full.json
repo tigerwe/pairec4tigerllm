@@ -24,7 +24,7 @@
       "RecallType": "GenerativeRecall",
       "RecallCount": 50,
       "CacheTime": 0,
-      "RecallAlgo": "{\"protocol\":\"brpc\",\"brpc_endpoint\":\"__WRAPPER_ENDPOINT__\",\"brpc_service_name\":\"pairec.inference.RecommendService\",\"brpc_fallback_to_http\":false,\"brpc_burst_enabled\":true,\"brpc_burst_concurrency\":__BURST_CONCURRENCY__,\"brpc_burst_pool_size\":__BURST_POOL_SIZE__,\"brpc_burst_active_connections\":__BURST_ACTIVE_CONNECTIONS__,\"brpc_burst_cpu_shards\":__BURST_CPU_SHARDS__,\"brpc_burst_payload_bytes\":__BURST_PAYLOAD_BYTES__,\"brpc_burst_preconnect\":true,\"brpc_burst_pressure_timeout_ms\":5000,\"timeout_ms\":5000,\"max_retries\":0,\"topk\":50,\"temperature\":1.0,\"beam_width\":1,\"history_from\":\"user_feature\",\"history_feature_name\":\"click_history\",\"history_delimiter\":\",\",\"history_max_length\":20,\"feature_source\":\"file\"}"
+      "RecallAlgo": "{\"protocol\":\"brpc\",\"brpc_endpoint\":\"__WRAPPER_ENDPOINT__\",\"brpc_service_name\":\"pairec.inference.RecommendService\",\"brpc_fallback_to_http\":false,\"brpc_payload_bytes\":__BUSINESS_PAYLOAD_BYTES__,\"brpc_burst_enabled\":true,\"brpc_burst_concurrency\":__BURST_CONCURRENCY__,\"brpc_burst_pool_size\":__BURST_POOL_SIZE__,\"brpc_burst_active_connections\":__BURST_ACTIVE_CONNECTIONS__,\"brpc_burst_cpu_shards\":__BURST_CPU_SHARDS__,\"brpc_burst_payload_bytes\":__BURST_PAYLOAD_BYTES__,\"brpc_burst_preconnect\":true,\"brpc_burst_pressure_timeout_ms\":5000,\"timeout_ms\":5000,\"max_retries\":0,\"topk\":50,\"temperature\":1.0,\"beam_width\":1,\"history_from\":\"user_feature\",\"history_feature_name\":\"click_history\",\"history_delimiter\":\",\",\"history_max_length\":20,\"feature_source\":\"file\"}"
     },
     {
       "Name": "milvus_recall",

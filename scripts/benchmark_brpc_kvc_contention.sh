@@ -19,6 +19,8 @@ BRPC_LOAD_REQUESTS="${BRPC_LOAD_REQUESTS:-1000000}"
 BRPC_LOAD_TIMEOUT_MS="${BRPC_LOAD_TIMEOUT_MS:-5000}"
 BRPC_LOAD_REUSE_CONNECTIONS="${BRPC_LOAD_REUSE_CONNECTIONS:-1}"
 BRPC_LOAD_READY_TIMEOUT_SECONDS="${BRPC_LOAD_READY_TIMEOUT_SECONDS:-30}"
+BRPC_LOAD_READY_AFTER_FIRST_ROUND="${BRPC_LOAD_READY_AFTER_FIRST_ROUND:-0}"
+BRPC_LOAD_READY_MIN_ACTIVE="${BRPC_LOAD_READY_MIN_ACTIVE:-$BRPC_LOAD_CONCURRENCY}"
 BRPC_PROBE_BIN="${BRPC_PROBE_BIN:-/tmp/probe-go-brpc-client}"
 
 KVC_LOAD_HOST="${KVC_LOAD_HOST:-worker1}"
@@ -177,6 +179,7 @@ validate() {
     "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" "$PRIME_REQUESTS" \
     "$BRPC_LOAD_QPS" "$BRPC_LOAD_CONCURRENCY" "$BRPC_LOAD_PAYLOAD_BYTES" "$BRPC_LOAD_REQUESTS" \
     "$BRPC_LOAD_TIMEOUT_MS" "$BRPC_LOAD_READY_TIMEOUT_SECONDS" "$PRIME_MAX_ATTEMPTS" \
+		"$BRPC_LOAD_READY_MIN_ACTIVE" \
     "$PRIME_RETRY_DELAY_SECONDS" "$ROUND_COOLDOWN_SECONDS" "$KVC_LOAD_READY_TIMEOUT_SECONDS" \
     "$INFERENCE_ROLLOUT_TIMEOUT_SECONDS" "$INFERENCE_CONTAINER_RESTART_TIMEOUT_SECONDS" \
     "$MIN_ROOT_AVAILABLE_KB" \
@@ -197,6 +200,9 @@ validate() {
   [ "$BRPC_LOAD_REQUESTS" -ge "$BRPC_LOAD_CONCURRENCY" ] \
     || die "BRPC_LOAD_REQUESTS must be at least BRPC_LOAD_CONCURRENCY"
   [ "$BRPC_LOAD_READY_TIMEOUT_SECONDS" -gt 0 ] || die "BRPC_LOAD_READY_TIMEOUT_SECONDS must be positive"
+  [ "$BRPC_LOAD_READY_MIN_ACTIVE" -gt 0 ] \
+    && [ "$BRPC_LOAD_READY_MIN_ACTIVE" -le "$BRPC_LOAD_CONCURRENCY" ] \
+    || die "BRPC_LOAD_READY_MIN_ACTIVE must be in [1,BRPC_LOAD_CONCURRENCY]"
   [ "$KVC_LOAD_READY_TIMEOUT_SECONDS" -gt 0 ] || die "KVC_LOAD_READY_TIMEOUT_SECONDS must be positive"
   if mode_has_kvc; then
     [ "$KVC_GET_CLIENTS" -gt 0 ] || die "KVC_GET_CLIENTS must be positive"
@@ -209,6 +215,10 @@ validate() {
   case "$BRPC_LOAD_REUSE_CONNECTIONS" in
     0|1) ;;
     *) die "BRPC_LOAD_REUSE_CONNECTIONS must be 0 or 1" ;;
+  esac
+  case "$BRPC_LOAD_READY_AFTER_FIRST_ROUND" in
+    0|1) ;;
+    *) die "BRPC_LOAD_READY_AFTER_FIRST_ROUND must be 0 or 1" ;;
   esac
   case "$RESET_INFERENCE_BEFORE_ROUND" in
     0|1) ;;
@@ -404,6 +414,8 @@ start_brpc_load() {
     return
   fi
 	local ready_file="${round_dir}/brpc-pressure.ready"
+	local pressure_started_ns
+	pressure_started_ns="$(date +%s%N)"
 	rm -f "$ready_file"
 	"$BRPC_PROBE_BIN" \
 		--endpoint="$BRPC_LOAD_ENDPOINT" \
@@ -415,6 +427,8 @@ start_brpc_load() {
     --timeout_ms="$BRPC_LOAD_TIMEOUT_MS" \
 		--max_retries=0 \
 		--reuse_connections="$BRPC_LOAD_REUSE_CONNECTIONS" \
+		--ready_after_first_round="$BRPC_LOAD_READY_AFTER_FIRST_ROUND" \
+		--ready_min_active="$BRPC_LOAD_READY_MIN_ACTIVE" \
 		--ready_file="$ready_file" \
 		--stats_file="${round_dir}/brpc-pressure-stats.jsonl" \
 		--stats_interval_ms=1000 \
@@ -425,6 +439,40 @@ start_brpc_load() {
 	local attempt
 	for attempt in $(seq 1 "$BRPC_LOAD_READY_TIMEOUT_SECONDS"); do
 		if [ -s "$ready_file" ]; then
+			python3 - "$ready_file" "$BRPC_LOAD_CONCURRENCY" \
+				"$BRPC_LOAD_READY_AFTER_FIRST_ROUND" "$BRPC_LOAD_READY_MIN_ACTIVE" <<'PY'
+import pathlib, sys
+values = {}
+for token in pathlib.Path(sys.argv[1]).read_text().split():
+    if "=" in token:
+        key, value = token.split("=", 1)
+        values[key] = value
+workers = int(sys.argv[2])
+strict = sys.argv[3] == "1"
+minimum = int(sys.argv[4])
+assert int(values["workers"]) == workers, values
+assert int(values["active_calls"]) >= minimum, values
+assert int(values["errors"]) == 0, values
+if strict:
+    assert values["ready_after_first_round"] == "true", values
+    assert int(values["first_round_completed"]) == workers, values
+    assert int(values["second_round_started"]) == workers, values
+PY
+			local pressure_ready_ns
+			pressure_ready_ns="$(date +%s%N)"
+			python3 - "${round_dir}/brpc-pressure-control.json" \
+				"$pressure_started_ns" "$pressure_ready_ns" <<'PY'
+import json, pathlib, sys
+started = int(sys.argv[2])
+ready = int(sys.argv[3])
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "event": "brpc_pressure_ready",
+    "pressure_started_epoch_ns": started,
+    "pressure_ready_epoch_ns": ready,
+    "ready_wait_ms": (ready - started) / 1_000_000.0,
+    "included_in_client_e2e": False,
+}) + "\n")
+PY
 			return
 		fi
 		if ! kill -0 "$BRPC_LOAD_PID" >/dev/null 2>&1; then
@@ -1152,6 +1200,7 @@ summarize() {
     "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" \
     "$STRICT_COUNTS" "$RESULT_JSON" "$KVC_PRESSURE_ENGINE" "$KVC_GET_CLIENTS" "$KVC_SET_CLIENTS" \
     "$KVC_DSBENCH_SUSTAINED" "$BRPC_LOAD_CONCURRENCY" "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" \
+    "$BRPC_LOAD_READY_AFTER_FIRST_ROUND" "$BRPC_LOAD_READY_MIN_ACTIVE" \
     <<'PY' | tee "$SUMMARY_TXT"
 import glob
 import json
@@ -1164,8 +1213,8 @@ import sys
     out_dir, mode, repeats, expected_offloads, expected_onboards,
     expected_onboards_min, expected_onboards_max, strict_counts, result_path,
     pressure_engine, get_clients, set_clients, dsbench_sustained, brpc_load_concurrency,
-    require_exact_attribution,
-) = sys.argv[1:16]
+    require_exact_attribution, brpc_ready_after_first_round, brpc_ready_min_active,
+) = sys.argv[1:18]
 repeats = int(repeats)
 expected_offloads = int(expected_offloads)
 expected_onboards = int(expected_onboards)
@@ -1177,6 +1226,8 @@ set_clients = int(set_clients)
 brpc_load_concurrency = int(brpc_load_concurrency)
 dsbench_sustained = dsbench_sustained == "1"
 require_exact_attribution = require_exact_attribution == "1"
+brpc_ready_after_first_round = brpc_ready_after_first_round == "1"
+brpc_ready_min_active = int(brpc_ready_min_active)
 kvc_pressure_required = (
     mode in {"kvc-get", "kvc-set", "kvc-mixed", "combined"}
     and (pressure_engine == "persistent" or dsbench_sustained)
@@ -1322,6 +1373,7 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
     kvc_set_pressure = kvc_pressure_by_action.get("set", {})
     kvc_pressure_ready = read_key_values(os.path.join(round_dir, "kvc-pressure-ready.txt"))
     brpc_pressure = read_last_json(os.path.join(round_dir, "brpc-pressure-stats.jsonl"))
+    brpc_pressure_control = read_last_json(os.path.join(round_dir, "brpc-pressure-control.json"))
     brpc_pressure_ready = read_key_values(os.path.join(round_dir, "brpc-pressure.ready"))
     brpc_pressure_cpu = cpu_stat_delta(
         os.path.join(round_dir, "brpc-pressure-cpu-stat.before"),
@@ -1393,14 +1445,36 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
         kvc_pressure_qps = kvc_get_qps + kvc_set_qps
         kvc_pressure_gbps = kvc_get_gbps + kvc_set_gbps
     kvc_pressure_max_active = max(kvc_get_max_inflight, kvc_set_max_inflight)
-    brpc_pressure_calls = int(number(brpc_pressure.get("calls")))
-    brpc_pressure_errors = int(number(brpc_pressure.get("errors")))
+    brpc_pressure_calls = max(
+        int(number(brpc_pressure.get("calls"))),
+        int(number(brpc_pressure_ready.get("calls"))),
+    )
+    brpc_pressure_errors = max(
+        int(number(brpc_pressure.get("errors"))),
+        int(number(brpc_pressure_ready.get("errors"))),
+    )
     brpc_pressure_max_active = max(
         int(number(brpc_pressure.get("max_active_calls"))),
         int(number(brpc_pressure.get("active_calls"))),
         int(number(brpc_pressure.get("max_active"))),
         int(number(brpc_pressure_ready.get("max_active"))),
         int(number(brpc_pressure_ready.get("active_calls"))),
+    )
+    brpc_ready_workers = int(number(brpc_pressure_ready.get("workers")))
+    brpc_ready_first_completed = int(number(brpc_pressure_ready.get("first_round_completed")))
+    brpc_ready_second_started = int(number(brpc_pressure_ready.get("second_round_started")))
+    brpc_ready_active = int(number(brpc_pressure_ready.get("active_calls")))
+    brpc_ready_errors = int(number(brpc_pressure_ready.get("errors")))
+    brpc_strict_ready_ok = (
+        not brpc_ready_after_first_round
+        or (
+            brpc_pressure_ready.get("ready_after_first_round") == "true"
+            and brpc_ready_workers == brpc_load_concurrency
+            and brpc_ready_first_completed == brpc_load_concurrency
+            and brpc_ready_second_started == brpc_load_concurrency
+            and brpc_ready_active >= brpc_ready_min_active
+            and brpc_ready_errors == 0
+        )
     )
     if not kvc_pressure_required:
         kvc_pressure_ok = True
@@ -1447,7 +1521,8 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
         or (
             brpc_pressure_calls > 0
             and brpc_pressure_errors == 0
-            and brpc_pressure_max_active >= brpc_load_concurrency
+            and brpc_pressure_max_active >= brpc_ready_min_active
+            and brpc_strict_ready_ok
         )
     )
     pressure_ok = kvc_pressure_ok and brpc_pressure_ok
@@ -1498,9 +1573,19 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
         "pressure_gbps": number(brpc_pressure.get("gbps")) if brpc_pressure_required else kvc_pressure_gbps,
         "pressure_max_active_calls": max(brpc_pressure_max_active, kvc_pressure_max_active),
         "brpc_pressure_ok": brpc_pressure_ok,
-        "brpc_pressure_qps": number(brpc_pressure.get("qps")),
-        "brpc_pressure_gbps": number(brpc_pressure.get("gbps")),
+        "brpc_pressure_qps": number(
+            brpc_pressure.get("qps"), number(brpc_pressure_ready.get("qps"))),
+        "brpc_pressure_gbps": number(
+            brpc_pressure.get("gbps"), number(brpc_pressure_ready.get("gbps"))),
         "brpc_pressure_max_active": brpc_pressure_max_active,
+        "brpc_pressure_ready_workers": brpc_ready_workers,
+        "brpc_pressure_first_round_completed": brpc_ready_first_completed,
+        "brpc_pressure_second_round_started": brpc_ready_second_started,
+        "brpc_pressure_active_at_ready": brpc_ready_active,
+        "brpc_pressure_ready_errors": brpc_ready_errors,
+        "brpc_pressure_ready_wait_ms": number(brpc_pressure_control.get("ready_wait_ms")),
+        "brpc_pressure_ready_wait_included_in_e2e": (
+            brpc_pressure_control.get("included_in_client_e2e") is True),
         "brpc_pressure_cpu_stat_available": brpc_pressure_cpu["available"],
         "brpc_pressure_cpu_periods": brpc_pressure_cpu["periods"],
         "brpc_pressure_cpu_throttled_periods": brpc_pressure_cpu["throttled_periods"],
@@ -1639,6 +1724,8 @@ brpc_load_concurrency=${BRPC_LOAD_CONCURRENCY}
 brpc_load_qps=${BRPC_LOAD_QPS}
 brpc_load_payload_bytes=${BRPC_LOAD_PAYLOAD_BYTES}
 brpc_load_reuse_connections=${BRPC_LOAD_REUSE_CONNECTIONS}
+brpc_load_ready_after_first_round=${BRPC_LOAD_READY_AFTER_FIRST_ROUND}
+brpc_load_ready_min_active=${BRPC_LOAD_READY_MIN_ACTIVE}
 brpc_load_pod_selector=${BRPC_LOAD_POD_SELECTOR}
 brpc_load_container=${BRPC_LOAD_CONTAINER}
 kvc_load_host_configured=${KVC_LOAD_HOST_ORIGINAL}

@@ -164,8 +164,11 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
 
     double backend_rpc_ms = 0.0;
     std::string error;
+    const size_t front_payload_bytes = request->payload_padding().size();
+    pairec::inference::RecommendRequest backend_request(*request);
+    backend_request.clear_payload_padding();
     const bool ok = forwarder_->Recommend(
-        *request, response, &backend_rpc_ms, &error);
+        backend_request, response, &backend_rpc_ms, &error);
     wrapper_timer.stop();
     active_recommend_.fetch_sub(1, std::memory_order_relaxed);
 
@@ -200,6 +203,8 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
               << " active_health_at_start=" << health_at_start
               << " max_active_health=" << max_health
               << " max_active_total=" << max_health + 1
+              << " front_payload_bytes=" << front_payload_bytes
+              << " backend_payload_bytes=" << backend_request.payload_padding().size()
               << " backend=" << backend_
               << " error=" << (error.empty() ? "none" : error) << std::endl;
   }

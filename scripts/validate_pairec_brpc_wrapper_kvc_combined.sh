@@ -12,6 +12,13 @@ WARMUP_REQUESTS=${WARMUP_REQUESTS:-1}
 BURST_POOL_SIZE=${BURST_POOL_SIZE:-10000}
 BURST_ACTIVE_CONNECTIONS=${BURST_ACTIVE_CONNECTIONS:-$WRAPPER_CONCURRENCY}
 BURST_PAYLOAD_BYTES=${BURST_PAYLOAD_BYTES:-0}
+BUSINESS_PAYLOAD_BYTES=${BUSINESS_PAYLOAD_BYTES:-102400}
+BRPC_PRESSURE_PAYLOAD_BYTES=${BRPC_PRESSURE_PAYLOAD_BYTES:-102400}
+WRAPPER_ENDPOINT=${WRAPPER_ENDPOINT:-192.168.100.11:18103}
+BRPC_PRESSURE_ENABLED=${BRPC_PRESSURE_ENABLED:-}
+BRPC_PRESSURE_CONCURRENCY=${BRPC_PRESSURE_CONCURRENCY:-999}
+BRPC_PRESSURE_READY_MIN_ACTIVE=${BRPC_PRESSURE_READY_MIN_ACTIVE:-950}
+BRPC_PRESSURE_REQUESTS=${BRPC_PRESSURE_REQUESTS:-1000000}
 OUTPUT_DIR=${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-kvc-combined/$(date +%Y%m%d-%H%M%S)-c${KVC_CONCURRENCY}-n${REQUESTS}}
 KVC_OVERLAY_BACKUP=${KVC_OVERLAY_BACKUP:-$OUTPUT_DIR/kvc-deployment-before.json}
 WRAPPER_OUTPUT_DIR=${WRAPPER_OUTPUT_DIR:-$OUTPUT_DIR/wrapper}
@@ -30,6 +37,26 @@ mkdir -p "$OUTPUT_DIR"
 [[ "$KVC_CONCURRENCY" =~ ^[1-9][0-9]*$ ]] && (( KVC_CONCURRENCY <= 256 )) \
   || die "KVC_CONCURRENCY must be between 1 and 256"
 [[ "$WRAPPER_CONCURRENCY" =~ ^(1|1000)$ ]] || die "WRAPPER_CONCURRENCY must be 1 or 1000"
+if [[ -z "$BRPC_PRESSURE_ENABLED" ]]; then
+  BRPC_PRESSURE_ENABLED=0
+  [[ "$WRAPPER_CONCURRENCY" = 1 ]] || BRPC_PRESSURE_ENABLED=1
+fi
+[[ "$BRPC_PRESSURE_ENABLED" = 0 || "$BRPC_PRESSURE_ENABLED" = 1 ]] \
+  || die "BRPC_PRESSURE_ENABLED must be 0 or 1"
+[[ "$BRPC_PRESSURE_CONCURRENCY" =~ ^[1-9][0-9]*$ ]] \
+  || die "BRPC_PRESSURE_CONCURRENCY must be positive"
+[[ "$BRPC_PRESSURE_READY_MIN_ACTIVE" =~ ^[1-9][0-9]*$ ]] \
+  && (( BRPC_PRESSURE_READY_MIN_ACTIVE <= BRPC_PRESSURE_CONCURRENCY )) \
+  || die "BRPC_PRESSURE_READY_MIN_ACTIVE must be in [1,BRPC_PRESSURE_CONCURRENCY]"
+[[ "$BUSINESS_PAYLOAD_BYTES" =~ ^[0-9]+$ ]] && (( BUSINESS_PAYLOAD_BYTES <= 1048576 )) \
+  || die "BUSINESS_PAYLOAD_BYTES must be in [0,1048576]"
+[[ "$BRPC_PRESSURE_PAYLOAD_BYTES" =~ ^[1-9][0-9]*$ ]] \
+  && (( BRPC_PRESSURE_PAYLOAD_BYTES <= 1048576 )) \
+  || die "BRPC_PRESSURE_PAYLOAD_BYTES must be in [1,1048576]"
+if [[ "$BRPC_PRESSURE_ENABLED" = 1 ]]; then
+  (( WRAPPER_CONCURRENCY == BRPC_PRESSURE_CONCURRENCY + 1 )) \
+    || die "WRAPPER_CONCURRENCY must equal BRPC_PRESSURE_CONCURRENCY + 1"
+fi
 [[ "$KVC_PRESSURE_KEY_COUNT" =~ ^[0-9]+$ ]] || die "KVC_PRESSURE_KEY_COUNT must be non-negative"
 (( KVC_PRESSURE_KEY_COUNT <= KVC_CONCURRENCY - 1 )) \
   || die "KVC_PRESSURE_KEY_COUNT must not exceed KVC pressure lanes"
@@ -89,9 +116,9 @@ NAMESPACE="$NAMESPACE" DEPLOYMENT=inference-brpc-trtllm \
 echo "== Deploy preconnected BRPC Wrapper full chain =="
 set +e
 NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
-  BURST_CONCURRENCY="$WRAPPER_CONCURRENCY" BURST_POOL_SIZE="$BURST_POOL_SIZE" \
-  BURST_ACTIVE_CONNECTIONS="$BURST_ACTIVE_CONNECTIONS" \
-  BURST_PAYLOAD_BYTES="$BURST_PAYLOAD_BYTES" \
+  WRAPPER_ENDPOINT="$WRAPPER_ENDPOINT" \
+  BURST_CONCURRENCY=1 BURST_POOL_SIZE=1 BURST_ACTIVE_CONNECTIONS=1 \
+  BURST_PAYLOAD_BYTES=0 BUSINESS_PAYLOAD_BYTES="$BUSINESS_PAYLOAD_BYTES" \
   BUILD_PAIREC_IMAGE=0 IMPORT_PAIREC_IMAGE=0 \
   OUTPUT_DIR="$WRAPPER_OUTPUT_DIR" \
   bash scripts/deploy_and_validate_pairec_brpc_wrapper_full.sh \
@@ -102,8 +129,18 @@ set -e
 
 echo "== Run KVC contention through the deployed BRPC Wrapper =="
 STARTED_AT="$(date --iso-8601=seconds)"
+contention_mode=baseline
+[[ "$BRPC_PRESSURE_ENABLED" = 0 ]] || contention_mode=brpc
 set +e
-NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE=baseline \
+NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE="$contention_mode" \
+  BRPC_LOAD_ENDPOINT="$WRAPPER_ENDPOINT" \
+  BRPC_LOAD_CONCURRENCY="$BRPC_PRESSURE_CONCURRENCY" \
+  BRPC_LOAD_PAYLOAD_BYTES="$BRPC_PRESSURE_PAYLOAD_BYTES" \
+  BRPC_LOAD_REQUESTS="$BRPC_PRESSURE_REQUESTS" BRPC_LOAD_QPS=0 \
+  BRPC_LOAD_REUSE_CONNECTIONS=1 BRPC_LOAD_READY_AFTER_FIRST_ROUND=1 \
+  BRPC_LOAD_READY_MIN_ACTIVE="$BRPC_PRESSURE_READY_MIN_ACTIVE" \
+  BRPC_LOAD_POD_SELECTOR=app=brpc-burst-wrapper \
+  BRPC_LOAD_CONTAINER=brpc-burst-wrapper LOAD_SETTLE_SECONDS=0 \
   KVC_BURST_CONTAINER=kvc-burst-wrapper KVC_BURST_REQUIRE_COMPLETE=1 \
   KVC_BURST_PRESTART_PRESSURE=0 \
   KVC_BURST_DYNAMIC_ARM=1 KVC_BURST_PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" \
@@ -131,7 +168,10 @@ kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper \
 python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log" \
   "$OUTPUT_DIR/summary.json" "$WRAPPER_CONCURRENCY" "$KVC_CONCURRENCY" \
   "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" "$KVC_OBJECT_SIZE" \
-  "$KVC_PRESSURE_KEY_COUNT" "$KVC_SUSTAINED_PRESSURE" "$KVC_INPROCESS_PRESSURE" <<'PY'
+  "$KVC_PRESSURE_KEY_COUNT" "$KVC_SUSTAINED_PRESSURE" "$KVC_INPROCESS_PRESSURE" \
+  "$BUSINESS_PAYLOAD_BYTES" "$BRPC_PRESSURE_PAYLOAD_BYTES" \
+  "$BRPC_PRESSURE_ENABLED" \
+  "$BRPC_PRESSURE_CONCURRENCY" "$BRPC_PRESSURE_READY_MIN_ACTIVE" <<'PY'
 import json, math, pathlib, statistics, sys
 contention = json.load(open(sys.argv[1]))
 wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
@@ -143,6 +183,11 @@ kvc_object_size = int(sys.argv[8])
 kvc_pressure_key_count = int(sys.argv[9])
 kvc_sustained_pressure = sys.argv[10] == "1"
 kvc_inprocess_pressure = sys.argv[11] == "1"
+business_payload_bytes = int(sys.argv[12])
+brpc_pressure_payload_bytes = int(sys.argv[13])
+brpc_pressure_enabled = sys.argv[14] == "1"
+brpc_pressure_concurrency = int(sys.argv[15])
+brpc_pressure_ready_min_active = int(sys.argv[16])
 valid = contention.get("valid_repeats") == contention.get("expected_repeats")
 rows = []
 
@@ -164,6 +209,13 @@ def one(events, name, request_id):
     assert len(values) == 1, (request_id, name, values)
     return values[0]
 
+def log_value(line, key):
+    prefix = key + "="
+    for token in line.split():
+        if token.startswith(prefix):
+            return token[len(prefix):]
+    raise AssertionError((key, line))
+
 for row in contention.get("rows", []):
     replay = pathlib.Path(row["summary_path"]).parent
     trace = json.load(open(replay / "summary.json"))
@@ -178,8 +230,9 @@ for row in contention.get("rows", []):
         assert spans[name]["status"] == "ok", (name, spans[name])
     for name in ("vector_recall", "generative_recall", "deepfm_rank"):
         assert spans[name]["protocol"] == "brpc", (name, spans[name])
-    assert business["concurrency"] == wrapper_concurrency and business["business_success"], business
-    assert wrapper_burst["concurrency"] == wrapper_concurrency and wrapper_burst["burst_valid"], wrapper_burst
+    assert business["concurrency"] == 1 and business["business_success"], business
+    assert wrapper_burst["concurrency"] == 1 and wrapper_burst["burst_valid"], wrapper_burst
+    assert wrapper_burst["pressure_requests"] == 0, wrapper_burst
     kvc_events = [event for event in trace["kvc_proxy_events"]
                   if event.get("event") == "kvc_burst_complete"
                   and event.get("request_id") == request_id]
@@ -230,8 +283,23 @@ for row in contention.get("rows", []):
         assert kvc["add_token_observation_count"] == exact["add_token_count"], (kvc, exact)
     matches = [line for line in wrapper_log.splitlines()
                if "method=Recommend" in line and f"request_id={request_id}" in line]
-    if len(matches) != 1 or " code=200 " not in matches[0]:
+    payload_tokens = (
+        f" front_payload_bytes={business_payload_bytes} ",
+        " backend_payload_bytes=0 ",
+    )
+    if (len(matches) != 1 or " code=200 " not in matches[0]
+            or not all(token in f" {matches[0]} " for token in payload_tokens)):
         valid = False
+    wrapper_active_health_at_start = -1
+    wrapper_max_active_health = -1
+    if len(matches) == 1:
+        wrapper_active_health_at_start = int(log_value(matches[0], "active_health_at_start"))
+        wrapper_max_active_health = int(log_value(matches[0], "max_active_health"))
+        if brpc_pressure_enabled:
+            assert wrapper_active_health_at_start >= brpc_pressure_ready_min_active, matches[0]
+            assert wrapper_max_active_health >= brpc_pressure_ready_min_active, matches[0]
+        else:
+            assert wrapper_active_health_at_start == 0, matches[0]
     coordination_ms = float(kvc["coordination_wait_ms"])
     client_e2e_actual_ms = float(trace["client"]["client_e2e_ms"])
     runner_actual_ms = executor[0]["runner_us"] / 1000.0
@@ -249,6 +317,19 @@ for row in contention.get("rows", []):
         "backend_brpc_ms": business["wrapper_backend_brpc_ms"],
         "runner_ms": runner_actual_ms,
         "runner_adjusted_ms": max(0.0, runner_actual_ms - coordination_ms),
+        "brpc_pressure_ready_wait_ms": float(row.get("brpc_pressure_ready_wait_ms", 0.0)),
+        "brpc_pressure_qps": float(row.get("brpc_pressure_qps", 0.0)),
+        "brpc_pressure_gbps": float(row.get("brpc_pressure_gbps", 0.0)),
+        "brpc_pressure_max_active": float(row.get("brpc_pressure_max_active", 0)),
+        "brpc_pressure_first_round_completed": float(
+            row.get("brpc_pressure_first_round_completed", 0)),
+        "brpc_pressure_second_round_started": float(
+            row.get("brpc_pressure_second_round_started", 0)),
+        "brpc_pressure_active_at_ready": float(
+            row.get("brpc_pressure_active_at_ready", 0)),
+        "wrapper_external_active_health_at_start": float(
+            wrapper_active_health_at_start),
+        "wrapper_external_max_active_health": float(wrapper_max_active_health),
         "kvc_business_get_ms": kvc["business_get_ms"],
         "kvc_business_get_1_ms": float(kvc.get("business_get_1_ms", 0.0)),
         "kvc_business_get_2_ms": float(kvc.get("business_get_2_ms", 0.0)),
@@ -344,6 +425,13 @@ result = {
     "classification": (f"PAIREC_BRPC_WRAPPER_C{wrapper_concurrency}_KVC_C{kvc_concurrency}_OK"
                        if valid else "PAIREC_BRPC_WRAPPER_KVC_COMBINED_FAIL"),
     "wrapper_concurrency": wrapper_concurrency,
+    "business_payload_bytes": business_payload_bytes,
+    "brpc_pressure_payload_bytes": brpc_pressure_payload_bytes,
+    "embedded_burst_concurrency": 1,
+    "brpc_pressure_enabled": brpc_pressure_enabled,
+    "brpc_pressure_concurrency": brpc_pressure_concurrency if brpc_pressure_enabled else 0,
+    "brpc_pressure_ready_min_active": (
+        brpc_pressure_ready_min_active if brpc_pressure_enabled else 0),
     "kvc_concurrency": kvc_concurrency,
     "kvc_object_size_bytes": kvc_object_size,
     "kvc_pressure_key_count": kvc_pressure_key_count,

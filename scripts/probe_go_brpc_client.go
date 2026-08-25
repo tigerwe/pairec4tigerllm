@@ -51,6 +51,8 @@ func main() {
 	preconnect := flag.Bool("preconnect", getenvBool("PRECONNECT", false), "pre-establish one TCP session per worker, then synchronously release one measured request per connection")
 	preconnectHoldMs := flag.Int("preconnect_hold_ms", getenvInt("PRECONNECT_HOLD_MS", 0), "hold fully established Health sessions before request release for observation; excluded from request latency")
 	readyFile := flag.String("ready_file", getenv("READY_FILE", ""), "write worker concurrency evidence after the target is reached")
+	readyAfterFirstRound := flag.Bool("ready_after_first_round", getenvBool("READY_AFTER_FIRST_ROUND", false), "require every worker to complete one call and start a second call before becoming ready")
+	readyMinActive := flag.Int("ready_min_active", getenvInt("READY_MIN_ACTIVE", 0), "minimum active calls at readiness; 0 requires all workers")
 	statsFile := flag.String("stats_file", getenv("STATS_FILE", ""), "append periodic pressure statistics as JSON lines")
 	statsIntervalMs := flag.Int("stats_interval_ms", getenvInt("STATS_INTERVAL_MS", 1000), "pressure statistics interval in milliseconds")
 	flag.Parse()
@@ -87,10 +89,29 @@ func main() {
 		totalStart := time.Now()
 		measurementStart := totalStart
 		workerCount := normalizedConcurrency(*requests, *concurrency)
+		if *readyMinActive < 0 || *readyMinActive > workerCount {
+			fmt.Fprintf(os.Stderr, "ready_min_active must be in [0,%d]\n", workerCount)
+			os.Exit(2)
+		}
+		if *readyAfterFirstRound && *requests < workerCount*2 {
+			fmt.Fprintln(os.Stderr, "ready_after_first_round requires at least two requests per worker")
+			os.Exit(2)
+		}
+		if *readyAfterFirstRound && *qps != 0 {
+			fmt.Fprintln(os.Stderr, "ready_after_first_round requires qps=0")
+			os.Exit(2)
+		}
+		readyActiveTarget := *readyMinActive
+		if readyActiveTarget == 0 {
+			readyActiveTarget = workerCount
+		}
 		var active int64
 		var maxActive int64
 		var readyOnce sync.Once
 		var pressure pressureCounters
+		workerStarts := make([]int64, workerCount)
+		var firstRoundCompleted int64
+		var secondRoundStarted int64
 		var statsStop chan struct{}
 		clients := make([]*recall.BRPCRecommendClient, len(endpoints))
 		for index, target := range endpoints {
@@ -160,9 +181,53 @@ func main() {
 				measurementStart, *payloadBytes, &pressure, &active, &maxActive, statsStop)
 		}
 
+		writeReady := func() {
+			if *readyFile == "" {
+				return
+			}
+			activeCalls := atomic.LoadInt64(&active)
+			firstCompleted := atomic.LoadInt64(&firstRoundCompleted)
+			secondStarted := atomic.LoadInt64(&secondRoundStarted)
+			errors := atomic.LoadInt64(&pressure.errors)
+			calls := atomic.LoadInt64(&pressure.calls)
+			success := atomic.LoadInt64(&pressure.success)
+			if activeCalls < int64(readyActiveTarget) {
+				return
+			}
+			if *readyAfterFirstRound && (firstCompleted != int64(workerCount) ||
+				secondStarted != int64(workerCount) || errors != 0) {
+				return
+			}
+			readyOnce.Do(func() {
+				armed := 0
+				if *preconnect {
+					armed = workerCount
+				}
+				elapsedSeconds := time.Since(measurementStart).Seconds()
+				readyQPS := 0.0
+				readyGbps := 0.0
+				if elapsedSeconds > 0 {
+					readyQPS = float64(calls) / elapsedSeconds
+					readyGbps = float64(success*int64(*payloadBytes)) * 8 / elapsedSeconds / 1e9
+				}
+				content := fmt.Sprintf("workers=%d armed_workers=%d max_active=%d active_calls=%d endpoints=%d payload_bytes=%d reuse_connections=%t preconnect=%t synchronized_start=%t ready_after_first_round=%t first_round_completed=%d second_round_started=%d ready_min_active=%d calls=%d success=%d errors=%d elapsed_s=%.6f qps=%.6f gbps=%.6f\n",
+					workerCount, armed, atomic.LoadInt64(&maxActive), activeCalls, len(endpoints),
+					*payloadBytes, useSessions, *preconnect, *preconnect, *readyAfterFirstRound,
+					firstCompleted, secondStarted, readyActiveTarget, calls, success, errors,
+					elapsedSeconds, readyQPS, readyGbps)
+				if err := os.WriteFile(*readyFile, []byte(content), 0o644); err != nil {
+					fmt.Fprintf(os.Stderr, "write ready file failed: %v\n", err)
+				}
+			})
+		}
+
 		healthCall := func(worker, index int, releaseTime time.Time) (result probeResult) {
 			target := endpoints[worker%len(endpoints)]
 			callStarted := time.Now()
+			workerCall := atomic.AddInt64(&workerStarts[worker], 1)
+			if workerCall == 2 {
+				atomic.AddInt64(&secondRoundStarted, 1)
+			}
 			result.index = index
 			result.endpoint = target
 			if !releaseTime.IsZero() {
@@ -177,23 +242,13 @@ func main() {
 					atomic.AddInt64(&pressure.success, 1)
 					atomic.AddInt64(&pressure.bytes, int64(*payloadBytes))
 				}
+				if workerCall == 1 {
+					atomic.AddInt64(&firstRoundCompleted, 1)
+				}
 			}()
 			currentActive := atomic.AddInt64(&active, 1)
 			updateAtomicMaximum(&maxActive, currentActive)
-			if currentActive >= int64(workerCount) && *readyFile != "" {
-				readyOnce.Do(func() {
-					armed := 0
-					if *preconnect {
-						armed = workerCount
-					}
-					content := fmt.Sprintf("workers=%d armed_workers=%d max_active=%d endpoints=%d payload_bytes=%d reuse_connections=%t preconnect=%t synchronized_start=%t\n",
-						workerCount, armed, atomic.LoadInt64(&maxActive), len(endpoints), *payloadBytes,
-						useSessions, *preconnect, *preconnect)
-					if err := os.WriteFile(*readyFile, []byte(content), 0o644); err != nil {
-						fmt.Fprintf(os.Stderr, "write ready file failed: %v\n", err)
-					}
-				})
-			}
+			writeReady()
 			defer atomic.AddInt64(&active, -1)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
 			started := time.Now()
@@ -245,10 +300,17 @@ func main() {
 			}
 			requestStartSkewUs = spreadInt64(startOffsets)
 		} else {
-			results = runIndexedWithWorker(*requests, *concurrency, *qps,
-				func(worker, index int) probeResult {
-					return healthCall(worker, index, time.Time{})
-				})
+			if *readyAfterFirstRound {
+				results = runIndexedByWorker(*requests, workerCount,
+					func(worker, index int) probeResult {
+						return healthCall(worker, index, time.Time{})
+					})
+			} else {
+				results = runIndexedWithWorker(*requests, *concurrency, *qps,
+					func(worker, index int) probeResult {
+						return healthCall(worker, index, time.Time{})
+					})
+			}
 			requestTotalMs = float64(time.Since(measurementStart).Microseconds()) / 1000
 		}
 		if *statsFile != "" {
@@ -804,6 +866,26 @@ func runIndexedWithWorker(total int, concurrency int, qps int, fn func(worker, i
 		jobs <- index
 	}
 	close(jobs)
+	wg.Wait()
+	return results
+}
+
+// runIndexedByWorker gives every long-lived worker its own deterministic
+// request sequence. This is used by sustained pressure so a fast lane cannot
+// consume another lane's second request and falsely satisfy the ready gate.
+func runIndexedByWorker(total int, concurrency int, fn func(worker, index int) probeResult) []probeResult {
+	results := make([]probeResult, total)
+	concurrency = normalizedConcurrency(total, concurrency)
+	var wg sync.WaitGroup
+	for worker := 0; worker < concurrency; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for index := worker + 1; index <= total; index += concurrency {
+				results[index-1] = fn(worker, index)
+			}
+		}(worker)
+	}
 	wg.Wait()
 	return results
 }

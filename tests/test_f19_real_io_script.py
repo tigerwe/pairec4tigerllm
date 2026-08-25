@@ -71,7 +71,7 @@ class F19RealIoScriptTest(unittest.TestCase):
             sys.argv = [
                 "embedded-summary", str(root), "baseline", "1", "3", "2",
                 str(onboard_min), str(onboard_max), "1", str(result),
-                "dsbench", "4", "6", "0", "10", "1",
+                "dsbench", "4", "6", "0", "10", "1", "0", "10",
             ]
             with self.assertRaises(SystemExit) as exit_context:
                 exec(compile(blocks[0], "embedded-contention-summary", "exec"), {})
