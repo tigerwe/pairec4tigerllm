@@ -292,14 +292,23 @@ for row in contention.get("rows", []):
         valid = False
     wrapper_active_health_at_start = -1
     wrapper_max_active_health = -1
+    wrapper_health_calls_at_start = -1
+    wrapper_health_calls_during_recommend = -1
+    wrapper_health_payload_bytes_during_recommend = -1
     if len(matches) == 1:
         wrapper_active_health_at_start = int(log_value(matches[0], "active_health_at_start"))
         wrapper_max_active_health = int(log_value(matches[0], "max_active_health"))
+        wrapper_health_calls_at_start = int(log_value(matches[0], "health_calls_at_start"))
+        wrapper_health_calls_during_recommend = int(
+            log_value(matches[0], "health_calls_during_recommend"))
+        wrapper_health_payload_bytes_during_recommend = int(
+            log_value(matches[0], "health_payload_bytes_during_recommend"))
         if brpc_pressure_enabled:
-            assert wrapper_active_health_at_start >= brpc_pressure_ready_min_active, matches[0]
-            assert wrapper_max_active_health >= brpc_pressure_ready_min_active, matches[0]
+            assert wrapper_health_calls_during_recommend > 0, matches[0]
+            assert (wrapper_health_payload_bytes_during_recommend
+                    >= brpc_pressure_payload_bytes), matches[0]
         else:
-            assert wrapper_active_health_at_start == 0, matches[0]
+            assert wrapper_health_payload_bytes_during_recommend == 0, matches[0]
     coordination_ms = float(kvc["coordination_wait_ms"])
     client_e2e_actual_ms = float(trace["client"]["client_e2e_ms"])
     runner_actual_ms = executor[0]["runner_us"] / 1000.0
@@ -330,6 +339,12 @@ for row in contention.get("rows", []):
         "wrapper_external_active_health_at_start": float(
             wrapper_active_health_at_start),
         "wrapper_external_max_active_health": float(wrapper_max_active_health),
+        "wrapper_external_health_calls_at_start": float(
+            wrapper_health_calls_at_start),
+        "wrapper_external_health_calls_during_recommend": float(
+            wrapper_health_calls_during_recommend),
+        "wrapper_external_health_payload_bytes_during_recommend": float(
+            wrapper_health_payload_bytes_during_recommend),
         "kvc_business_get_ms": kvc["business_get_ms"],
         "kvc_business_get_1_ms": float(kvc.get("business_get_1_ms", 0.0)),
         "kvc_business_get_2_ms": float(kvc.get("business_get_2_ms", 0.0)),

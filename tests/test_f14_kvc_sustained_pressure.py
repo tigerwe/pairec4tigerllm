@@ -481,8 +481,11 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn('BRPC_LOAD_READY_AFTER_FIRST_ROUND=1', combined)
         self.assertIn('BRPC_LOAD_READY_MIN_ACTIVE="$BRPC_PRESSURE_READY_MIN_ACTIVE"', combined)
         self.assertIn('LOAD_SETTLE_SECONDS=0', combined)
-        self.assertIn('wrapper_active_health_at_start >= brpc_pressure_ready_min_active', combined)
+        self.assertIn('wrapper_health_calls_during_recommend > 0', combined)
+        self.assertIn('wrapper_health_payload_bytes_during_recommend', combined)
+        self.assertIn('>= brpc_pressure_payload_bytes', combined)
         self.assertIn('wrapper_external_active_health_at_start', combined)
+        self.assertIn('wrapper_external_health_calls_during_recommend', combined)
 
     def test_business_payload_is_front_only(self):
         config = FULL_CONFIG.read_text()
@@ -496,6 +499,8 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn('backend_request.clear_payload_padding()', wrapper)
         self.assertIn('front_payload_bytes=', wrapper)
         self.assertIn('backend_payload_bytes=', wrapper)
+        self.assertIn('health_calls_during_recommend=', wrapper)
+        self.assertIn('health_payload_bytes_during_recommend=', wrapper)
 
     def test_contention_ds_worker_hook(self):
         text = CONTENTION.read_text()

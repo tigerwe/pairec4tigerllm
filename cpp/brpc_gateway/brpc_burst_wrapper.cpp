@@ -158,6 +158,10 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
               << " backend=" << backend_ << std::endl;
 
     const int64_t health_at_start = active_health_.load(std::memory_order_relaxed);
+    const int64_t health_calls_at_start =
+        health_calls_.load(std::memory_order_relaxed);
+    const int64_t health_payload_bytes_at_start =
+        health_payload_bytes_.load(std::memory_order_relaxed);
     UpdateMax(&max_health_while_recommend_, health_at_start);
     butil::Timer wrapper_timer;
     wrapper_timer.start();
@@ -172,6 +176,11 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
     wrapper_timer.stop();
     active_recommend_.fetch_sub(1, std::memory_order_relaxed);
 
+    const int64_t health_calls_during_recommend =
+        health_calls_.load(std::memory_order_relaxed) - health_calls_at_start;
+    const int64_t health_payload_bytes_during_recommend =
+        health_payload_bytes_.load(std::memory_order_relaxed) -
+        health_payload_bytes_at_start;
     const int64_t max_health =
         max_health_while_recommend_.load(std::memory_order_relaxed);
     const double wrapper_total_ms = wrapper_timer.m_elapsed();
@@ -203,6 +212,11 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
               << " active_health_at_start=" << health_at_start
               << " max_active_health=" << max_health
               << " max_active_total=" << max_health + 1
+              << " health_calls_at_start=" << health_calls_at_start
+              << " health_calls_during_recommend="
+              << health_calls_during_recommend
+              << " health_payload_bytes_during_recommend="
+              << health_payload_bytes_during_recommend
               << " front_payload_bytes=" << front_payload_bytes
               << " backend_payload_bytes=" << backend_request.payload_padding().size()
               << " backend=" << backend_
@@ -217,6 +231,10 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
     brpc::ClosureGuard done_guard(done);
     ActiveCounterGuard total_guard(&active_total_, &max_active_total_);
     ActiveCounterGuard health_guard(&active_health_, &max_active_health_);
+    health_calls_.fetch_add(1, std::memory_order_relaxed);
+    health_payload_bytes_.fetch_add(
+        static_cast<int64_t>(request->payload_padding().size()),
+        std::memory_order_relaxed);
     const int64_t health = active_health_.load(std::memory_order_relaxed);
     if (active_recommend_.load(std::memory_order_relaxed) > 0) {
       UpdateMax(&max_health_while_recommend_, health);
@@ -239,6 +257,8 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
   std::atomic<int64_t> max_active_health_{0};
   std::atomic<int64_t> active_recommend_{0};
   std::atomic<int64_t> max_health_while_recommend_{0};
+  std::atomic<int64_t> health_calls_{0};
+  std::atomic<int64_t> health_payload_bytes_{0};
 };
 
 }  // namespace
