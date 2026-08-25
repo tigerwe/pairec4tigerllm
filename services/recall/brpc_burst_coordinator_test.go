@@ -3,6 +3,7 @@ package recall
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -345,5 +346,27 @@ func TestBRPCBurstCompletionReportsBalancedShardTraffic(t *testing.T) {
 	}
 	if event.ShardBytes[0] != 3*102400 || event.ShardBytes[1] != 3*102400 || event.ShardBytes[2] != 3*102400 {
 		t.Fatalf("unexpected shard bytes: %v", event.ShardBytes)
+	}
+}
+
+func TestBRPCBurstCompletionReportsPressureErrorSamples(t *testing.T) {
+	results := make(chan brpcBurstLaneResult, 4)
+	results <- brpcBurstLaneResult{index: 0, business: true, shard: 0}
+	results <- brpcBurstLaneResult{index: 1, shard: 0, err: errors.New("connection reset")}
+	results <- brpcBurstLaneResult{index: 2, shard: 0, err: errors.New("connection reset")}
+	results <- brpcBurstLaneResult{index: 3, shard: 0, err: errors.New("broken pipe")}
+	close(results)
+
+	event := makeBRPCBurstCompleteEvent(
+		"request-errors", 4, 0, time.Now(), 4,
+		brpcBurstBusinessEvent{Success: true, TraceValid: true}, results,
+		4, 102400, []int{0},
+	)
+	if event.BurstValid || event.PressureErrors != 3 {
+		t.Fatalf("unexpected completion: %+v", event)
+	}
+	want := []string{"connection reset", "broken pipe"}
+	if !reflect.DeepEqual(event.PressureErrorSamples, want) {
+		t.Fatalf("pressure error samples=%v want=%v", event.PressureErrorSamples, want)
 	}
 }

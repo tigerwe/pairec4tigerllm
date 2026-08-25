@@ -103,28 +103,29 @@ type brpcBurstBusinessEvent struct {
 }
 
 type brpcBurstCompleteEvent struct {
-	Event                string  `json:"event"`
-	RequestID            string  `json:"request_id"`
-	Concurrency          int     `json:"concurrency"`
-	BusinessLane         int     `json:"business_lane"`
-	ArmedWorkers         int     `json:"armed_workers"`
-	MaxActiveWorkers     int64   `json:"max_active_workers"`
-	StartSkewUs          int64   `json:"start_skew_us"`
-	BurstTotalMs         float64 `json:"burst_total_ms"`
-	PressureRequests     int     `json:"pressure_requests"`
-	PressureSuccess      int     `json:"pressure_success"`
-	PressureErrors       int     `json:"pressure_errors"`
-	PressureLatencyAvgMs float64 `json:"pressure_latency_avg_ms"`
-	PressureLatencyP95Ms float64 `json:"pressure_latency_p95_ms"`
-	BusinessSuccess      bool    `json:"business_success"`
-	TraceValid           bool    `json:"trace_valid"`
-	BurstValid           bool    `json:"burst_valid"`
-	PoolSize             int     `json:"pool_size"`
-	ActiveConnections    int     `json:"active_connections"`
-	CPUShards            []int   `json:"cpu_shards"`
-	ShardRequests        []int   `json:"shard_requests"`
-	ShardSuccess         []int   `json:"shard_success"`
-	ShardBytes           []int64 `json:"shard_bytes"`
+	Event                string   `json:"event"`
+	RequestID            string   `json:"request_id"`
+	Concurrency          int      `json:"concurrency"`
+	BusinessLane         int      `json:"business_lane"`
+	ArmedWorkers         int      `json:"armed_workers"`
+	MaxActiveWorkers     int64    `json:"max_active_workers"`
+	StartSkewUs          int64    `json:"start_skew_us"`
+	BurstTotalMs         float64  `json:"burst_total_ms"`
+	PressureRequests     int      `json:"pressure_requests"`
+	PressureSuccess      int      `json:"pressure_success"`
+	PressureErrors       int      `json:"pressure_errors"`
+	PressureErrorSamples []string `json:"pressure_error_samples,omitempty"`
+	PressureLatencyAvgMs float64  `json:"pressure_latency_avg_ms"`
+	PressureLatencyP95Ms float64  `json:"pressure_latency_p95_ms"`
+	BusinessSuccess      bool     `json:"business_success"`
+	TraceValid           bool     `json:"trace_valid"`
+	BurstValid           bool     `json:"burst_valid"`
+	PoolSize             int      `json:"pool_size"`
+	ActiveConnections    int      `json:"active_connections"`
+	CPUShards            []int    `json:"cpu_shards"`
+	ShardRequests        []int    `json:"shard_requests"`
+	ShardSuccess         []int    `json:"shard_success"`
+	ShardBytes           []int64  `json:"shard_bytes"`
 }
 
 func NewBRPCBurstCoordinator(client *BRPCRecommendClient, cfg BRPCBurstConfig) (*BRPCBurstCoordinator, error) {
@@ -423,6 +424,8 @@ func makeBRPCBurstCompleteEvent(
 	pressureLatencies := make([]int64, 0, concurrency-1)
 	startOffsets := make([]int64, 0, concurrency)
 	pressureSuccess := 0
+	pressureErrorSamples := make([]string, 0, 3)
+	pressureErrorSeen := make(map[string]struct{})
 	shardRequests := make([]int, len(cpuShards))
 	shardSuccess := make([]int, len(cpuShards))
 	shardBytes := make([]int64, len(cpuShards))
@@ -441,6 +444,12 @@ func makeBRPCBurstCompleteEvent(
 		if result.err == nil {
 			pressureSuccess++
 			pressureLatencies = append(pressureLatencies, result.latencyUs)
+		} else if len(pressureErrorSamples) < cap(pressureErrorSamples) {
+			message := result.err.Error()
+			if _, exists := pressureErrorSeen[message]; !exists {
+				pressureErrorSeen[message] = struct{}{}
+				pressureErrorSamples = append(pressureErrorSamples, message)
+			}
 		}
 	}
 	pressureRequests := concurrency - 1
@@ -456,6 +465,7 @@ func makeBRPCBurstCompleteEvent(
 		PressureRequests:     pressureRequests,
 		PressureSuccess:      pressureSuccess,
 		PressureErrors:       pressureRequests - pressureSuccess,
+		PressureErrorSamples: pressureErrorSamples,
 		PressureLatencyAvgMs: averageBurstLatency(pressureLatencies),
 		PressureLatencyP95Ms: percentileBurstLatency(pressureLatencies, 0.95),
 		BusinessSuccess:      business.Success,

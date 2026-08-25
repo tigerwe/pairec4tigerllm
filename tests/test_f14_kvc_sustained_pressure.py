@@ -472,7 +472,9 @@ class SustainedPressureStructureTest(unittest.TestCase):
     def test_brpc_pressure_uses_embedded_one_shot_burst(self):
         contention = CONTENTION.read_text()
         combined = COMBINED.read_text()
+        coordinator = (ROOT / "services" / "recall" / "brpc_burst_coordinator.go").read_text()
         self.assertIn('BURST_CONCURRENCY="$WRAPPER_CONCURRENCY"', combined)
+        self.assertIn('BURST_POOL_SIZE=${BURST_POOL_SIZE:-$WRAPPER_CONCURRENCY}', combined)
         self.assertIn('BURST_ACTIVE_CONNECTIONS="$BURST_ACTIVE_CONNECTIONS"', combined)
         self.assertIn('BURST_PAYLOAD_BYTES="$BRPC_PRESSURE_PAYLOAD_BYTES"', combined)
         self.assertIn('BUSINESS_PAYLOAD_BYTES="$BUSINESS_PAYLOAD_BYTES"', combined)
@@ -482,6 +484,13 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn('assert wrapper_burst["pressure_requests"] == pressure_requests', combined)
         self.assertIn('assert wrapper_pressure_drain_required == 0', combined)
         self.assertIn('start_brpc_stop_watcher', contention)
+        self.assertIn('PressureErrorSamples []string', coordinator)
+
+    def test_full_chain_warmup_rejects_failed_pressure_lanes(self):
+        deploy = FULL_DEPLOY.read_text()
+        self.assertIn('event["pressure_success"] == expected - 1', deploy)
+        self.assertIn('event["pressure_errors"] == 0', deploy)
+        self.assertIn('event["trace_valid"] is True and event["burst_valid"] is True', deploy)
 
     def test_business_payload_is_front_only(self):
         config = FULL_CONFIG.read_text()

@@ -358,13 +358,30 @@ PY
   echo "== Wait for warmup pressure completion =="
   warmup_deadline=$((SECONDS + COMPLETION_TIMEOUT_SECONDS))
   for warmup_request_id in "${WARMUP_REQUEST_IDS[@]}"; do
-    while ! kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec 2>/dev/null \
+    warmup_complete=""
+    while [[ -z "$warmup_complete" ]]; do
+      warmup_complete="$(kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec 2>/dev/null \
         | grep -F '"event":"pairec_brpc_burst_complete"' \
-        | grep -F "\"request_id\":\"${warmup_request_id}\"" >/dev/null; do
+        | grep -F "\"request_id\":\"${warmup_request_id}\"" \
+        | tail -1 || true)"
       (( SECONDS < warmup_deadline )) \
         || die "warmup burst completion timed out for request_id=$warmup_request_id"
-      sleep 0.1
+      [[ -n "$warmup_complete" ]] || sleep 0.1
     done
+    python3 - "$warmup_complete" "$BURST_ACTIVE_CONNECTIONS" "$BURST_POOL_SIZE" <<'PY'
+import json, sys
+
+line, concurrency, pool = sys.argv[1:]
+event = json.loads(line[line.index("{"):])
+expected = int(concurrency)
+assert event["concurrency"] == expected, event
+assert event["pressure_requests"] == expected - 1, event
+assert event["pressure_success"] == expected - 1, event
+assert event["pressure_errors"] == 0, event
+assert event["business_success"] is True, event
+assert event["trace_valid"] is True and event["burst_valid"] is True, event
+assert event["pool_size"] == int(pool), event
+PY
   done
   echo "PAIREC_BRPC_WRAPPER_FULL_WARMUP_OK requests=$WARMUP_REQUESTS"
 fi
