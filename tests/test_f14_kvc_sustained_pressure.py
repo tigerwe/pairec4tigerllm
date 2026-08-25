@@ -398,9 +398,11 @@ class SustainedPressureStructureTest(unittest.TestCase):
             "run_case kvc_only 1",
             'run_case combined "$BRPC_WRAPPER_CONCURRENCY"',
             '"design": "2x2_factorial"',
-            '"pressure_health_requests": brpc_pressure_concurrency',
-            '"coverage": "until_business_recommend_arrives_at_wrapper"',
-            '"stop_policy": "terminate_external_pressure_then_wait_for_20ms_quiet"',
+            '"model": "synchronized_one_shot_burst"',
+            '"pressure_health_requests": 999',
+            '"business_payload_bytes": business_payload_bytes',
+            '"coverage": "one_shot_concurrent_with_business_recommend"',
+            '"release": "single_barrier"',
             '"pressure_lanes": 31',
             '"interaction": (averages["combined"] - averages["brpc_only"]',
             '"classification": "PAIREC_BRPC_WRAPPER_KVC_FACTORIAL_OK"',
@@ -423,9 +425,10 @@ class SustainedPressureStructureTest(unittest.TestCase):
                 "wrapper_concurrency": wrapper,
                 "business_payload_bytes": 102400,
                 "brpc_pressure_payload_bytes": 102400,
-                "embedded_burst_concurrency": 1,
+                "brpc_pressure_model": "synchronized_one_shot_burst",
+                "embedded_burst_concurrency": wrapper,
                 "brpc_pressure_enabled": pressure_enabled,
-                "brpc_pressure_concurrency": 999 if pressure_enabled else 0,
+                "brpc_pressure_concurrency": wrapper - 1,
                 "kvc_concurrency": kvc,
                 "kvc_object_size_bytes": 3670016,
                 "kvc_pressure_key_count": 4 if kvc == 32 else 0,
@@ -451,7 +454,7 @@ class SustainedPressureStructureTest(unittest.TestCase):
             output = root / "summary.json"
             subprocess.run(
                 [sys.executable, "-", *map(str, paths), str(output), "102400",
-                 "102400", "999", "950"],
+                 "102400"],
                 input=block, text=True, capture_output=True, check=True)
             summary = json.loads(output.read_text())
 
@@ -464,36 +467,21 @@ class SustainedPressureStructureTest(unittest.TestCase):
         )
         self.assertEqual(30.0, row["effects_p99"]["interaction"])
         self.assertFalse(summary["pressure_profiles"]["brpc"]["backend_forwarded"])
-        self.assertEqual(950, summary["pressure_profiles"]["brpc"]["ready_gate"]["minimum_active_calls"])
+        self.assertEqual("single_barrier", summary["pressure_profiles"]["brpc"]["release"])
 
-    def test_sustained_brpc_pressure_has_strict_ready_gate(self):
-        probe = BRPC_PROBE.read_text()
+    def test_brpc_pressure_uses_embedded_one_shot_burst(self):
         contention = CONTENTION.read_text()
         combined = COMBINED.read_text()
-        for token in (
-            'ready_after_first_round',
-            'first_round_completed',
-            'second_round_started',
-            'ready_min_active',
-            'runIndexedByWorker',
-        ):
-            self.assertIn(token, probe)
-        self.assertIn('BRPC_LOAD_READY_AFTER_FIRST_ROUND="${BRPC_LOAD_READY_AFTER_FIRST_ROUND:-0}"', contention)
-        self.assertIn('BRPC_LOAD_READY_MIN_ACTIVE="${BRPC_LOAD_READY_MIN_ACTIVE:-$BRPC_LOAD_CONCURRENCY}"', contention)
-        self.assertIn('BRPC_LOAD_READY_AFTER_FIRST_ROUND=1', combined)
-        self.assertIn('BRPC_LOAD_READY_MIN_ACTIVE="$BRPC_PRESSURE_READY_MIN_ACTIVE"', combined)
-        self.assertIn('BRPC_STOP_AT_WRAPPER_START="$BRPC_PRESSURE_ENABLED"', combined)
-        self.assertIn('--coordinated_pressure="$BRPC_STOP_AT_WRAPPER_START"', contention)
-        self.assertIn('LOAD_SETTLE_SECONDS=0', combined)
+        self.assertIn('BURST_CONCURRENCY="$WRAPPER_CONCURRENCY"', combined)
+        self.assertIn('BURST_ACTIVE_CONNECTIONS="$BURST_ACTIVE_CONNECTIONS"', combined)
+        self.assertIn('BURST_PAYLOAD_BYTES="$BRPC_PRESSURE_PAYLOAD_BYTES"', combined)
+        self.assertIn('BUSINESS_PAYLOAD_BYTES="$BUSINESS_PAYLOAD_BYTES"', combined)
+        self.assertIn('REPEATS="$REQUESTS" MODE=baseline', combined)
+        self.assertNotIn('BRPC_STOP_AT_WRAPPER_START=', combined)
+        self.assertNotIn('BRPC_LOAD_READY_AFTER_FIRST_ROUND=', combined)
+        self.assertIn('assert wrapper_burst["pressure_requests"] == pressure_requests', combined)
+        self.assertIn('assert wrapper_pressure_drain_required == 0', combined)
         self.assertIn('start_brpc_stop_watcher', contention)
-        self.assertIn('brpc-pressure-stop-signal.json', contention)
-        self.assertIn('wrapper_pressure_drain_quiet_ms >= 20.0', combined)
-        self.assertIn('wrapper_health_payload_bytes_during_backend == 0', combined)
-        self.assertIn('wrapper_health_calls_during_recommend > 0', combined)
-        self.assertIn('wrapper_health_payload_bytes_during_recommend', combined)
-        self.assertIn('>= brpc_pressure_payload_bytes', combined)
-        self.assertIn('wrapper_external_active_health_at_start', combined)
-        self.assertIn('wrapper_external_health_calls_during_recommend', combined)
 
     def test_business_payload_is_front_only(self):
         config = FULL_CONFIG.read_text()

@@ -7,8 +7,6 @@ PRIME_REQUESTS=${PRIME_REQUESTS:-20}
 BRPC_WRAPPER_CONCURRENCY=${BRPC_WRAPPER_CONCURRENCY:-1000}
 BRPC_PRESSURE_PAYLOAD_BYTES=${BRPC_PRESSURE_PAYLOAD_BYTES:-102400}
 BUSINESS_PAYLOAD_BYTES=${BUSINESS_PAYLOAD_BYTES:-102400}
-BRPC_PRESSURE_CONCURRENCY=${BRPC_PRESSURE_CONCURRENCY:-999}
-BRPC_PRESSURE_READY_MIN_ACTIVE=${BRPC_PRESSURE_READY_MIN_ACTIVE:-950}
 COMBINED_KVC_CONCURRENCY=${COMBINED_KVC_CONCURRENCY:-32}
 COMBINED_KVC_PRESSURE_KEY_COUNT=${COMBINED_KVC_PRESSURE_KEY_COUNT:-4}
 COMBINED_KVC_OBJECT_SIZE=${COMBINED_KVC_OBJECT_SIZE:-3670016}
@@ -25,10 +23,6 @@ die() { echo "ERROR: $*" >&2; exit 1; }
   || die "factorial matrix requires BRPC_PRESSURE_PAYLOAD_BYTES=102400"
 [[ "$BUSINESS_PAYLOAD_BYTES" = 102400 ]] \
   || die "factorial matrix requires BUSINESS_PAYLOAD_BYTES=102400"
-[[ "$BRPC_PRESSURE_CONCURRENCY" = 999 ]] \
-  || die "factorial matrix requires BRPC_PRESSURE_CONCURRENCY=999"
-[[ "$BRPC_PRESSURE_READY_MIN_ACTIVE" = 950 ]] \
-  || die "factorial matrix requires BRPC_PRESSURE_READY_MIN_ACTIVE=950"
 [[ "$COMBINED_KVC_CONCURRENCY" = 32 ]] \
   || die "factorial in-process pressure requires COMBINED_KVC_CONCURRENCY=32"
 [[ "$COMBINED_KVC_INPROCESS_PRESSURE" = 1 ]] \
@@ -37,16 +31,12 @@ mkdir -p "$OUTPUT_DIR"
 
 run_case() {
   local name=$1 wrapper_concurrency=$2 kvc_concurrency=$3 pressure_keys=$4 object_size=$5
-  local pressure_enabled=$6 onboard_min=$7 onboard_max=$8
-  local inprocess_pressure=$9
+  local onboard_min=$6 onboard_max=$7 inprocess_pressure=$8
   echo "== Factorial case=$name Wrapper=c${wrapper_concurrency} KVC=c${kvc_concurrency} =="
   NAMESPACE="$NAMESPACE" REQUESTS="$REQUESTS" PRIME_REQUESTS="$PRIME_REQUESTS" \
     WRAPPER_CONCURRENCY="$wrapper_concurrency" \
     BUSINESS_PAYLOAD_BYTES="$BUSINESS_PAYLOAD_BYTES" \
     BRPC_PRESSURE_PAYLOAD_BYTES="$BRPC_PRESSURE_PAYLOAD_BYTES" \
-    BRPC_PRESSURE_ENABLED="$pressure_enabled" \
-    BRPC_PRESSURE_CONCURRENCY="$BRPC_PRESSURE_CONCURRENCY" \
-    BRPC_PRESSURE_READY_MIN_ACTIVE="$BRPC_PRESSURE_READY_MIN_ACTIVE" \
     KVC_CONCURRENCY="$kvc_concurrency" KVC_PRESSURE_KEY_COUNT="$pressure_keys" \
     KVC_OBJECT_SIZE="$object_size" KVC_PRESSURE_LEAD_US="$KVC_PRESSURE_LEAD_US" \
     KVC_INPROCESS_PRESSURE="$inprocess_pressure" \
@@ -57,21 +47,20 @@ run_case() {
 }
 
 # 2x2 factorial: A=no pressure, B=Wrapper only, C=KVC only, D=both.
-run_case baseline 1 1 0 3670016 0 2 2 0
+run_case baseline 1 1 0 3670016 2 2 0
 run_case brpc_only "$BRPC_WRAPPER_CONCURRENCY" 1 0 3670016 \
-  1 2 2 0
+  2 2 0
 run_case kvc_only 1 "$COMBINED_KVC_CONCURRENCY" \
-  "$COMBINED_KVC_PRESSURE_KEY_COUNT" "$COMBINED_KVC_OBJECT_SIZE" 0 2 2 \
+  "$COMBINED_KVC_PRESSURE_KEY_COUNT" "$COMBINED_KVC_OBJECT_SIZE" 2 2 \
   "$COMBINED_KVC_INPROCESS_PRESSURE"
 run_case combined "$BRPC_WRAPPER_CONCURRENCY" "$COMBINED_KVC_CONCURRENCY" \
   "$COMBINED_KVC_PRESSURE_KEY_COUNT" "$COMBINED_KVC_OBJECT_SIZE" \
-  1 2 2 "$COMBINED_KVC_INPROCESS_PRESSURE"
+  2 2 "$COMBINED_KVC_INPROCESS_PRESSURE"
 
 python3 - "$OUTPUT_DIR/baseline/summary.json" "$OUTPUT_DIR/brpc_only/summary.json" \
   "$OUTPUT_DIR/kvc_only/summary.json" "$OUTPUT_DIR/combined/summary.json" \
   "$OUTPUT_DIR/summary.json" "$BRPC_PRESSURE_PAYLOAD_BYTES" \
-  "$BUSINESS_PAYLOAD_BYTES" "$BRPC_PRESSURE_CONCURRENCY" \
-  "$BRPC_PRESSURE_READY_MIN_ACTIVE" <<'PY'
+  "$BUSINESS_PAYLOAD_BYTES" <<'PY'
 import json
 import pathlib
 import sys
@@ -83,8 +72,6 @@ combined = json.load(open(sys.argv[4]))
 output = pathlib.Path(sys.argv[5])
 brpc_payload_bytes = int(sys.argv[6])
 business_payload_bytes = int(sys.argv[7])
-brpc_pressure_concurrency = int(sys.argv[8])
-brpc_ready_min_active = int(sys.argv[9])
 cases = {
     "baseline": baseline,
     "brpc_only": brpc_only,
@@ -105,11 +92,12 @@ for name, (wrapper_concurrency, kvc_concurrency) in expected_shapes.items():
     assert case["classification"].endswith("_OK"), (name, case["classification"])
     assert case["business_payload_bytes"] == business_payload_bytes, (name, case)
     assert case["brpc_pressure_payload_bytes"] == brpc_payload_bytes, (name, case)
-    assert case["embedded_burst_concurrency"] == 1, (name, case)
+    assert case["brpc_pressure_model"] == "synchronized_one_shot_burst", (name, case)
+    assert case["embedded_burst_concurrency"] == wrapper_concurrency, (name, case)
     pressure_expected = name in {"brpc_only", "combined"}
     assert case["brpc_pressure_enabled"] is pressure_expected, (name, case)
     assert case["brpc_pressure_concurrency"] == (
-        brpc_pressure_concurrency if pressure_expected else 0), (name, case)
+        wrapper_concurrency - 1), (name, case)
 
 names = (
     "client_e2e_ms", "client_e2e_adjusted_ms", "pairec_total_ms",
@@ -177,21 +165,17 @@ result = {
     "design": "2x2_factorial",
     "pressure_profiles": {
         "brpc": {
-            "total_concurrency": brpc_pressure_concurrency + 1,
+            "model": "synchronized_one_shot_burst",
+            "total_concurrency": 1000,
             "business_recommend_requests": 1,
-            "pressure_health_requests": brpc_pressure_concurrency,
+            "pressure_health_requests": 999,
             "health_payload_bytes": brpc_payload_bytes,
             "business_payload_bytes": business_payload_bytes,
-            "persistent_sessions": brpc_pressure_concurrency,
-            "ready_gate": {
-                "first_round_completed": brpc_pressure_concurrency,
-                "second_round_started": brpc_pressure_concurrency,
-                "minimum_active_calls": brpc_ready_min_active,
-                "maximum_errors": 0,
-            },
-            "coverage": "until_business_recommend_arrives_at_wrapper",
-            "stop_policy": "terminate_external_pressure_then_wait_for_20ms_quiet",
-            "backend_pressure_payload_bytes_required": 0,
+            "preconnected_session_pool": 10000,
+            "selected_sessions": 1000,
+            "release": "single_barrier",
+            "coverage": "one_shot_concurrent_with_business_recommend",
+            "stop_policy": "none_pressure_calls_finish_once",
             "backend_forwarded": False,
         },
         "kvc": {

@@ -11,14 +11,9 @@ REQUESTS=${REQUESTS:-3}
 WARMUP_REQUESTS=${WARMUP_REQUESTS:-1}
 BURST_POOL_SIZE=${BURST_POOL_SIZE:-10000}
 BURST_ACTIVE_CONNECTIONS=${BURST_ACTIVE_CONNECTIONS:-$WRAPPER_CONCURRENCY}
-BURST_PAYLOAD_BYTES=${BURST_PAYLOAD_BYTES:-0}
 BUSINESS_PAYLOAD_BYTES=${BUSINESS_PAYLOAD_BYTES:-102400}
 BRPC_PRESSURE_PAYLOAD_BYTES=${BRPC_PRESSURE_PAYLOAD_BYTES:-102400}
 WRAPPER_ENDPOINT=${WRAPPER_ENDPOINT:-192.168.100.11:18103}
-BRPC_PRESSURE_ENABLED=${BRPC_PRESSURE_ENABLED:-}
-BRPC_PRESSURE_CONCURRENCY=${BRPC_PRESSURE_CONCURRENCY:-999}
-BRPC_PRESSURE_READY_MIN_ACTIVE=${BRPC_PRESSURE_READY_MIN_ACTIVE:-950}
-BRPC_PRESSURE_REQUESTS=${BRPC_PRESSURE_REQUESTS:-1000000}
 OUTPUT_DIR=${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-kvc-combined/$(date +%Y%m%d-%H%M%S)-c${KVC_CONCURRENCY}-n${REQUESTS}}
 KVC_OVERLAY_BACKUP=${KVC_OVERLAY_BACKUP:-$OUTPUT_DIR/kvc-deployment-before.json}
 WRAPPER_OUTPUT_DIR=${WRAPPER_OUTPUT_DIR:-$OUTPUT_DIR/wrapper}
@@ -37,26 +32,13 @@ mkdir -p "$OUTPUT_DIR"
 [[ "$KVC_CONCURRENCY" =~ ^[1-9][0-9]*$ ]] && (( KVC_CONCURRENCY <= 256 )) \
   || die "KVC_CONCURRENCY must be between 1 and 256"
 [[ "$WRAPPER_CONCURRENCY" =~ ^(1|1000)$ ]] || die "WRAPPER_CONCURRENCY must be 1 or 1000"
-if [[ -z "$BRPC_PRESSURE_ENABLED" ]]; then
-  BRPC_PRESSURE_ENABLED=0
-  [[ "$WRAPPER_CONCURRENCY" = 1 ]] || BRPC_PRESSURE_ENABLED=1
-fi
-[[ "$BRPC_PRESSURE_ENABLED" = 0 || "$BRPC_PRESSURE_ENABLED" = 1 ]] \
-  || die "BRPC_PRESSURE_ENABLED must be 0 or 1"
-[[ "$BRPC_PRESSURE_CONCURRENCY" =~ ^[1-9][0-9]*$ ]] \
-  || die "BRPC_PRESSURE_CONCURRENCY must be positive"
-[[ "$BRPC_PRESSURE_READY_MIN_ACTIVE" =~ ^[1-9][0-9]*$ ]] \
-  && (( BRPC_PRESSURE_READY_MIN_ACTIVE <= BRPC_PRESSURE_CONCURRENCY )) \
-  || die "BRPC_PRESSURE_READY_MIN_ACTIVE must be in [1,BRPC_PRESSURE_CONCURRENCY]"
 [[ "$BUSINESS_PAYLOAD_BYTES" =~ ^[0-9]+$ ]] && (( BUSINESS_PAYLOAD_BYTES <= 1048576 )) \
   || die "BUSINESS_PAYLOAD_BYTES must be in [0,1048576]"
 [[ "$BRPC_PRESSURE_PAYLOAD_BYTES" =~ ^[1-9][0-9]*$ ]] \
   && (( BRPC_PRESSURE_PAYLOAD_BYTES <= 1048576 )) \
   || die "BRPC_PRESSURE_PAYLOAD_BYTES must be in [1,1048576]"
-if [[ "$BRPC_PRESSURE_ENABLED" = 1 ]]; then
-  (( WRAPPER_CONCURRENCY == BRPC_PRESSURE_CONCURRENCY + 1 )) \
-    || die "WRAPPER_CONCURRENCY must equal BRPC_PRESSURE_CONCURRENCY + 1"
-fi
+[[ "$BUSINESS_PAYLOAD_BYTES" = 102400 ]] \
+  || die "one-shot BRPC matrix requires BUSINESS_PAYLOAD_BYTES=102400"
 [[ "$KVC_PRESSURE_KEY_COUNT" =~ ^[0-9]+$ ]] || die "KVC_PRESSURE_KEY_COUNT must be non-negative"
 (( KVC_PRESSURE_KEY_COUNT <= KVC_CONCURRENCY - 1 )) \
   || die "KVC_PRESSURE_KEY_COUNT must not exceed KVC pressure lanes"
@@ -117,8 +99,10 @@ echo "== Deploy preconnected BRPC Wrapper full chain =="
 set +e
 NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
   WRAPPER_ENDPOINT="$WRAPPER_ENDPOINT" \
-  BURST_CONCURRENCY=1 BURST_POOL_SIZE=1 BURST_ACTIVE_CONNECTIONS=1 \
-  BURST_PAYLOAD_BYTES=0 BUSINESS_PAYLOAD_BYTES="$BUSINESS_PAYLOAD_BYTES" \
+  BURST_CONCURRENCY="$WRAPPER_CONCURRENCY" BURST_POOL_SIZE="$BURST_POOL_SIZE" \
+  BURST_ACTIVE_CONNECTIONS="$BURST_ACTIVE_CONNECTIONS" \
+  BURST_PAYLOAD_BYTES="$BRPC_PRESSURE_PAYLOAD_BYTES" \
+  BUSINESS_PAYLOAD_BYTES="$BUSINESS_PAYLOAD_BYTES" \
   BUILD_PAIREC_IMAGE=0 IMPORT_PAIREC_IMAGE=0 \
   OUTPUT_DIR="$WRAPPER_OUTPUT_DIR" \
   bash scripts/deploy_and_validate_pairec_brpc_wrapper_full.sh \
@@ -129,19 +113,8 @@ set -e
 
 echo "== Run KVC contention through the deployed BRPC Wrapper =="
 STARTED_AT="$(date --iso-8601=seconds)"
-contention_mode=baseline
-[[ "$BRPC_PRESSURE_ENABLED" = 0 ]] || contention_mode=brpc
 set +e
-NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE="$contention_mode" \
-  BRPC_LOAD_ENDPOINT="$WRAPPER_ENDPOINT" \
-  BRPC_LOAD_CONCURRENCY="$BRPC_PRESSURE_CONCURRENCY" \
-  BRPC_LOAD_PAYLOAD_BYTES="$BRPC_PRESSURE_PAYLOAD_BYTES" \
-  BRPC_LOAD_REQUESTS="$BRPC_PRESSURE_REQUESTS" BRPC_LOAD_QPS=0 \
-  BRPC_LOAD_REUSE_CONNECTIONS=1 BRPC_LOAD_READY_AFTER_FIRST_ROUND=1 \
-  BRPC_LOAD_READY_MIN_ACTIVE="$BRPC_PRESSURE_READY_MIN_ACTIVE" \
-  BRPC_STOP_AT_WRAPPER_START="$BRPC_PRESSURE_ENABLED" \
-  BRPC_LOAD_POD_SELECTOR=app=brpc-burst-wrapper \
-  BRPC_LOAD_CONTAINER=brpc-burst-wrapper LOAD_SETTLE_SECONDS=0 \
+NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE=baseline \
   KVC_BURST_CONTAINER=kvc-burst-wrapper KVC_BURST_REQUIRE_COMPLETE=1 \
   KVC_BURST_PRESTART_PRESSURE=0 \
   KVC_BURST_DYNAMIC_ARM=1 KVC_BURST_PRESSURE_KEY_COUNT="$KVC_PRESSURE_KEY_COUNT" \
@@ -170,9 +143,7 @@ python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log
   "$OUTPUT_DIR/summary.json" "$WRAPPER_CONCURRENCY" "$KVC_CONCURRENCY" \
   "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" "$KVC_OBJECT_SIZE" \
   "$KVC_PRESSURE_KEY_COUNT" "$KVC_SUSTAINED_PRESSURE" "$KVC_INPROCESS_PRESSURE" \
-  "$BUSINESS_PAYLOAD_BYTES" "$BRPC_PRESSURE_PAYLOAD_BYTES" \
-  "$BRPC_PRESSURE_ENABLED" \
-  "$BRPC_PRESSURE_CONCURRENCY" "$BRPC_PRESSURE_READY_MIN_ACTIVE" <<'PY'
+  "$BUSINESS_PAYLOAD_BYTES" "$BRPC_PRESSURE_PAYLOAD_BYTES" <<'PY'
 import json, math, pathlib, statistics, sys
 contention = json.load(open(sys.argv[1]))
 wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
@@ -186,9 +157,6 @@ kvc_sustained_pressure = sys.argv[10] == "1"
 kvc_inprocess_pressure = sys.argv[11] == "1"
 business_payload_bytes = int(sys.argv[12])
 brpc_pressure_payload_bytes = int(sys.argv[13])
-brpc_pressure_enabled = sys.argv[14] == "1"
-brpc_pressure_concurrency = int(sys.argv[15])
-brpc_pressure_ready_min_active = int(sys.argv[16])
 valid = contention.get("valid_repeats") == contention.get("expected_repeats")
 rows = []
 
@@ -217,12 +185,20 @@ def log_value(line, key):
             return token[len(prefix):]
     raise AssertionError((key, line))
 
+def optional_log_value(line, key, default):
+    try:
+        return log_value(line, key)
+    except AssertionError:
+        return default
+
 for row in contention.get("rows", []):
     replay = pathlib.Path(row["summary_path"]).parent
     trace = json.load(open(replay / "summary.json"))
     request_id = trace["request_id"]
     pairec_events = json_events(replay / "pairec_stdout.log")
     pipeline = one(pairec_events, "pipeline_trace_complete", request_id)
+    wrapper_burst_start = one(
+        pairec_events, "pairec_brpc_burst_start", request_id)
     business = one(pairec_events, "pairec_brpc_burst_business_complete", request_id)
     wrapper_burst = one(pairec_events, "pairec_brpc_burst_complete", request_id)
     assert pipeline["status"] == "ok" and pipeline["valid"] is True, pipeline
@@ -231,9 +207,16 @@ for row in contention.get("rows", []):
         assert spans[name]["status"] == "ok", (name, spans[name])
     for name in ("vector_recall", "generative_recall", "deepfm_rank"):
         assert spans[name]["protocol"] == "brpc", (name, spans[name])
-    assert business["concurrency"] == 1 and business["business_success"], business
-    assert wrapper_burst["concurrency"] == 1 and wrapper_burst["burst_valid"], wrapper_burst
-    assert wrapper_burst["pressure_requests"] == 0, wrapper_burst
+    pressure_requests = max(wrapper_concurrency - 1, 0)
+    assert business["concurrency"] == wrapper_concurrency, business
+    assert business["business_success"], business
+    assert wrapper_burst["concurrency"] == wrapper_concurrency, wrapper_burst
+    assert wrapper_burst["burst_valid"], wrapper_burst
+    assert wrapper_burst["pressure_requests"] == pressure_requests, wrapper_burst
+    assert wrapper_burst["pressure_success"] == pressure_requests, wrapper_burst
+    assert wrapper_burst["pressure_errors"] == 0, wrapper_burst
+    assert (wrapper_burst_start["pressure_payload_bytes"]
+            == brpc_pressure_payload_bytes), wrapper_burst_start
     kvc_events = [event for event in trace["kvc_proxy_events"]
                   if event.get("event") == "kvc_burst_complete"
                   and event.get("request_id") == request_id]
@@ -304,60 +287,49 @@ for row in contention.get("rows", []):
     wrapper_pressure_drain_quiet_ms = 0.0
     brpc_pressure_stop_signal_delay_ms = 0.0
     if len(matches) == 1:
-        wrapper_active_health_at_start = int(log_value(matches[0], "active_health_at_start"))
-        wrapper_max_active_health = int(log_value(matches[0], "max_active_health"))
-        wrapper_health_calls_at_start = int(log_value(matches[0], "health_calls_at_start"))
+        wrapper_active_health_at_start = int(
+            optional_log_value(matches[0], "active_health_at_start", 0))
+        wrapper_max_active_health = int(
+            optional_log_value(matches[0], "max_active_health", 0))
+        wrapper_health_calls_at_start = int(
+            optional_log_value(matches[0], "health_calls_at_start", 0))
         wrapper_health_calls_during_recommend = int(
-            log_value(matches[0], "health_calls_during_recommend"))
+            optional_log_value(matches[0], "health_calls_during_recommend", 0))
         wrapper_health_payload_bytes_during_recommend = int(
-            log_value(matches[0], "health_payload_bytes_during_recommend"))
+            optional_log_value(
+                matches[0], "health_payload_bytes_during_recommend", 0))
         wrapper_health_calls_during_backend = int(
-            log_value(matches[0], "health_calls_during_backend"))
+            optional_log_value(matches[0], "health_calls_during_backend", 0))
         wrapper_health_payload_bytes_during_backend = int(
-            log_value(matches[0], "health_payload_bytes_during_backend"))
+            optional_log_value(matches[0], "health_payload_bytes_during_backend", 0))
         wrapper_pressure_drain_required = int(
-            log_value(matches[0], "pressure_drain_required"))
+            optional_log_value(matches[0], "pressure_drain_required", 0))
         wrapper_pressure_drain_success = int(
-            log_value(matches[0], "pressure_drain_success"))
+            optional_log_value(matches[0], "pressure_drain_success", 1))
         wrapper_pressure_drain_ms = float(
-            log_value(matches[0], "pressure_drain_ms"))
+            optional_log_value(matches[0], "pressure_drain_ms", 0.0))
         wrapper_pressure_drain_quiet_ms = float(
-            log_value(matches[0], "pressure_drain_quiet_ms"))
-        if brpc_pressure_enabled:
-            signal = json.load(open(replay.parent / "brpc-pressure-stop-signal.json"))
-            recommend_start_epoch_ns = int(
-                log_value(matches[0], "recommend_start_epoch_ns"))
-            brpc_pressure_stop_signal_delay_ms = max(
-                0.0, (signal["signal_epoch_ns"] - recommend_start_epoch_ns) / 1_000_000.0)
-            assert wrapper_pressure_drain_required == 1, matches[0]
-            assert wrapper_pressure_drain_success == 1, matches[0]
-            assert wrapper_pressure_drain_quiet_ms >= 20.0, matches[0]
-            assert wrapper_health_calls_during_recommend > 0, matches[0]
-            assert (wrapper_health_payload_bytes_during_recommend
-                    >= brpc_pressure_payload_bytes), matches[0]
-            assert wrapper_health_payload_bytes_during_backend == 0, matches[0]
-        else:
-            assert wrapper_pressure_drain_required == 0, matches[0]
-            assert wrapper_health_payload_bytes_during_recommend == 0, matches[0]
+            optional_log_value(matches[0], "pressure_drain_quiet_ms", 0.0))
+        # One-shot pressure uses the original zero-filled Health payload and
+        # therefore must never enter the coordinated external drain path.
+        assert wrapper_pressure_drain_required == 0, matches[0]
+        assert wrapper_pressure_drain_ms == 0.0, matches[0]
     coordination_ms = float(kvc["coordination_wait_ms"])
-    total_coordination_ms = coordination_ms + wrapper_pressure_drain_ms
     client_e2e_actual_ms = float(trace["client"]["client_e2e_ms"])
     runner_actual_ms = executor[0]["runner_us"] / 1000.0
     rows.append({
         "request_id": request_id,
         "client_e2e_ms": client_e2e_actual_ms,
-        "client_e2e_adjusted_ms": max(0.0, client_e2e_actual_ms - total_coordination_ms),
+        "client_e2e_adjusted_ms": max(0.0, client_e2e_actual_ms - coordination_ms),
         "pairec_total_ms": pipeline["pairec_total_us"] / 1000.0,
-        "pairec_total_adjusted_ms": max(
-            0.0, pipeline["pairec_total_us"] / 1000.0 - wrapper_pressure_drain_ms),
+        "pairec_total_adjusted_ms": pipeline["pairec_total_us"] / 1000.0,
         "vector_recall_ms": spans["vector_recall"]["duration_us"] / 1000.0,
         "generative_recall_ms": spans["generative_recall"]["duration_us"] / 1000.0,
         "deepfm_rank_ms": spans["deepfm_rank"]["duration_us"] / 1000.0,
         "rerank_ms": spans["rerank"]["duration_us"] / 1000.0,
         "front_brpc_ms": business["business_front_brpc_ms"],
         "wrapper_total_ms": business["wrapper_total_ms"],
-        "wrapper_total_adjusted_ms": max(
-            0.0, business["wrapper_total_ms"] - wrapper_pressure_drain_ms),
+        "wrapper_total_adjusted_ms": business["wrapper_total_ms"],
         "backend_brpc_ms": business["wrapper_backend_brpc_ms"],
         "runner_ms": runner_actual_ms,
         "runner_adjusted_ms": max(0.0, runner_actual_ms - coordination_ms),
@@ -484,11 +456,11 @@ result = {
     "wrapper_concurrency": wrapper_concurrency,
     "business_payload_bytes": business_payload_bytes,
     "brpc_pressure_payload_bytes": brpc_pressure_payload_bytes,
-    "embedded_burst_concurrency": 1,
-    "brpc_pressure_enabled": brpc_pressure_enabled,
-    "brpc_pressure_concurrency": brpc_pressure_concurrency if brpc_pressure_enabled else 0,
-    "brpc_pressure_ready_min_active": (
-        brpc_pressure_ready_min_active if brpc_pressure_enabled else 0),
+    "brpc_pressure_model": "synchronized_one_shot_burst",
+    "embedded_burst_concurrency": wrapper_concurrency,
+    "brpc_pressure_enabled": wrapper_concurrency > 1,
+    "brpc_pressure_concurrency": max(wrapper_concurrency - 1, 0),
+    "brpc_pressure_ready_min_active": 0,
     "kvc_concurrency": kvc_concurrency,
     "kvc_object_size_bytes": kvc_object_size,
     "kvc_pressure_key_count": kvc_pressure_key_count,
