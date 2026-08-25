@@ -41,7 +41,12 @@ POD="$(kubectl -n "$NAMESPACE" get pod -l "app=${DEPLOYMENT}" \
 [ -n "$POD" ] || die "wrapper pod was not found"
 
 echo "== Wrapper runtime and CPU placement =="
-kubectl -n "$NAMESPACE" exec "$POD" -- bash -lc '
+qos_class="$(kubectl -n "$NAMESPACE" get pod "$POD" \
+  -o jsonpath='{.status.qosClass}')"
+echo "qos_class=${qos_class}"
+[[ "$qos_class" = "Guaranteed" ]] \
+  || die "wrapper Pod must have Guaranteed QoS, got: ${qos_class}"
+kubectl -n "$NAMESPACE" exec "$POD" -- env -u LD_PRELOAD bash -c '
   test -x /opt/pairec-brpc/bin/brpc_burst_wrapper
   grep -E "Cpus_allowed_list|Mems_allowed_list" /proc/1/status
   if test -f /sys/fs/cgroup/cpu.max; then
