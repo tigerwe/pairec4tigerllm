@@ -15,6 +15,20 @@ import (
 	proto "github.com/gogo/protobuf/proto"
 )
 
+func TestCoordinatedPressurePadding(t *testing.T) {
+	padding := makeCoordinatedPressurePadding(102400)
+	if len(padding) != 102400 {
+		t.Fatalf("padding length=%d, want 102400", len(padding))
+	}
+	if !bytes.HasPrefix(padding, []byte(coordinatedPressureMarker)) {
+		t.Fatalf("padding does not start with %q", coordinatedPressureMarker)
+	}
+	short := makeCoordinatedPressurePadding(4)
+	if string(short) != coordinatedPressureMarker[:4] {
+		t.Fatalf("short marker=%q", short)
+	}
+}
+
 func TestBRPCSessionReusesConnection(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

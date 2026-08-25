@@ -35,6 +35,7 @@ func main() {
 	timeoutMs := flag.Int("timeout_ms", getenvInt("TIMEOUT_MS", 5000), "request timeout in ms")
 	maxRetries := flag.Int("max_retries", getenvInt("MAX_RETRIES", 1), "max retries")
 	payloadBytes := flag.Int("payload_bytes", getenvInt("PAYLOAD_BYTES", 0), "extra protobuf payload padding bytes")
+	coordinatedPressure := flag.Bool("coordinated_pressure", getenvBool("COORDINATED_PRESSURE", false), "mark Health payloads for wrapper-coordinated stop and drain")
 	pressurePayloadBytes := flag.Int("pressure_payload_bytes", getenvInt("PRESSURE_PAYLOAD_BYTES", -1), "Health payload bytes in burst mode; defaults to payload_bytes")
 	businessPayloadBytes := flag.Int("business_payload_bytes", getenvInt("BUSINESS_PAYLOAD_BYTES", 0), "Recommend payload bytes in burst mode")
 	burstConcurrency := flag.Int("burst_concurrency", getenvInt("BURST_CONCURRENCY", 0), "total burst lanes; 1 Recommend plus N-1 Health; defaults to concurrency")
@@ -253,7 +254,13 @@ func main() {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutMs)*time.Millisecond)
 			started := time.Now()
 			if useSessions {
-				resp, err := sessions[worker].HealthCheckWithPayload(ctx, *payloadBytes)
+				var resp *recall.BRPCHealthResponse
+				var err error
+				if *coordinatedPressure {
+					resp, err = sessions[worker].HealthCheckWithCoordinatedPressure(ctx, *payloadBytes)
+				} else {
+					resp, err = sessions[worker].HealthCheckWithPayload(ctx, *payloadBytes)
+				}
 				cancel()
 				result.latencyUs = time.Since(started).Microseconds()
 				result.latencyMs = result.latencyUs / 1000
@@ -266,7 +273,13 @@ func main() {
 				result.backend = resp.Backend
 				return result
 			}
-			resp, err := clients[worker%len(clients)].HealthCheckWithPayload(ctx, *payloadBytes)
+			var resp *recall.BRPCHealthResponse
+			var err error
+			if *coordinatedPressure {
+				resp, err = clients[worker%len(clients)].HealthCheckWithCoordinatedPressure(ctx, *payloadBytes)
+			} else {
+				resp, err = clients[worker%len(clients)].HealthCheckWithPayload(ctx, *payloadBytes)
+			}
 			cancel()
 			result.latencyUs = time.Since(started).Microseconds()
 			result.latencyMs = result.latencyUs / 1000

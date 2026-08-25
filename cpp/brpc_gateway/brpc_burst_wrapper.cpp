@@ -1,8 +1,10 @@
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include <brpc/channel.h>
@@ -81,6 +83,24 @@ void UpdateMax(std::atomic<int64_t>* maximum, int64_t value) {
   }
 }
 
+int64_t SteadyMicros() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+int64_t SystemNanos() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+bool IsCoordinatedPressure(
+    const pairec::inference::HealthRequest& request) {
+  static const std::string marker = "PAIREC_BRPC_STOP_V1";
+  return request.payload_padding().compare(0, marker.size(), marker) == 0;
+}
+
 class ActiveCounterGuard {
  public:
   ActiveCounterGuard(std::atomic<int64_t>* active, std::atomic<int64_t>* maximum)
@@ -150,10 +170,12 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
     ActiveCounterGuard total_guard(&active_total_, &max_active_total_);
     max_health_while_recommend_.store(0, std::memory_order_relaxed);
     active_recommend_.fetch_add(1, std::memory_order_relaxed);
+    const int64_t recommend_start_epoch_ns = SystemNanos();
 
     std::cout << "[brpc-burst-wrapper] phase=recommend_start"
               << " request_id=" << request->request_id()
               << " user_id=" << request->user_id()
+              << " recommend_start_epoch_ns=" << recommend_start_epoch_ns
               << " active_health=" << active_health_.load(std::memory_order_relaxed)
               << " backend=" << backend_ << std::endl;
 
@@ -162,17 +184,53 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
         health_calls_.load(std::memory_order_relaxed);
     const int64_t health_payload_bytes_at_start =
         health_payload_bytes_.load(std::memory_order_relaxed);
+    const int64_t last_pressure_health_us =
+        last_pressure_health_us_.load(std::memory_order_relaxed);
+    const bool pressure_drain_required =
+        last_pressure_health_us > 0 &&
+        SteadyMicros() - last_pressure_health_us <= 100000;
     UpdateMax(&max_health_while_recommend_, health_at_start);
     butil::Timer wrapper_timer;
     wrapper_timer.start();
+
+    bool pressure_drain_success = true;
+    double pressure_drain_ms = 0.0;
+    double pressure_drain_quiet_ms = 0.0;
+    if (pressure_drain_required) {
+      const int64_t drain_started_us = SteadyMicros();
+      while (true) {
+        const int64_t now_us = SteadyMicros();
+        const int64_t latest_us =
+            last_pressure_health_us_.load(std::memory_order_relaxed);
+        pressure_drain_quiet_ms = (now_us - latest_us) / 1000.0;
+        pressure_drain_ms = (now_us - drain_started_us) / 1000.0;
+        if (pressure_drain_quiet_ms >= 20.0) {
+          break;
+        }
+        if (pressure_drain_ms >= 2000.0) {
+          pressure_drain_success = false;
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
 
     double backend_rpc_ms = 0.0;
     std::string error;
     const size_t front_payload_bytes = request->payload_padding().size();
     pairec::inference::RecommendRequest backend_request(*request);
     backend_request.clear_payload_padding();
-    const bool ok = forwarder_->Recommend(
-        backend_request, response, &backend_rpc_ms, &error);
+    const int64_t health_calls_at_backend_start =
+        health_calls_.load(std::memory_order_relaxed);
+    const int64_t health_payload_bytes_at_backend_start =
+        health_payload_bytes_.load(std::memory_order_relaxed);
+    bool ok = false;
+    if (pressure_drain_success) {
+      ok = forwarder_->Recommend(
+          backend_request, response, &backend_rpc_ms, &error);
+    } else {
+      error = "BRPC pressure did not drain before backend forwarding";
+    }
     wrapper_timer.stop();
     active_recommend_.fetch_sub(1, std::memory_order_relaxed);
 
@@ -181,6 +239,12 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
     const int64_t health_payload_bytes_during_recommend =
         health_payload_bytes_.load(std::memory_order_relaxed) -
         health_payload_bytes_at_start;
+    const int64_t health_calls_during_backend =
+        health_calls_.load(std::memory_order_relaxed) -
+        health_calls_at_backend_start;
+    const int64_t health_payload_bytes_during_backend =
+        health_payload_bytes_.load(std::memory_order_relaxed) -
+        health_payload_bytes_at_backend_start;
     const int64_t max_health =
         max_health_while_recommend_.load(std::memory_order_relaxed);
     const double wrapper_total_ms = wrapper_timer.m_elapsed();
@@ -212,11 +276,20 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
               << " active_health_at_start=" << health_at_start
               << " max_active_health=" << max_health
               << " max_active_total=" << max_health + 1
+              << " recommend_start_epoch_ns=" << recommend_start_epoch_ns
+              << " pressure_drain_required=" << pressure_drain_required
+              << " pressure_drain_success=" << pressure_drain_success
+              << " pressure_drain_ms=" << pressure_drain_ms
+              << " pressure_drain_quiet_ms=" << pressure_drain_quiet_ms
               << " health_calls_at_start=" << health_calls_at_start
               << " health_calls_during_recommend="
               << health_calls_during_recommend
               << " health_payload_bytes_during_recommend="
               << health_payload_bytes_during_recommend
+              << " health_calls_during_backend="
+              << health_calls_during_backend
+              << " health_payload_bytes_during_backend="
+              << health_payload_bytes_during_backend
               << " front_payload_bytes=" << front_payload_bytes
               << " backend_payload_bytes=" << backend_request.payload_padding().size()
               << " backend=" << backend_
@@ -235,6 +308,9 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
     health_payload_bytes_.fetch_add(
         static_cast<int64_t>(request->payload_padding().size()),
         std::memory_order_relaxed);
+    if (IsCoordinatedPressure(*request)) {
+      last_pressure_health_us_.store(SteadyMicros(), std::memory_order_relaxed);
+    }
     const int64_t health = active_health_.load(std::memory_order_relaxed);
     if (active_recommend_.load(std::memory_order_relaxed) > 0) {
       UpdateMax(&max_health_while_recommend_, health);
@@ -259,6 +335,7 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
   std::atomic<int64_t> max_health_while_recommend_{0};
   std::atomic<int64_t> health_calls_{0};
   std::atomic<int64_t> health_payload_bytes_{0};
+  std::atomic<int64_t> last_pressure_health_us_{0};
 };
 
 }  // namespace

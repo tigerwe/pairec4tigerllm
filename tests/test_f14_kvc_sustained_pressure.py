@@ -399,7 +399,8 @@ class SustainedPressureStructureTest(unittest.TestCase):
             'run_case combined "$BRPC_WRAPPER_CONCURRENCY"',
             '"design": "2x2_factorial"',
             '"pressure_health_requests": brpc_pressure_concurrency',
-            '"coverage": "full_pairec_http_request"',
+            '"coverage": "until_business_recommend_arrives_at_wrapper"',
+            '"stop_policy": "terminate_external_pressure_then_wait_for_20ms_quiet"',
             '"pressure_lanes": 31',
             '"interaction": (averages["combined"] - averages["brpc_only"]',
             '"classification": "PAIREC_BRPC_WRAPPER_KVC_FACTORIAL_OK"',
@@ -481,7 +482,13 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn('BRPC_LOAD_READY_MIN_ACTIVE="${BRPC_LOAD_READY_MIN_ACTIVE:-$BRPC_LOAD_CONCURRENCY}"', contention)
         self.assertIn('BRPC_LOAD_READY_AFTER_FIRST_ROUND=1', combined)
         self.assertIn('BRPC_LOAD_READY_MIN_ACTIVE="$BRPC_PRESSURE_READY_MIN_ACTIVE"', combined)
+        self.assertIn('BRPC_STOP_AT_WRAPPER_START="$BRPC_PRESSURE_ENABLED"', combined)
+        self.assertIn('--coordinated_pressure="$BRPC_STOP_AT_WRAPPER_START"', contention)
         self.assertIn('LOAD_SETTLE_SECONDS=0', combined)
+        self.assertIn('start_brpc_stop_watcher', contention)
+        self.assertIn('brpc-pressure-stop-signal.json', contention)
+        self.assertIn('wrapper_pressure_drain_quiet_ms >= 20.0', combined)
+        self.assertIn('wrapper_health_payload_bytes_during_backend == 0', combined)
         self.assertIn('wrapper_health_calls_during_recommend > 0', combined)
         self.assertIn('wrapper_health_payload_bytes_during_recommend', combined)
         self.assertIn('>= brpc_pressure_payload_bytes', combined)
@@ -502,6 +509,9 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn('backend_payload_bytes=', wrapper)
         self.assertIn('health_calls_during_recommend=', wrapper)
         self.assertIn('health_payload_bytes_during_recommend=', wrapper)
+        self.assertIn('pressure_drain_ms=', wrapper)
+        self.assertIn('health_payload_bytes_during_backend=', wrapper)
+        self.assertIn('PAIREC_BRPC_STOP_V1', wrapper)
 
     def test_wrapper_hostpath_deploy_restarts_and_verifies_binary_identity(self):
         deploy = BRPC_WRAPPER_APPLY.read_text()

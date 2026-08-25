@@ -139,6 +139,7 @@ NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE="$contention_mode" \
   BRPC_LOAD_REQUESTS="$BRPC_PRESSURE_REQUESTS" BRPC_LOAD_QPS=0 \
   BRPC_LOAD_REUSE_CONNECTIONS=1 BRPC_LOAD_READY_AFTER_FIRST_ROUND=1 \
   BRPC_LOAD_READY_MIN_ACTIVE="$BRPC_PRESSURE_READY_MIN_ACTIVE" \
+  BRPC_STOP_AT_WRAPPER_START="$BRPC_PRESSURE_ENABLED" \
   BRPC_LOAD_POD_SELECTOR=app=brpc-burst-wrapper \
   BRPC_LOAD_CONTAINER=brpc-burst-wrapper LOAD_SETTLE_SECONDS=0 \
   KVC_BURST_CONTAINER=kvc-burst-wrapper KVC_BURST_REQUIRE_COMPLETE=1 \
@@ -295,6 +296,13 @@ for row in contention.get("rows", []):
     wrapper_health_calls_at_start = -1
     wrapper_health_calls_during_recommend = -1
     wrapper_health_payload_bytes_during_recommend = -1
+    wrapper_health_calls_during_backend = -1
+    wrapper_health_payload_bytes_during_backend = -1
+    wrapper_pressure_drain_required = -1
+    wrapper_pressure_drain_success = -1
+    wrapper_pressure_drain_ms = 0.0
+    wrapper_pressure_drain_quiet_ms = 0.0
+    brpc_pressure_stop_signal_delay_ms = 0.0
     if len(matches) == 1:
         wrapper_active_health_at_start = int(log_value(matches[0], "active_health_at_start"))
         wrapper_max_active_health = int(log_value(matches[0], "max_active_health"))
@@ -303,26 +311,53 @@ for row in contention.get("rows", []):
             log_value(matches[0], "health_calls_during_recommend"))
         wrapper_health_payload_bytes_during_recommend = int(
             log_value(matches[0], "health_payload_bytes_during_recommend"))
+        wrapper_health_calls_during_backend = int(
+            log_value(matches[0], "health_calls_during_backend"))
+        wrapper_health_payload_bytes_during_backend = int(
+            log_value(matches[0], "health_payload_bytes_during_backend"))
+        wrapper_pressure_drain_required = int(
+            log_value(matches[0], "pressure_drain_required"))
+        wrapper_pressure_drain_success = int(
+            log_value(matches[0], "pressure_drain_success"))
+        wrapper_pressure_drain_ms = float(
+            log_value(matches[0], "pressure_drain_ms"))
+        wrapper_pressure_drain_quiet_ms = float(
+            log_value(matches[0], "pressure_drain_quiet_ms"))
         if brpc_pressure_enabled:
+            signal = json.load(open(replay.parent / "brpc-pressure-stop-signal.json"))
+            recommend_start_epoch_ns = int(
+                log_value(matches[0], "recommend_start_epoch_ns"))
+            brpc_pressure_stop_signal_delay_ms = max(
+                0.0, (signal["signal_epoch_ns"] - recommend_start_epoch_ns) / 1_000_000.0)
+            assert wrapper_pressure_drain_required == 1, matches[0]
+            assert wrapper_pressure_drain_success == 1, matches[0]
+            assert wrapper_pressure_drain_quiet_ms >= 20.0, matches[0]
             assert wrapper_health_calls_during_recommend > 0, matches[0]
             assert (wrapper_health_payload_bytes_during_recommend
                     >= brpc_pressure_payload_bytes), matches[0]
+            assert wrapper_health_payload_bytes_during_backend == 0, matches[0]
         else:
+            assert wrapper_pressure_drain_required == 0, matches[0]
             assert wrapper_health_payload_bytes_during_recommend == 0, matches[0]
     coordination_ms = float(kvc["coordination_wait_ms"])
+    total_coordination_ms = coordination_ms + wrapper_pressure_drain_ms
     client_e2e_actual_ms = float(trace["client"]["client_e2e_ms"])
     runner_actual_ms = executor[0]["runner_us"] / 1000.0
     rows.append({
         "request_id": request_id,
         "client_e2e_ms": client_e2e_actual_ms,
-        "client_e2e_adjusted_ms": max(0.0, client_e2e_actual_ms - coordination_ms),
+        "client_e2e_adjusted_ms": max(0.0, client_e2e_actual_ms - total_coordination_ms),
         "pairec_total_ms": pipeline["pairec_total_us"] / 1000.0,
+        "pairec_total_adjusted_ms": max(
+            0.0, pipeline["pairec_total_us"] / 1000.0 - wrapper_pressure_drain_ms),
         "vector_recall_ms": spans["vector_recall"]["duration_us"] / 1000.0,
         "generative_recall_ms": spans["generative_recall"]["duration_us"] / 1000.0,
         "deepfm_rank_ms": spans["deepfm_rank"]["duration_us"] / 1000.0,
         "rerank_ms": spans["rerank"]["duration_us"] / 1000.0,
         "front_brpc_ms": business["business_front_brpc_ms"],
         "wrapper_total_ms": business["wrapper_total_ms"],
+        "wrapper_total_adjusted_ms": max(
+            0.0, business["wrapper_total_ms"] - wrapper_pressure_drain_ms),
         "backend_brpc_ms": business["wrapper_backend_brpc_ms"],
         "runner_ms": runner_actual_ms,
         "runner_adjusted_ms": max(0.0, runner_actual_ms - coordination_ms),
@@ -345,6 +380,13 @@ for row in contention.get("rows", []):
             wrapper_health_calls_during_recommend),
         "wrapper_external_health_payload_bytes_during_recommend": float(
             wrapper_health_payload_bytes_during_recommend),
+        "wrapper_external_health_calls_during_backend": float(
+            wrapper_health_calls_during_backend),
+        "wrapper_external_health_payload_bytes_during_backend": float(
+            wrapper_health_payload_bytes_during_backend),
+        "brpc_pressure_drain_ms": wrapper_pressure_drain_ms,
+        "brpc_pressure_drain_quiet_ms": wrapper_pressure_drain_quiet_ms,
+        "brpc_pressure_stop_signal_delay_ms": brpc_pressure_stop_signal_delay_ms,
         "kvc_business_get_ms": kvc["business_get_ms"],
         "kvc_business_get_1_ms": float(kvc.get("business_get_1_ms", 0.0)),
         "kvc_business_get_2_ms": float(kvc.get("business_get_2_ms", 0.0)),

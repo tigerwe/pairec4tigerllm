@@ -86,8 +86,18 @@ func (c *BRPCRecommendClient) HealthCheck(ctx context.Context) (*brpcHealthRespo
 }
 
 func (c *BRPCRecommendClient) HealthCheckWithPayload(ctx context.Context, payloadBytes int) (*brpcHealthResponse, error) {
+	return c.healthCheckWithPadding(ctx, makePayloadPadding(payloadBytes))
+}
+
+// HealthCheckWithCoordinatedPressure marks a Health payload as pressure that
+// the wrapper may drain before forwarding a business Recommend request.
+func (c *BRPCRecommendClient) HealthCheckWithCoordinatedPressure(ctx context.Context, payloadBytes int) (*brpcHealthResponse, error) {
+	return c.healthCheckWithPadding(ctx, makeCoordinatedPressurePadding(payloadBytes))
+}
+
+func (c *BRPCRecommendClient) healthCheckWithPadding(ctx context.Context, padding []byte) (*brpcHealthResponse, error) {
 	var responsePB healthResponsePB
-	if err := c.call(ctx, "Health", &healthRequestPB{PayloadPadding: makePayloadPadding(payloadBytes)}, &responsePB); err != nil {
+	if err := c.call(ctx, "Health", &healthRequestPB{PayloadPadding: padding}, &responsePB); err != nil {
 		return nil, err
 	}
 	return healthResponseFromProto(&responsePB), nil
@@ -142,8 +152,18 @@ func (s *BRPCRecommendSession) Close() error {
 }
 
 func (s *BRPCRecommendSession) HealthCheckWithPayload(ctx context.Context, payloadBytes int) (*brpcHealthResponse, error) {
+	return s.healthCheckWithPadding(ctx, makePayloadPadding(payloadBytes))
+}
+
+// HealthCheckWithCoordinatedPressure is the persistent-connection variant of
+// BRPCRecommendClient.HealthCheckWithCoordinatedPressure.
+func (s *BRPCRecommendSession) HealthCheckWithCoordinatedPressure(ctx context.Context, payloadBytes int) (*brpcHealthResponse, error) {
+	return s.healthCheckWithPadding(ctx, makeCoordinatedPressurePadding(payloadBytes))
+}
+
+func (s *BRPCRecommendSession) healthCheckWithPadding(ctx context.Context, padding []byte) (*brpcHealthResponse, error) {
 	var responsePB healthResponsePB
-	if err := s.call(ctx, "Health", &healthRequestPB{PayloadPadding: makePayloadPadding(payloadBytes)}, &responsePB); err != nil {
+	if err := s.call(ctx, "Health", &healthRequestPB{PayloadPadding: padding}, &responsePB); err != nil {
 		return nil, err
 	}
 	return healthResponseFromProto(&responsePB), nil

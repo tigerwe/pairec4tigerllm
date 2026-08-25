@@ -21,6 +21,8 @@ BRPC_LOAD_REUSE_CONNECTIONS="${BRPC_LOAD_REUSE_CONNECTIONS:-1}"
 BRPC_LOAD_READY_TIMEOUT_SECONDS="${BRPC_LOAD_READY_TIMEOUT_SECONDS:-30}"
 BRPC_LOAD_READY_AFTER_FIRST_ROUND="${BRPC_LOAD_READY_AFTER_FIRST_ROUND:-0}"
 BRPC_LOAD_READY_MIN_ACTIVE="${BRPC_LOAD_READY_MIN_ACTIVE:-$BRPC_LOAD_CONCURRENCY}"
+BRPC_STOP_AT_WRAPPER_START="${BRPC_STOP_AT_WRAPPER_START:-0}"
+BRPC_WRAPPER_POD_SELECTOR="${BRPC_WRAPPER_POD_SELECTOR:-app=brpc-burst-wrapper}"
 BRPC_PROBE_BIN="${BRPC_PROBE_BIN:-/tmp/probe-go-brpc-client}"
 
 KVC_LOAD_HOST="${KVC_LOAD_HOST:-worker1}"
@@ -105,6 +107,7 @@ RESULT_JSON="${OUT_DIR}/result.json"
 SUMMARY_TXT="${OUT_DIR}/summary.txt"
 
 BRPC_LOAD_PID=""
+BRPC_STOP_WATCH_PID=""
 KVC_SSH_PID=""
 KVC_REMOTE_PID_FILE=""
 KVC_REMOTE_READY_FILE=""
@@ -219,6 +222,10 @@ validate() {
   case "$BRPC_LOAD_READY_AFTER_FIRST_ROUND" in
     0|1) ;;
     *) die "BRPC_LOAD_READY_AFTER_FIRST_ROUND must be 0 or 1" ;;
+  esac
+  case "$BRPC_STOP_AT_WRAPPER_START" in
+    0|1) ;;
+    *) die "BRPC_STOP_AT_WRAPPER_START must be 0 or 1" ;;
   esac
   case "$RESET_INFERENCE_BEFORE_ROUND" in
     0|1) ;;
@@ -424,6 +431,7 @@ start_brpc_load() {
     --concurrency="$BRPC_LOAD_CONCURRENCY" \
     --qps="$BRPC_LOAD_QPS" \
     --payload_bytes="$BRPC_LOAD_PAYLOAD_BYTES" \
+		--coordinated_pressure="$BRPC_STOP_AT_WRAPPER_START" \
     --timeout_ms="$BRPC_LOAD_TIMEOUT_MS" \
 		--max_retries=0 \
 		--reuse_connections="$BRPC_LOAD_REUSE_CONNECTIONS" \
@@ -482,6 +490,64 @@ PY
 		sleep 1
 	done
 	die "BRPC pressure did not reach concurrency=${BRPC_LOAD_CONCURRENCY} within ${BRPC_LOAD_READY_TIMEOUT_SECONDS}s"
+}
+
+start_brpc_stop_watcher() {
+  local round_dir="$1"
+  [ "$BRPC_STOP_AT_WRAPPER_START" = "1" ] || return 0
+  mode_has_brpc || return 0
+  [ -n "$BRPC_LOAD_PID" ] || die "BRPC pressure PID is missing"
+  local pod started_at load_pid signal_file
+  pod="$(kubectl -n "$NAMESPACE" get pod -l "$BRPC_WRAPPER_POD_SELECTOR" \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1].metadata.name}')"
+  [ -n "$pod" ] || die "BRPC Wrapper Pod not found: ${BRPC_WRAPPER_POD_SELECTOR}"
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+  load_pid="$BRPC_LOAD_PID"
+  signal_file="${round_dir}/brpc-pressure-stop-signal.json"
+  rm -f "$signal_file"
+  (
+    kubectl -n "$NAMESPACE" logs -f "$pod" --since-time="$started_at" 2>&1 |
+      while IFS= read -r line; do
+        case "$line" in
+          *"[brpc-burst-wrapper] phase=recommend_start"*)
+            signal_ns="$(date +%s%N)"
+            kill -TERM "$load_pid" >/dev/null 2>&1 || true
+            python3 - "$signal_file" "$signal_ns" "$line" <<'PY'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "event": "brpc_pressure_stop_signal",
+    "signal_epoch_ns": int(sys.argv[2]),
+    "trigger_log": sys.argv[3],
+}) + "\n")
+PY
+            break
+            ;;
+        esac
+      done
+  ) >"${round_dir}/brpc-pressure-stop-watch.log" 2>&1 &
+  BRPC_STOP_WATCH_PID="$!"
+}
+
+finish_brpc_stop_watcher() {
+  local round_dir="$1"
+  [ "$BRPC_STOP_AT_WRAPPER_START" = "1" ] || return 0
+  local attempt
+  for attempt in $(seq 1 50); do
+    [ -s "${round_dir}/brpc-pressure-stop-signal.json" ] && break
+    sleep 0.1
+  done
+  if [ -n "$BRPC_STOP_WATCH_PID" ]; then
+    kill "$BRPC_STOP_WATCH_PID" >/dev/null 2>&1 || true
+    wait "$BRPC_STOP_WATCH_PID" >/dev/null 2>&1 || true
+    BRPC_STOP_WATCH_PID=""
+  fi
+  [ -s "${round_dir}/brpc-pressure-stop-signal.json" ] \
+    || die "BRPC pressure stop watcher did not observe business arrival"
+  if [ -n "$BRPC_LOAD_PID" ]; then
+    wait "$BRPC_LOAD_PID" >/dev/null 2>&1 || true
+    BRPC_LOAD_PID=""
+  fi
 }
 
 check_brpc_load_endpoint() {
@@ -624,6 +690,11 @@ stop_loads() {
     kill "$BRPC_LOAD_PID" >/dev/null 2>&1 || true
     wait "$BRPC_LOAD_PID" >/dev/null 2>&1 || true
     BRPC_LOAD_PID=""
+  fi
+  if [ -n "$BRPC_STOP_WATCH_PID" ]; then
+    kill "$BRPC_STOP_WATCH_PID" >/dev/null 2>&1 || true
+    wait "$BRPC_STOP_WATCH_PID" >/dev/null 2>&1 || true
+    BRPC_STOP_WATCH_PID=""
   fi
   if [ -n "$KVC_REMOTE_PID_FILE" ]; then
     ssh "$KVC_LOAD_HOST" \
@@ -1877,10 +1948,12 @@ for round in $(seq 1 "$REPEATS"); do
 
   replay_attempt=1
   while true; do
+    start_brpc_stop_watcher "$round_dir"
     set +e
     run_replay "$round_dir"
     replay_code="$?"
     set -e
+    finish_brpc_stop_watcher "$round_dir"
     if [ "$replay_code" -ne 0 ] && [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ]; then
       # Preserve the armed control state and Proxy skip reason before disarm.
       capture_kvc_burst_failure "$round_dir"
@@ -1918,6 +1991,7 @@ for round in $(seq 1 "$REPEATS"); do
       replay_code="$prepare_code"
       break
     fi
+    start_brpc_load "$round_dir"
   done
   echo "$replay_attempt" >"${round_dir}/replay.attempts"
   set +e

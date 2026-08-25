@@ -156,6 +156,10 @@ type brpcHealthResponse struct {
 	Backend string
 }
 
+// BRPCHealthResponse exposes the Health result to probe programs without
+// changing the wire representation used by the recall client.
+type BRPCHealthResponse = brpcHealthResponse
+
 func recommendRequestToProto(req *RecommendRequest, requestID string) *recommendRequestPB {
 	history := make([]*semanticIDPB, 0, len(req.History))
 	for _, values := range req.History {
@@ -187,6 +191,14 @@ func makePayloadPadding(size int) []byte {
 		return nil
 	}
 	return make([]byte, size)
+}
+
+const coordinatedPressureMarker = "PAIREC_BRPC_STOP_V1"
+
+func makeCoordinatedPressurePadding(size int) []byte {
+	padding := makePayloadPadding(size)
+	copy(padding, coordinatedPressureMarker)
+	return padding
 }
 
 func recommendResponseFromProto(pb *recommendResponsePB) *RecommendResponse {
