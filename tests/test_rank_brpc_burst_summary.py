@@ -84,6 +84,15 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
         self.assertIn("generation_and_rank_drained=true", full_chain)
         self.assertIn('WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"', benchmark)
         self.assertIn("requires exactly one excluded warmup request", benchmark)
+        self.assertIn(
+            'RANK_DIRECT_ENDPOINT="${RANK_DIRECT_ENDPOINT:-192.168.100.11:18213}"',
+            benchmark,
+        )
+        self.assertIn('RANK_ENDPOINT_OVERRIDE="$RANK_DIRECT_ENDPOINT"', benchmark)
+        self.assertIn('RANK_ENDPOINT_OVERRIDE="${RANK_ENDPOINT_OVERRIDE:-}"', full_chain)
+        self.assertIn('RANK_ENDPOINT_SOURCE="override"', full_chain)
+        self.assertIn('RANK_ENDPOINT_SOURCE="service"', full_chain)
+        self.assertIn('>"$OUTPUT_DIR/rank-endpoint.txt"', full_chain)
 
     def test_valid_pressure_case_and_tail_windows(self):
         with tempfile.TemporaryDirectory() as directory:

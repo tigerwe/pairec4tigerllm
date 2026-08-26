@@ -10,6 +10,7 @@ VECTOR_DEPLOYMENT="${VECTOR_DEPLOYMENT:-vector-recall-brpc}"
 RANK_DEPLOYMENT="${RANK_DEPLOYMENT:-deepfm-rank-brpc}"
 RANK_SERVICE="${RANK_SERVICE:-$RANK_DEPLOYMENT}"
 RANK_PORT="${RANK_PORT:-18211}"
+RANK_ENDPOINT_OVERRIDE="${RANK_ENDPOINT_OVERRIDE:-}"
 WRAPPER_ENDPOINT="${WRAPPER_ENDPOINT:-192.168.100.11:18103}"
 BURST_CONCURRENCY="${BURST_CONCURRENCY:-1}"
 BURST_POOL_SIZE="${BURST_POOL_SIZE:-$BURST_CONCURRENCY}"
@@ -204,14 +205,29 @@ done
 WRAPPER_HOST="${WRAPPER_ENDPOINT%:*}"
 WRAPPER_PORT="${WRAPPER_ENDPOINT##*:}"
 VECTOR_IP="$(kubectl -n "$NAMESPACE" get service vector-recall-brpc -o jsonpath='{.spec.clusterIP}')"
-RANK_IP="$(kubectl -n "$NAMESPACE" get service "$RANK_SERVICE" -o jsonpath='{.spec.clusterIP}')"
-[[ -n "$WRAPPER_HOST" && -n "$WRAPPER_PORT" && -n "$VECTOR_IP" && -n "$RANK_IP" ]] \
+if [[ -n "$RANK_ENDPOINT_OVERRIDE" ]]; then
+  [[ "$RANK_ENDPOINT_OVERRIDE" == *:* ]] \
+    || die "RANK_ENDPOINT_OVERRIDE must be host:port"
+  RANK_HOST="${RANK_ENDPOINT_OVERRIDE%:*}"
+  RANK_EFFECTIVE_PORT="${RANK_ENDPOINT_OVERRIDE##*:}"
+  RANK_ENDPOINT_SOURCE="override"
+else
+  RANK_HOST="$(kubectl -n "$NAMESPACE" get service "$RANK_SERVICE" -o jsonpath='{.spec.clusterIP}')"
+  RANK_EFFECTIVE_PORT="$RANK_PORT"
+  RANK_ENDPOINT_SOURCE="service"
+fi
+[[ "$RANK_EFFECTIVE_PORT" =~ ^[1-9][0-9]*$ ]] && (( RANK_EFFECTIVE_PORT <= 65535 )) \
+  || die "Rank endpoint port must be in [1,65535]"
+RANK_ENDPOINT="${RANK_HOST}:${RANK_EFFECTIVE_PORT}"
+[[ -n "$WRAPPER_HOST" && -n "$WRAPPER_PORT" && -n "$VECTOR_IP" && -n "$RANK_HOST" ]] \
   || die "dependency endpoint is empty"
 
 echo "== Full-chain BRPC Wrapper configuration =="
 echo "wrapper_endpoint=$WRAPPER_ENDPOINT burst_concurrency=$BURST_CONCURRENCY pool_size=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS cpu_shards=$BURST_CPU_SHARDS pressure_payload_bytes=$BURST_PAYLOAD_BYTES business_payload_bytes=$BUSINESS_PAYLOAD_BYTES"
-echo "vector_endpoint=${VECTOR_IP}:18201 rank_endpoint=${RANK_IP}:${RANK_PORT}"
+echo "vector_endpoint=${VECTOR_IP}:18201 rank_endpoint=$RANK_ENDPOINT rank_endpoint_source=$RANK_ENDPOINT_SOURCE"
 echo "deployment=$PAIREC_DEPLOYMENT output_dir=$OUTPUT_DIR"
+printf 'rank_endpoint=%s\nrank_endpoint_source=%s\n' \
+  "$RANK_ENDPOINT" "$RANK_ENDPOINT_SOURCE" >"$OUTPUT_DIR/rank-endpoint.txt"
 
 if [[ "$BUILD_PAIREC_IMAGE" = 1 ]]; then
   echo "== Build PaiRec binary image =="
@@ -226,7 +242,7 @@ fi
 echo "== Render strict full-chain configuration =="
 python3 - "$CONFIG_TEMPLATE" "$OUTPUT_DIR/pairec_config.json" \
   "$WRAPPER_ENDPOINT" "$BURST_CONCURRENCY" "${VECTOR_IP}:18201" \
-  "${RANK_IP}:${RANK_PORT}" "$DEEPFM_MODEL_ROLE" "$BURST_POOL_SIZE" \
+  "$RANK_ENDPOINT" "$DEEPFM_MODEL_ROLE" "$BURST_POOL_SIZE" \
   "$BURST_ACTIVE_CONNECTIONS" "$BURST_CPU_SHARDS" "$BURST_PAYLOAD_BYTES" \
   "$BUSINESS_PAYLOAD_BYTES" "$RANK_TIMEOUT_MS" "$RANK_BUSINESS_PAYLOAD_BYTES" \
   "$RANK_BURST_ENABLED" "$RANK_BURST_CONCURRENCY" "$RANK_BURST_POOL_SIZE" \
@@ -292,7 +308,7 @@ kubectl -n "$NAMESPACE" create configmap "$PAIREC_CONFIGMAP" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 python3 - "$PAIREC_MANIFEST" "$OUTPUT_DIR/pairec.yaml" \
-  "$WRAPPER_HOST" "$WRAPPER_PORT" "$VECTOR_IP" "$RANK_IP" "$RANK_PORT" <<'PY'
+  "$WRAPPER_HOST" "$WRAPPER_PORT" "$VECTOR_IP" "$RANK_HOST" "$RANK_EFFECTIVE_PORT" <<'PY'
 import pathlib, sys
 source,target,wrapper_host,wrapper_port,vector_host,rank_host,rank_port=sys.argv[1:]
 text=pathlib.Path(source).read_text()
