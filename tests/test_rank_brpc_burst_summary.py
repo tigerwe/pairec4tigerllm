@@ -48,6 +48,16 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
             "mountPath: /opt/pairec-brpc/bin/brpc_pipeline_client",
             wrapper_manifest,
         )
+        wrapper_source = (
+            ROOT / "cpp" / "brpc_gateway" / "brpc_rank_burst_wrapper.cpp"
+        ).read_text()
+        self.assertIn("auto* trace = response->mutable_trace();", wrapper_source)
+        self.assertIn(
+            "trace->mutable_context()->CopyFrom(request->context());",
+            wrapper_source,
+        )
+        self.assertIn('trace->set_component("brpc_rank_burst_wrapper");', wrapper_source)
+        self.assertIn("trace->set_attribution_complete(true);", wrapper_source)
 
     def test_valid_pressure_case_and_tail_windows(self):
         with tempfile.TemporaryDirectory() as directory:

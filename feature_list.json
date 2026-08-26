@@ -240,8 +240,8 @@
       ],
       "validation_method": "隔离实验链路中向量召回和 DeepFM 精排只允许 BRPC、禁止 HTTP fallback/retry；1000 请求业务输出与 HTTP 基线一致，完整请求级 Trace 有效率至少 99.9%，PaiRec 阶段闭合误差不超过 max(3000us, 5%)，并输出低基数 Prometheus 指标、资源门禁和 HTTP/BRPC p99 A/B。",
       "validation_evidence": "2026-08-08: 工程与正式远端验收完成。统一 pipeline_service.proto、Go baidu_std BRPC wire/client、两个独立 C++ adapter、Python service trace、PaiRec Controller 单一 TraceRecorder、低基数 Prometheus、隔离双容器 K8s 和一键 A/B/资源门禁均已实现；向量与精排零重试且禁止 HTTP fallback，vector Ready 强制 milvus=true。静态验证包含 Python/汇总 unittest 12/12、相关 Go race 与完整 services build。ARM64/Kubernetes 正式工作负载 1000/1000 请求成功，trace valid=1000/1000、missing=0、invalid=0、无 fallback。E2E avg/p50/p95/p99/max=109.784/108.774/117.382/120.622/126.589ms；PaiRec total p99=119.627ms；生成式/向量/DeepFM span p99=108.794/11.923/12.081ms。HTTP 基线100请求p99=118.422ms，纯BRPC p99增量=2.200ms。五容器无重启/OOM/健康故障；PaiRec CPU throttled period=0.068%，其余为0%，全部通过<=5%门禁。QuotaMultiRecall 每请求确认生成式候选在召回阶段被选中。DataSystem attribution_complete=0/1000，按设计明确标记 native TRT KVC request identity 未传播，未从聚合日志伪造归因。最终 classification=PAIREC_PURE_BRPC_OBSERVABILITY_OK。",
-      "session_progress": "2026-08-26: worker1 Rank部署阻塞逐项定位。缺失模型目录已改回engineering deepfm_out并前置检查；旧缓存镜像缺少adapter/client，现从master新镜像提取并SHA分发Wrapper、adapter、pipeline client三个文件。Rank Pod挂载adapter和client后已成功rollout；随后发现Wrapper清单遗漏readiness所需client挂载，现已补齐同一File hostPath。实验语义、CPU隔离、模型SHA及尾流门禁不变。",
-      "next_step": "master拉取后重跑ship_brpc_rank_burst_wrapper_binary_to_worker.sh，再跑REQUESTS=1；若旧镜像具备所需动态库，应进入CPU隔离和A/B，若缺库则按adapter日志中的具体.so处理。通过业务前端100KiB/后端0B、pressure 999/999、50候选和尾流门禁后再跑REQUESTS=3。",
+      "session_progress": "2026-08-26: worker1 Rank部署阻塞逐项闭环。模型目录和旧镜像二进制问题已通过deepfm_out预检及三个hostPath二进制解决，Rank Pod已成功rollout。Wrapper容器随后正常监听且readiness收到code=200/status=healthy仍失败，最终确认Wrapper Health遗漏client强制要求的ServiceTrace和原始request_id；现已复制TraceContext并补齐component/protocol/status/total_us/attribution字段。实验语义、CPU隔离、模型SHA及尾流门禁不变。",
+      "next_step": "master拉取后必须重新build_brpc_inference_image.sh并ship三个二进制，再跑REQUESTS=1；要求Wrapper readiness、CPU隔离、业务前端100KiB/后端0B、pressure 999/999、50候选及尾流时序全部通过后再跑REQUESTS=3。",
       "done_date": "2026-08-08"
     },
     {

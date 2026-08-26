@@ -220,6 +220,7 @@ class RankBurstWrapper final : public pairec::pipeline::DeepFMRankService {
               pairec::pipeline::HealthResponse* response,
               google::protobuf::Closure* done) override {
     brpc::ClosureGuard guard(done);
+    const auto started = std::chrono::steady_clock::now();
     ActiveGuard total_guard(&active_total_, &max_active_total_);
     ActiveGuard health_guard(&active_health_, &max_active_health_);
     const size_t bytes = PayloadBytes(*request);
@@ -231,6 +232,17 @@ class RankBurstWrapper final : public pairec::pipeline::DeepFMRankService {
     response->set_code(200);
     response->set_status("healthy");
     response->set_backend("brpc_rank_burst_wrapper");
+    auto* trace = response->mutable_trace();
+    if (request->has_context()) {
+      trace->mutable_context()->CopyFrom(request->context());
+    }
+    trace->set_component("brpc_rank_burst_wrapper");
+    trace->set_protocol("brpc");
+    trace->set_status("ok");
+    trace->set_total_us(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - started).count());
+    trace->set_attribution_complete(true);
+    trace->set_asynchronous(false);
   }
 
  private:
