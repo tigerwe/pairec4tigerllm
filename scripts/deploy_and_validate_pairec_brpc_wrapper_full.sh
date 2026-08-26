@@ -446,8 +446,34 @@ assert event["business_success"] is True, event
 assert event["trace_valid"] is True and event["burst_valid"] is True, event
 assert event["pool_size"] == int(pool), event
 PY
+    if [[ "$RANK_BURST_ENABLED" = 1 ]]; then
+      rank_warmup_complete=""
+      while [[ -z "$rank_warmup_complete" ]]; do
+        rank_warmup_complete="$(kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec 2>/dev/null \
+          | grep -F '"event":"pairec_rank_brpc_burst_complete"' \
+          | grep -F "\"request_id\":\"${warmup_request_id}\"" \
+          | tail -1 || true)"
+        (( SECONDS < warmup_deadline )) \
+          || die "warmup Rank burst completion timed out for request_id=$warmup_request_id"
+        [[ -n "$rank_warmup_complete" ]] || sleep 0.1
+      done
+      python3 - "$rank_warmup_complete" "$RANK_BURST_CONCURRENCY" \
+        "$RANK_BURST_POOL_SIZE" <<'PY'
+import json,sys
+line,concurrency,pool=sys.argv[1:]
+event=json.loads(line[line.index("{"):])
+expected=int(concurrency)
+assert event["concurrency"]==expected,event
+assert event["pressure_requests"]==expected-1,event
+assert event["pressure_success"]==expected-1,event
+assert event["pressure_errors"]==0,event
+assert event["business_success"] is True,event
+assert event["trace_valid"] is True and event["burst_valid"] is True,event
+assert event["connected_sessions"]==int(pool),event
+PY
+    fi
   done
-  echo "PAIREC_BRPC_WRAPPER_FULL_WARMUP_OK requests=$WARMUP_REQUESTS"
+  echo "PAIREC_BRPC_WRAPPER_FULL_WARMUP_OK requests=$WARMUP_REQUESTS generation_and_rank_drained=true"
 fi
 
 for app in "$PAIREC_DEPLOYMENT" "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT" \

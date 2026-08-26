@@ -3,7 +3,7 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-pairec}"
 REQUESTS="${REQUESTS:-1}"
-WARMUP_REQUESTS="${WARMUP_REQUESTS:-0}"
+WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
 BUILD_PAIREC_IMAGE="${BUILD_PAIREC_IMAGE:-1}"
 IMPORT_PAIREC_IMAGE="${IMPORT_PAIREC_IMAGE:-1}"
 DEPLOY_RANK_INFRA="${DEPLOY_RANK_INFRA:-1}"
@@ -32,8 +32,8 @@ print(max(pods)[1])
 }
 
 [[ "$REQUESTS" =~ ^[1-9][0-9]*$ ]] || die "REQUESTS must be positive"
-[[ "$WARMUP_REQUESTS" = 0 ]] \
-  || die "Rank burst A/B requires WARMUP_REQUESTS=0 to prevent asynchronous warmup pressure tail from contaminating measured requests"
+[[ "$WARMUP_REQUESTS" = 1 ]] \
+  || die "Rank burst A/B requires exactly one excluded warmup request per case"
 for flag in "$BUILD_PAIREC_IMAGE" "$IMPORT_PAIREC_IMAGE" "$DEPLOY_RANK_INFRA"; do
   [[ "$flag" = 0 || "$flag" = 1 ]] || die "boolean flags must be 0 or 1"
 done

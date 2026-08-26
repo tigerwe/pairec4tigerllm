@@ -80,6 +80,10 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
             "rebuild and import the PaiRec image containing the Rank burst coordinator",
             full_chain,
         )
+        self.assertIn("warmup Rank burst completion timed out", full_chain)
+        self.assertIn("generation_and_rank_drained=true", full_chain)
+        self.assertIn('WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"', benchmark)
+        self.assertIn("requires exactly one excluded warmup request", benchmark)
 
     def test_valid_pressure_case_and_tail_windows(self):
         with tempfile.TemporaryDirectory() as directory:
