@@ -17,6 +17,9 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
     def test_worker_deploy_preflights_existing_engineering_model(self):
         script = (ROOT / "scripts" / "deploy_deepfm_rank_burst_worker1.sh").read_text()
         manifest = (ROOT / "k8s" / "deployment-deepfm-rank-brpc-worker1.yaml").read_text()
+        wrapper_manifest = (
+            ROOT / "k8s" / "deployment-deepfm-rank-burst-wrapper-worker1.yaml"
+        ).read_text()
         ship = (ROOT / "scripts" / "ship_brpc_rank_burst_wrapper_binary_to_worker.sh").read_text()
         self.assertIn(
             "DEEPFM_MODEL_DIR:-/home/zcx/workspace/pairec4tigerllm/deepfm_out",
@@ -40,6 +43,11 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
             self.assertIn(binary, ship)
         self.assertIn("/home/zcx/bin/brpc_deepfm_rank_adapter", manifest)
         self.assertIn("/home/zcx/bin/brpc_pipeline_client", manifest)
+        self.assertIn("/home/zcx/bin/brpc_pipeline_client", wrapper_manifest)
+        self.assertIn(
+            "mountPath: /opt/pairec-brpc/bin/brpc_pipeline_client",
+            wrapper_manifest,
+        )
 
     def test_valid_pressure_case_and_tail_windows(self):
         with tempfile.TemporaryDirectory() as directory:

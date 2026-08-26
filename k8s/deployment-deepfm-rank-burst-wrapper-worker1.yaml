@@ -37,6 +37,9 @@ spec:
             - name: rank-burst-wrapper-bin
               mountPath: /opt/pairec-brpc/bin/brpc_rank_burst_wrapper
               readOnly: true
+            - name: pipeline-client-bin
+              mountPath: /opt/pairec-brpc/bin/brpc_pipeline_client
+              readOnly: true
           startupProbe:
             tcpSocket: {port: 18213}
             periodSeconds: 2
@@ -55,6 +58,8 @@ spec:
       volumes:
         - name: rank-burst-wrapper-bin
           hostPath: {path: /home/zcx/bin/brpc_rank_burst_wrapper, type: File}
+        - name: pipeline-client-bin
+          hostPath: {path: /home/zcx/bin/brpc_pipeline_client, type: File}
 ---
 apiVersion: v1
 kind: Service
