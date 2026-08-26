@@ -14,6 +14,23 @@ spec.loader.exec_module(module)
 
 
 class RankBRPCBurstSummaryTest(unittest.TestCase):
+    def test_worker_deploy_preflights_existing_engineering_model(self):
+        script = (ROOT / "scripts" / "deploy_deepfm_rank_burst_worker1.sh").read_text()
+        self.assertIn(
+            "DEEPFM_MODEL_DIR:-/home/zcx/workspace/pairec4tigerllm/deepfm_out",
+            script,
+        )
+        apply_position = script.index('kubectl apply -f "$OUTPUT_DIR/rank.yaml"')
+        for artifact in (
+            "deepfm_best.pt",
+            "feature_vocab.json",
+            "user_profiles.json",
+            "item_categories.json",
+        ):
+            self.assertLess(script.index(artifact), apply_position)
+        self.assertLess(script.index("test -d '$BACKEND_REPO_DIR'"), apply_position)
+        self.assertLess(script.index("test -s '$DEEPFM_MODEL_DIR/$artifact'"), apply_position)
+
     def test_valid_pressure_case_and_tail_windows(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

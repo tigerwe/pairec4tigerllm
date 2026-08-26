@@ -10,7 +10,7 @@ ROLLBACK_RANK_DEPLOYMENT="${ROLLBACK_RANK_DEPLOYMENT:-deepfm-rank-brpc}"
 RANK_MANIFEST="${RANK_MANIFEST:-k8s/deployment-deepfm-rank-brpc-worker1.yaml}"
 WRAPPER_MANIFEST="${WRAPPER_MANIFEST:-k8s/deployment-deepfm-rank-burst-wrapper-worker1.yaml}"
 BACKEND_REPO_DIR="${BACKEND_REPO_DIR:-/home/zcx/workspace/pairec4tigerllm-f19}"
-DEEPFM_MODEL_DIR="${DEEPFM_MODEL_DIR:-/home/zcx/workspace/pairec4tigerllm/deepfm_full_vocab_out}"
+DEEPFM_MODEL_DIR="${DEEPFM_MODEL_DIR:-/home/zcx/workspace/pairec4tigerllm/deepfm_out}"
 DEEPFM_MODEL_ROLE="${DEEPFM_MODEL_ROLE:-engineering}"
 WRAPPER_HOST_BIN="${WRAPPER_HOST_BIN:-/home/zcx/bin/brpc_rank_burst_wrapper}"
 WORKER_SSH="${WORKER_SSH:-root@192.168.100.11}"
@@ -44,6 +44,14 @@ echo "== Worker1 and wrapper binary preflight =="
 kubectl get node "$NODE" >/dev/null
 ssh "$WORKER_SSH" "test -x '$WRAPPER_HOST_BIN' && sha256sum '$WRAPPER_HOST_BIN'" \
   | tee "$OUTPUT_DIR/wrapper-host.sha256"
+ssh "$WORKER_SSH" "test -d '$BACKEND_REPO_DIR'" \
+  || die "worker1 backend repository is missing: $BACKEND_REPO_DIR"
+for artifact in deepfm_best.pt feature_vocab.json user_profiles.json item_categories.json; do
+  ssh "$WORKER_SSH" "test -s '$DEEPFM_MODEL_DIR/$artifact'" \
+    || die "worker1 DeepFM model artifact is missing or empty: $DEEPFM_MODEL_DIR/$artifact"
+done
+echo "backend_repo_dir=$BACKEND_REPO_DIR model_dir=$DEEPFM_MODEL_DIR model_role=$DEEPFM_MODEL_ROLE" \
+  | tee "$OUTPUT_DIR/worker1-paths.txt"
 
 echo "== Deploy isolated worker1 Rank backend =="
 python3 - "$RANK_MANIFEST" "$OUTPUT_DIR/rank.yaml" "$BACKEND_REPO_DIR" \
