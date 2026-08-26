@@ -116,12 +116,15 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
                  "status": "ok", "start_epoch_ns": 310_000_000,
                  "end_epoch_ns": 320_000_000},
                 {"event": "pipeline_trace_complete", "request_id": "req-1",
-                 "status": "ok", "valid": True, "end_epoch_ns": 350_000_000},
+                 "status": "ok", "valid": True, "start_epoch_ns": 0,
+                 "end_epoch_ns": 350_000_000,
+                 "spans": [{"name": "generative_recall", "status": "ok",
+                            "start_offset_us": 10_000, "duration_us": 90_000}]},
             ]
             (root / "pairec-rank.log").write_text(
                 "\n".join(json.dumps(event) for event in pairec) + "\n")
             (root / "inference.log").write_text(
-                '1970-01-01T00:00:00.100000000Z '
+                '1970-01-01T00:00:00.500000000Z '
                 + json.dumps({"event": "trt_executor_request_complete", "request_id": "req-1"})
                 + "\n")
             (root / "rank-wrapper.log").write_text(
@@ -135,6 +138,9 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
             self.assertEqual(10.0, sample["rank_pressure_rerank_overlap_ms"])
             self.assertEqual(50.0, sample["rank_pressure_pipeline_overlap_ms"])
             self.assertEqual(40.0, sample["rank_pressure_tail_after_http_ms"])
+            self.assertEqual(100.0, sample["inference_to_rank_gap_ms"])
+            self.assertEqual(300.0, sample["cross_node_inference_log_delta_ms"])
+            self.assertTrue(sample["inference_complete_before_rank"])
 
 
 if __name__ == "__main__":
