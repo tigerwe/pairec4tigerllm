@@ -99,7 +99,8 @@ for line in pathlib.Path(sys.argv[2]).read_text(errors="replace").splitlines():
  try: event=json.loads(line[pos:])
  except json.JSONDecodeError: continue
  if event.get("event")=="pairec_rank_brpc_burst_complete": found.add(event.get("request_id"))
-assert ids<=found,(ids,found)
+if not ids<=found:
+ raise SystemExit(1)
 PY
     then
       break

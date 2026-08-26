@@ -71,6 +71,15 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
             'assert json.load(open(sys.argv[1]))["valid"]',
             benchmark,
         )
+        full_chain = (
+            ROOT / "scripts" / "deploy_and_validate_pairec_brpc_wrapper_full.sh"
+        ).read_text()
+        self.assertIn("Verify preconnected Rank burst sessions", full_chain)
+        self.assertIn("PAIREC_RANK_BRPC_BURST_PRECONNECTED_OK", full_chain)
+        self.assertIn(
+            "rebuild and import the PaiRec image containing the Rank burst coordinator",
+            full_chain,
+        )
 
     def test_valid_pressure_case_and_tail_windows(self):
         with tempfile.TemporaryDirectory() as directory:

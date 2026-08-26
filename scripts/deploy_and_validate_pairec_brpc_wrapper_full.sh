@@ -353,6 +353,24 @@ assert max(connections)-min(connections)<=1,event
 PY
 echo "PAIREC_BRPC_WRAPPER_PRECONNECTED_OK connected_sessions=$BURST_POOL_SIZE active_connections=$BURST_ACTIVE_CONNECTIONS payload_bytes=$BURST_PAYLOAD_BYTES"
 
+if [[ "$RANK_BURST_ENABLED" = 1 ]]; then
+  echo "== Verify preconnected Rank burst sessions =="
+  rank_ready_line="$(kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec \
+    | grep -F '"event":"pairec_rank_brpc_burst_ready"' | tail -1 || true)"
+  [[ -n "$rank_ready_line" ]] \
+    || die "pairec_rank_brpc_burst_ready is missing; rebuild and import the PaiRec image containing the Rank burst coordinator"
+  python3 - "$rank_ready_line" "$RANK_BURST_CONCURRENCY" "$RANK_BURST_POOL_SIZE" \
+    "$RANK_BURST_PAYLOAD_BYTES" "$RANK_BUSINESS_PAYLOAD_BYTES" <<'PY'
+import json,sys
+event=json.loads(sys.argv[1][sys.argv[1].index("{"):])
+assert event["concurrency"]==int(sys.argv[2]),event
+assert event["connected_sessions"]==event["pool_size"]==int(sys.argv[3]),event
+assert event["pressure_payload_bytes"]==int(sys.argv[4]),event
+assert event["business_payload_bytes"]==int(sys.argv[5]),event
+PY
+  echo "PAIREC_RANK_BRPC_BURST_PRECONNECTED_OK connected_sessions=$RANK_BURST_POOL_SIZE payload_bytes=$RANK_BURST_PAYLOAD_BYTES"
+fi
+
 if (( QUALIFICATION_REQUESTS > 0 )); then
   echo "== Qualify deterministic workload user before measurement: $QUALIFICATION_REQUESTS requests =="
   mkdir -p "$OUTPUT_DIR/qualification"
