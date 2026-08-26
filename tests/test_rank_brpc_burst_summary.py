@@ -11,9 +11,92 @@ SUMMARY = ROOT / "scripts" / "summarize_pairec_rank_brpc_burst.py"
 spec = importlib.util.spec_from_file_location("rank_burst_summary", SUMMARY)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+MARGINAL_SUMMARY = ROOT / "scripts" / "summarize_pairec_generation_kvc_rank_ab.py"
+marginal_spec = importlib.util.spec_from_file_location(
+    "generation_kvc_rank_ab_summary", MARGINAL_SUMMARY)
+marginal_module = importlib.util.module_from_spec(marginal_spec)
+marginal_spec.loader.exec_module(marginal_module)
 
 
 class RankBRPCBurstSummaryTest(unittest.TestCase):
+    def test_generation_kvc_rank_ab_wiring(self):
+        benchmark = (
+            ROOT / "scripts" / "benchmark_pairec_generation_kvc_rank_ab.sh"
+        ).read_text()
+        combined = (
+            ROOT / "scripts" / "validate_pairec_brpc_wrapper_kvc_combined.sh"
+        ).read_text()
+        for token in (
+            "WRAPPER_CONCURRENCY=1000",
+            'GENERATION_BURST_POOL_SIZE=${GENERATION_BURST_POOL_SIZE:-10000}',
+            "KVC_CONCURRENCY=32",
+            "KVC_INPROCESS_PRESSURE=1",
+            'RANK_ENDPOINT_OVERRIDE="$RANK_DIRECT_ENDPOINT"',
+            "run_case rank_c1 1",
+            "run_case rank_c1000 1000",
+            "summarize_pairec_generation_kvc_rank_ab.py",
+        ):
+            self.assertIn(token, benchmark)
+        for token in (
+            'RANK_BURST_ENABLED=${RANK_BURST_ENABLED:-0}',
+            "Wait for measured Rank burst completion",
+            "PAIREC_COMBINED_RANK_BURST_DRAINED",
+            'rank_complete["pressure_success"] == expected_rank_pressure',
+            'rank_endpoint.get("rank_endpoint_source") == "override"',
+            '"rank_front_brpc_ms"',
+            '"rank_pressure_pipeline_overlap_ms"',
+        ):
+            self.assertIn(token, combined)
+
+    def test_generation_kvc_rank_ab_summary_math(self):
+        def case(concurrency, base):
+            names = set(marginal_module.KEY_METRICS) | {
+                "rank_pressure_success", "rank_pressure_errors"
+            }
+            metrics = {
+                name: {"avg": base, "p99": base * 2, "max": base * 2}
+                for name in names
+            }
+            metrics["rank_pressure_success"] = {
+                "avg": float(concurrency - 1),
+                "p99": float(concurrency - 1),
+                "max": float(concurrency - 1),
+            }
+            metrics["rank_pressure_errors"] = {
+                "avg": 0.0, "p99": 0.0, "max": 0.0,
+            }
+            return {
+                "classification": "PAIREC_BRPC_WRAPPER_C1000_KVC_C32_OK",
+                "wrapper_concurrency": 1000,
+                "brpc_burst_pool_size": 10000,
+                "kvc_concurrency": 32,
+                "kvc_object_size_bytes": 3670016,
+                "kvc_pressure_key_count": 4,
+                "rank_burst_enabled": True,
+                "rank_burst_concurrency": concurrency,
+                "rank_business_payload_bytes": 102400,
+                "rank_pressure_payload_bytes": 102400,
+                "rank_endpoint": "192.168.100.11:18213",
+                "rank_endpoint_source": "override",
+                "samples": [{"request_id": "request-1"}],
+                "metrics": metrics,
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            control = root / "control.json"
+            pressure = root / "pressure.json"
+            control.write_text(json.dumps(case(1, 10.0)))
+            pressure.write_text(json.dumps(case(1000, 25.0)))
+            result = marginal_module.summarize(control, pressure)
+        self.assertEqual(
+            "PAIREC_GENERATION_C1000_KVC_C32_RANK_AB_OK",
+            result["classification"],
+        )
+        self.assertEqual(15.0, result["comparison"]["client_e2e_ms"]["delta_avg"])
+        self.assertEqual(30.0, result["comparison"]["rank_front_brpc_ms"]["delta_p99"])
+        self.assertEqual(999, result["treatment"]["pressure_requests"])
+
     def test_worker_deploy_preflights_existing_engineering_model(self):
         script = (ROOT / "scripts" / "deploy_deepfm_rank_burst_worker1.sh").read_text()
         manifest = (ROOT / "k8s" / "deployment-deepfm-rank-brpc-worker1.yaml").read_text()

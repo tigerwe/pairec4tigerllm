@@ -26,6 +26,19 @@ KVC_SUSTAINED_MAX_DURATION_MS=${KVC_SUSTAINED_MAX_DURATION_MS:-5000}
 KVC_SUSTAINED_MAX_LOOPS=${KVC_SUSTAINED_MAX_LOOPS:-1000}
 KVC_INPROCESS_PRESSURE=${KVC_INPROCESS_PRESSURE:-0}
 PRIME_REQUESTS=${PRIME_REQUESTS:-195}
+BUILD_PAIREC_IMAGE=${BUILD_PAIREC_IMAGE:-0}
+IMPORT_PAIREC_IMAGE=${IMPORT_PAIREC_IMAGE:-0}
+RANK_BURST_ENABLED=${RANK_BURST_ENABLED:-0}
+RANK_BURST_CONCURRENCY=${RANK_BURST_CONCURRENCY:-1}
+RANK_BURST_POOL_SIZE=${RANK_BURST_POOL_SIZE:-$RANK_BURST_CONCURRENCY}
+RANK_BURST_PAYLOAD_BYTES=${RANK_BURST_PAYLOAD_BYTES:-102400}
+RANK_BUSINESS_PAYLOAD_BYTES=${RANK_BUSINESS_PAYLOAD_BYTES:-102400}
+RANK_BURST_PRESSURE_TIMEOUT_MS=${RANK_BURST_PRESSURE_TIMEOUT_MS:-5000}
+RANK_ENDPOINT_OVERRIDE=${RANK_ENDPOINT_OVERRIDE:-}
+RANK_DEPLOYMENT=${RANK_DEPLOYMENT:-deepfm-rank-brpc}
+RANK_SERVICE=${RANK_SERVICE:-$RANK_DEPLOYMENT}
+RANK_PORT=${RANK_PORT:-18211}
+RANK_COMPLETION_TIMEOUT_SECONDS=${RANK_COMPLETION_TIMEOUT_SECONDS:-30}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 mkdir -p "$OUTPUT_DIR"
@@ -70,6 +83,26 @@ KVC_BARRIER_TIMEOUT_MS=5
 [[ "$KVC_INPROCESS_PRESSURE" = 0 ]] || KVC_BARRIER_TIMEOUT_MS=100
 [[ "$PRIME_REQUESTS" =~ ^[1-9][0-9]*$ ]] \
   || die "PRIME_REQUESTS must be positive"
+for flag in "$BUILD_PAIREC_IMAGE" "$IMPORT_PAIREC_IMAGE" "$RANK_BURST_ENABLED"; do
+  [[ "$flag" = 0 || "$flag" = 1 ]] || die "boolean flags must be 0 or 1"
+done
+[[ "$RANK_BURST_CONCURRENCY" =~ ^(1|1000)$ ]] \
+  || die "RANK_BURST_CONCURRENCY must be 1 or 1000"
+[[ "$RANK_BURST_POOL_SIZE" =~ ^[1-9][0-9]*$ ]] \
+  && (( RANK_BURST_POOL_SIZE >= RANK_BURST_CONCURRENCY && RANK_BURST_POOL_SIZE <= 1000 )) \
+  || die "RANK_BURST_POOL_SIZE must be in [rank_concurrency,1000]"
+[[ "$RANK_BURST_PAYLOAD_BYTES" = 102400 ]] \
+  || die "combined Rank pressure requires RANK_BURST_PAYLOAD_BYTES=102400"
+[[ "$RANK_BUSINESS_PAYLOAD_BYTES" = 102400 ]] \
+  || die "combined Rank pressure requires RANK_BUSINESS_PAYLOAD_BYTES=102400"
+[[ "$RANK_BURST_PRESSURE_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] \
+  || die "RANK_BURST_PRESSURE_TIMEOUT_MS must be positive"
+[[ "$RANK_COMPLETION_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+  || die "RANK_COMPLETION_TIMEOUT_SECONDS must be positive"
+if [[ "$RANK_BURST_ENABLED" = 1 ]]; then
+  [[ "$RANK_ENDPOINT_OVERRIDE" == *:* ]] \
+    || die "Rank burst combination requires direct RANK_ENDPOINT_OVERRIDE=host:port"
+fi
 
 restore_kvc() {
   if [[ -f "$KVC_OVERLAY_BACKUP" ]]; then
@@ -103,7 +136,15 @@ NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
   BURST_ACTIVE_CONNECTIONS="$BURST_ACTIVE_CONNECTIONS" \
   BURST_PAYLOAD_BYTES="$BRPC_PRESSURE_PAYLOAD_BYTES" \
   BUSINESS_PAYLOAD_BYTES="$BUSINESS_PAYLOAD_BYTES" \
-  BUILD_PAIREC_IMAGE=0 IMPORT_PAIREC_IMAGE=0 \
+  BUILD_PAIREC_IMAGE="$BUILD_PAIREC_IMAGE" IMPORT_PAIREC_IMAGE="$IMPORT_PAIREC_IMAGE" \
+  RANK_DEPLOYMENT="$RANK_DEPLOYMENT" RANK_SERVICE="$RANK_SERVICE" RANK_PORT="$RANK_PORT" \
+  RANK_ENDPOINT_OVERRIDE="$RANK_ENDPOINT_OVERRIDE" \
+  RANK_BURST_ENABLED="$RANK_BURST_ENABLED" \
+  RANK_BURST_CONCURRENCY="$RANK_BURST_CONCURRENCY" \
+  RANK_BURST_POOL_SIZE="$RANK_BURST_POOL_SIZE" \
+  RANK_BURST_PAYLOAD_BYTES="$RANK_BURST_PAYLOAD_BYTES" \
+  RANK_BUSINESS_PAYLOAD_BYTES="$RANK_BUSINESS_PAYLOAD_BYTES" \
+  RANK_BURST_PRESSURE_TIMEOUT_MS="$RANK_BURST_PRESSURE_TIMEOUT_MS" \
   OUTPUT_DIR="$WRAPPER_OUTPUT_DIR" \
   bash scripts/deploy_and_validate_pairec_brpc_wrapper_full.sh \
   | tee "$OUTPUT_DIR/wrapper-console.log"
@@ -133,6 +174,56 @@ contention_code=${PIPESTATUS[0]}
 set -e
 [[ "$contention_code" -eq 0 ]] || die "KVC contention through Wrapper failed: exit=$contention_code"
 
+PAIREC_RANK_MEASURED_LOG="$OUTPUT_DIR/pairec-rank-measured.log"
+RANK_WRAPPER_MEASURED_LOG="$OUTPUT_DIR/rank-wrapper-measured.log"
+: >"$PAIREC_RANK_MEASURED_LOG"
+: >"$RANK_WRAPPER_MEASURED_LOG"
+if [[ "$RANK_BURST_ENABLED" = 1 ]]; then
+  echo "== Wait for measured Rank burst completion =="
+  PAIREC_POD="$(kubectl -n "$NAMESPACE" get pod -l app=pairec-brpc-observed-wrapper \
+    --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  RANK_POD="$(kubectl -n "$NAMESPACE" get pod -l "app=$RANK_DEPLOYMENT" \
+    --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  [[ -n "$PAIREC_POD" && -n "$RANK_POD" ]] \
+    || die "PaiRec or Rank Wrapper Pod not found"
+  mapfile -t RANK_REQUEST_IDS < <(python3 - "$CONTENTION_OUTPUT_DIR/result.json" <<'PY'
+import json,pathlib,sys
+result=json.load(open(sys.argv[1]))
+for row in result.get("rows",[]):
+    replay=pathlib.Path(row["summary_path"]).parent
+    print(json.load(open(replay / "summary.json"))["request_id"])
+PY
+  )
+  [[ "${#RANK_REQUEST_IDS[@]}" -eq "$REQUESTS" ]] \
+    || die "expected $REQUESTS measured Rank request ids, got ${#RANK_REQUEST_IDS[@]}"
+  rank_deadline=$((SECONDS + RANK_COMPLETION_TIMEOUT_SECONDS))
+  while true; do
+    kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec \
+      --since-time="$STARTED_AT" --timestamps >"$PAIREC_RANK_MEASURED_LOG"
+    if python3 - "$PAIREC_RANK_MEASURED_LOG" "${RANK_REQUEST_IDS[@]}" <<'PY'
+import json,pathlib,sys
+expected=set(sys.argv[2:]); found=set()
+for line in pathlib.Path(sys.argv[1]).read_text(errors="replace").splitlines():
+    pos=line.find("{")
+    if pos < 0: continue
+    try: event=json.loads(line[pos:])
+    except json.JSONDecodeError: continue
+    if event.get("event")=="pairec_rank_brpc_burst_complete":
+        found.add(event.get("request_id"))
+raise SystemExit(0 if expected <= found else 1)
+PY
+    then
+      break
+    fi
+    (( SECONDS < rank_deadline )) \
+      || die "timed out waiting for measured Rank pressure completion"
+    sleep 0.2
+  done
+  kubectl -n "$NAMESPACE" logs "$RANK_POD" -c rank-burst-wrapper \
+    --since-time="$STARTED_AT" --timestamps >"$RANK_WRAPPER_MEASURED_LOG"
+  echo "PAIREC_COMBINED_RANK_BURST_DRAINED requests=${#RANK_REQUEST_IDS[@]} concurrency=$RANK_BURST_CONCURRENCY"
+fi
+
 WRAPPER_POD="$(kubectl -n "$NAMESPACE" get pod -l app=brpc-burst-wrapper \
   --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
 [[ -n "$WRAPPER_POD" ]] || die "BRPC Wrapper Pod not found"
@@ -143,7 +234,11 @@ python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log
   "$OUTPUT_DIR/summary.json" "$WRAPPER_CONCURRENCY" "$KVC_CONCURRENCY" \
   "$EXPECTED_ONBOARDS_MIN" "$EXPECTED_ONBOARDS_MAX" "$KVC_OBJECT_SIZE" \
   "$KVC_PRESSURE_KEY_COUNT" "$KVC_SUSTAINED_PRESSURE" "$KVC_INPROCESS_PRESSURE" \
-  "$BUSINESS_PAYLOAD_BYTES" "$BRPC_PRESSURE_PAYLOAD_BYTES" <<'PY'
+  "$BUSINESS_PAYLOAD_BYTES" "$BRPC_PRESSURE_PAYLOAD_BYTES" \
+  "$PAIREC_RANK_MEASURED_LOG" "$RANK_WRAPPER_MEASURED_LOG" \
+  "$RANK_BURST_ENABLED" "$RANK_BURST_CONCURRENCY" \
+  "$RANK_BUSINESS_PAYLOAD_BYTES" "$RANK_BURST_PAYLOAD_BYTES" \
+  "$WRAPPER_OUTPUT_DIR/rank-endpoint.txt" "$BURST_POOL_SIZE" <<'PY'
 import json, math, pathlib, statistics, sys
 contention = json.load(open(sys.argv[1]))
 wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
@@ -157,6 +252,20 @@ kvc_sustained_pressure = sys.argv[10] == "1"
 kvc_inprocess_pressure = sys.argv[11] == "1"
 business_payload_bytes = int(sys.argv[12])
 brpc_pressure_payload_bytes = int(sys.argv[13])
+rank_pairec_log_path = pathlib.Path(sys.argv[14])
+rank_wrapper_log = pathlib.Path(sys.argv[15]).read_text(errors="replace")
+rank_burst_enabled = sys.argv[16] == "1"
+rank_burst_concurrency = int(sys.argv[17])
+rank_business_payload_bytes = int(sys.argv[18])
+rank_pressure_payload_bytes = int(sys.argv[19])
+brpc_burst_pool_size = int(sys.argv[21])
+rank_endpoint = {}
+for line in pathlib.Path(sys.argv[20]).read_text(errors="replace").splitlines():
+    if "=" in line:
+        key,value=line.split("=",1); rank_endpoint[key]=value
+if rank_burst_enabled:
+    assert rank_endpoint.get("rank_endpoint"), rank_endpoint
+    assert rank_endpoint.get("rank_endpoint_source") == "override", rank_endpoint
 valid = contention.get("valid_repeats") == contention.get("expected_repeats")
 rows = []
 
@@ -190,6 +299,11 @@ def optional_log_value(line, key, default):
         return log_value(line, key)
     except AssertionError:
         return default
+
+def overlap_ms(left_start, left_end, right_start, right_end):
+    return max(0, min(left_end, right_end) - max(left_start, right_start)) / 1e6
+
+rank_pairec_events = json_events(rank_pairec_log_path) if rank_pairec_log_path.is_file() else []
 
 for row in contention.get("rows", []):
     replay = pathlib.Path(row["summary_path"]).parent
@@ -314,6 +428,96 @@ for row in contention.get("rows", []):
         # therefore must never enter the coordinated external drain path.
         assert wrapper_pressure_drain_required == 0, matches[0]
         assert wrapper_pressure_drain_ms == 0.0, matches[0]
+    rank_metrics = {
+        "rank_business_client_ms": 0.0,
+        "rank_front_brpc_ms": 0.0,
+        "rank_service_ms": 0.0,
+        "rank_wrapper_backend_rpc_ms": 0.0,
+        "rank_pressure_p95_ms": 0.0,
+        "rank_pressure_max_active": 0.0,
+        "rank_pressure_start_skew_us": 0.0,
+        "rank_pressure_tail_after_business_ms": 0.0,
+        "rank_pressure_rerank_overlap_ms": 0.0,
+        "rank_pressure_pipeline_overlap_ms": 0.0,
+        "rank_inference_to_business_gap_ms": 0.0,
+        "rank_wrapper_health_calls_during_rank": 0.0,
+        "rank_wrapper_health_payload_bytes_during_rank": 0.0,
+        "rank_pressure_requests": 0.0,
+        "rank_pressure_success": 0.0,
+        "rank_pressure_errors": 0.0,
+    }
+    if rank_burst_enabled:
+        rank_own = [event for event in rank_pairec_events
+                    if event.get("request_id") == request_id]
+        def rank_one(name):
+            values = [event for event in rank_own if event.get("event") == name]
+            assert len(values) == 1, (request_id, name, values)
+            return values[0]
+        rank_start_event = rank_one("pairec_rank_brpc_burst_start")
+        rank_business = rank_one("pairec_rank_brpc_burst_business_complete")
+        rank_complete = rank_one("pairec_rank_brpc_burst_complete")
+        rank_service = rank_one("deepfm_rank_complete")
+        rerank_event = rank_one("source_quota_rerank_complete")
+        assert rank_start_event["concurrency"] == rank_burst_concurrency, rank_start_event
+        assert rank_start_event["armed_workers"] == rank_burst_concurrency, rank_start_event
+        assert rank_start_event["business_payload_bytes"] == rank_business_payload_bytes, rank_start_event
+        assert rank_start_event["pressure_payload_bytes"] == rank_pressure_payload_bytes, rank_start_event
+        assert rank_business["business_success"] and rank_business["trace_valid"], rank_business
+        assert rank_business["business_payload_bytes"] == rank_business_payload_bytes, rank_business
+        expected_rank_pressure = rank_burst_concurrency - 1
+        assert rank_complete["pressure_requests"] == expected_rank_pressure, rank_complete
+        assert rank_complete["pressure_success"] == expected_rank_pressure, rank_complete
+        assert rank_complete["pressure_errors"] == 0, rank_complete
+        assert rank_complete["burst_valid"] and rank_complete["trace_valid"], rank_complete
+        assert rank_complete["connected_sessions"] == rank_burst_concurrency, rank_complete
+        if rank_burst_concurrency > 1:
+            assert rank_complete["pressure_overlap_business"] > 0, rank_complete
+        assert rank_service["candidate_count"] == 50, rank_service
+        assert rank_service["reordered"] is True, rank_service
+        rank_wrapper_matches = [line for line in rank_wrapper_log.splitlines()
+                                if "[brpc-rank-burst-wrapper] method=Rank" in line
+                                and f"request_id={request_id}" in line]
+        assert len(rank_wrapper_matches) == 1, (request_id, rank_wrapper_matches)
+        rank_wrapper = rank_wrapper_matches[0]
+        assert int(log_value(rank_wrapper, "code")) == 200, rank_wrapper
+        assert int(log_value(rank_wrapper, "front_payload_bytes")) == rank_business_payload_bytes, rank_wrapper
+        assert int(log_value(rank_wrapper, "backend_payload_bytes")) == 0, rank_wrapper
+        rank_business_start = int(rank_business["rank_business_start_epoch_ns"])
+        rank_business_end = int(rank_business["rank_business_end_epoch_ns"])
+        pressure_start = int(rank_complete.get("rank_pressure_first_start_epoch_ns") or rank_business_start)
+        pressure_end = int(rank_complete.get("rank_pressure_last_end_epoch_ns") or rank_business_end)
+        generative = spans["generative_recall"]
+        inference_end = int(pipeline["start_epoch_ns"]) + 1000 * (
+            int(generative["start_offset_us"]) + int(generative["duration_us"]))
+        assert inference_end <= rank_business_start, (generative, rank_business)
+        rank_metrics = {
+            "rank_business_client_ms": float(rank_business["business_client_wall_ms"]),
+            "rank_front_brpc_ms": float(rank_business["front_brpc_estimate_ms"]),
+            "rank_service_ms": float(rank_business["service_total_ms"]),
+            "rank_wrapper_backend_rpc_ms": float(log_value(rank_wrapper, "backend_rpc_ms")),
+            "rank_pressure_p95_ms": float(rank_complete["pressure_latency_p95_ms"]),
+            "rank_pressure_max_active": float(rank_complete["max_active_workers"]),
+            "rank_pressure_start_skew_us": float(rank_complete["start_skew_us"]),
+            "rank_pressure_tail_after_business_ms": float(rank_complete["pressure_tail_after_business_ms"]),
+            "rank_pressure_rerank_overlap_ms": overlap_ms(
+                pressure_start, pressure_end, int(rerank_event["start_epoch_ns"]),
+                int(rerank_event["end_epoch_ns"])),
+            "rank_pressure_pipeline_overlap_ms": overlap_ms(
+                pressure_start, pressure_end, rank_business_end,
+                int(pipeline["end_epoch_ns"])),
+            "rank_inference_to_business_gap_ms": (
+                rank_business_start - inference_end) / 1e6,
+            "rank_wrapper_health_calls_during_rank": float(
+                log_value(rank_wrapper, "health_calls_during_rank")),
+            "rank_wrapper_health_payload_bytes_during_rank": float(
+                log_value(rank_wrapper, "health_payload_bytes_during_rank")),
+            "rank_pressure_requests": float(rank_complete["pressure_requests"]),
+            "rank_pressure_success": float(rank_complete["pressure_success"]),
+            "rank_pressure_errors": float(rank_complete["pressure_errors"]),
+        }
+        if rank_burst_concurrency > 1:
+            assert rank_metrics["rank_wrapper_health_calls_during_rank"] > 0, rank_wrapper
+            assert rank_metrics["rank_wrapper_health_payload_bytes_during_rank"] > 0, rank_wrapper
     coordination_ms = float(kvc["coordination_wait_ms"])
     client_e2e_actual_ms = float(trace["client"]["client_e2e_ms"])
     runner_actual_ms = executor[0]["runner_us"] / 1000.0
@@ -412,6 +616,7 @@ for row in contention.get("rows", []):
         "wrapper_pressure_p95_ms": wrapper_burst["pressure_latency_p95_ms"],
         "wrapper_max_active": wrapper_burst["max_active_workers"],
         "wrapper_log_matches": len(matches),
+        **rank_metrics,
     })
 
 def percentile(values, q):
@@ -458,6 +663,7 @@ result = {
     "brpc_pressure_payload_bytes": brpc_pressure_payload_bytes,
     "brpc_pressure_model": "synchronized_one_shot_burst",
     "embedded_burst_concurrency": wrapper_concurrency,
+    "brpc_burst_pool_size": brpc_burst_pool_size,
     "brpc_pressure_enabled": wrapper_concurrency > 1,
     "brpc_pressure_concurrency": max(wrapper_concurrency - 1, 0),
     "brpc_pressure_ready_min_active": 0,
@@ -465,6 +671,12 @@ result = {
     "kvc_object_size_bytes": kvc_object_size,
     "kvc_pressure_key_count": kvc_pressure_key_count,
     "kvc_sustained_pressure": kvc_sustained_pressure,
+    "rank_burst_enabled": rank_burst_enabled,
+    "rank_burst_concurrency": rank_burst_concurrency if rank_burst_enabled else 0,
+    "rank_business_payload_bytes": rank_business_payload_bytes if rank_burst_enabled else 0,
+    "rank_pressure_payload_bytes": rank_pressure_payload_bytes if rank_burst_enabled else 0,
+    "rank_endpoint": rank_endpoint.get("rank_endpoint", ""),
+    "rank_endpoint_source": rank_endpoint.get("rank_endpoint_source", ""),
     "expected_onboards_min": expected_onboards_min,
     "expected_onboards_max": expected_onboards_max,
     "contention": contention,
