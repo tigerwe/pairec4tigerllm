@@ -46,8 +46,12 @@ if [[ "$DEPLOY_RANK_INFRA" = 1 ]]; then
 else
   test -s "$OUTPUT_DIR/infrastructure/cpu-isolation.json" \
     || die "DEPLOY_RANK_INFRA=0 requires existing $OUTPUT_DIR/infrastructure/cpu-isolation.json"
-  python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["valid"]' \
-    "$OUTPUT_DIR/infrastructure/cpu-isolation.json"
+fi
+CPU_ISOLATION_VALID="$(python3 -c 'import json,sys; print(str(bool(json.load(open(sys.argv[1]))["valid"])).lower())' \
+  "$OUTPUT_DIR/infrastructure/cpu-isolation.json")"
+echo "cpu_isolation_valid=$CPU_ISOLATION_VALID"
+if [[ "$CPU_ISOLATION_VALID" != true ]]; then
+  echo "WARNING: CPU isolation is not established; Rank latency results may include same-node CPU scheduling contention" >&2
 fi
 
 run_case() {

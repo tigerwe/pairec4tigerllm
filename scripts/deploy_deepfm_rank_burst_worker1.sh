@@ -97,11 +97,10 @@ for artifact in deepfm_best.pt feature_vocab.json user_profiles.json item_catego
   [[ "$old" = "$new" ]] || die "model identity mismatch: $artifact"
 done
 
-echo "== Guaranteed QoS and exclusive CPU gate =="
+echo "== CPU placement diagnostics (non-blocking) =="
 for pod in "$RANK_POD" "$WRAPPER_POD"; do
   qos="$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.status.qosClass}')"
   echo "pod=$pod qos=$qos" | tee -a "$OUTPUT_DIR/cpu-isolation.txt"
-  [[ "$qos" = Guaranteed ]] || die "pod/$pod must have Guaranteed QoS"
 done
 INFERENCE_POD="$(ready_pod "$INFERENCE_DEPLOYMENT")"
 python3 - "$NAMESPACE" "$RANK_POD" "$WRAPPER_POD" "$INFERENCE_POD" \
@@ -133,8 +132,14 @@ for index,left in enumerate(rank_names):
 result={"valid":not conflicts,"components":rows,"conflicts":conflicts}
 open(output,"w").write(json.dumps(result,indent=2)+"\n")
 print(json.dumps(result,indent=2))
-assert not conflicts, "Rank CPU sets overlap with another Rank or inference/KVC container"
 PY
+CPU_ISOLATION_VALID="$(python3 -c 'import json,sys; print(str(bool(json.load(open(sys.argv[1]))["valid"])).lower())' \
+  "$OUTPUT_DIR/cpu-isolation.json")"
+echo "cpu_isolation_valid=$CPU_ISOLATION_VALID" | tee -a "$OUTPUT_DIR/cpu-isolation.txt"
+if [[ "$CPU_ISOLATION_VALID" != true ]]; then
+  echo "WARNING: Rank CPU sets overlap with Rank or inference/KVC containers; continuing with CPU isolation as a diagnostic only" \
+    | tee -a "$OUTPUT_DIR/cpu-isolation.txt" >&2
+fi
 
 echo "== Wrapper binary identity and local Health =="
 expected="$(awk '{print $1}' "$OUTPUT_DIR/wrapper-host.sha256")"

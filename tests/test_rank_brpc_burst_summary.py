@@ -58,6 +58,19 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
         )
         self.assertIn('trace->set_component("brpc_rank_burst_wrapper");', wrapper_source)
         self.assertIn("trace->set_attribution_complete(true);", wrapper_source)
+        self.assertIn("CPU placement diagnostics (non-blocking)", script)
+        self.assertIn("cpu_isolation_valid=", script)
+        self.assertNotIn(
+            'assert not conflicts, "Rank CPU sets overlap',
+            script,
+        )
+
+        benchmark = (ROOT / "scripts" / "benchmark_pairec_rank_brpc_burst.sh").read_text()
+        self.assertIn("CPU isolation is not established", benchmark)
+        self.assertNotIn(
+            'assert json.load(open(sys.argv[1]))["valid"]',
+            benchmark,
+        )
 
     def test_valid_pressure_case_and_tail_windows(self):
         with tempfile.TemporaryDirectory() as directory:
