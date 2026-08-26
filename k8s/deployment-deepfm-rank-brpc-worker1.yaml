@@ -36,6 +36,9 @@ spec:
             tcpSocket: {port: 18211}
             initialDelaySeconds: 15
             periodSeconds: 15
+          volumeMounts:
+            - {name: rank-adapter-bin, mountPath: /opt/pairec-brpc/bin/brpc_deepfm_rank_adapter, readOnly: true}
+            - {name: pipeline-client-bin, mountPath: /opt/pairec-brpc/bin/brpc_pipeline_client, readOnly: true}
         - name: backend
           image: docker.io/library/zcx-pairec-image:v1.1
           imagePullPolicy: IfNotPresent
@@ -70,6 +73,10 @@ spec:
             - {name: workspace, mountPath: /workspace, readOnly: true}
             - {name: model, mountPath: /models/deepfm, readOnly: true}
       volumes:
+        - name: rank-adapter-bin
+          hostPath: {path: /home/zcx/bin/brpc_deepfm_rank_adapter, type: File}
+        - name: pipeline-client-bin
+          hostPath: {path: /home/zcx/bin/brpc_pipeline_client, type: File}
         - name: workspace
           hostPath: {path: __BACKEND_REPO_DIR__, type: Directory}
         - name: model

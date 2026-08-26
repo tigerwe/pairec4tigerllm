@@ -13,6 +13,8 @@ BACKEND_REPO_DIR="${BACKEND_REPO_DIR:-/home/zcx/workspace/pairec4tigerllm-f19}"
 DEEPFM_MODEL_DIR="${DEEPFM_MODEL_DIR:-/home/zcx/workspace/pairec4tigerllm/deepfm_out}"
 DEEPFM_MODEL_ROLE="${DEEPFM_MODEL_ROLE:-engineering}"
 WRAPPER_HOST_BIN="${WRAPPER_HOST_BIN:-/home/zcx/bin/brpc_rank_burst_wrapper}"
+RANK_ADAPTER_HOST_BIN="${RANK_ADAPTER_HOST_BIN:-/home/zcx/bin/brpc_deepfm_rank_adapter}"
+PIPELINE_CLIENT_HOST_BIN="${PIPELINE_CLIENT_HOST_BIN:-/home/zcx/bin/brpc_pipeline_client}"
 WORKER_SSH="${WORKER_SSH:-root@192.168.100.11}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-10m}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/deepfm-rank-burst-worker1/$(date +%Y%m%d-%H%M%S)}"
@@ -44,6 +46,10 @@ echo "== Worker1 and wrapper binary preflight =="
 kubectl get node "$NODE" >/dev/null
 ssh "$WORKER_SSH" "test -x '$WRAPPER_HOST_BIN' && sha256sum '$WRAPPER_HOST_BIN'" \
   | tee "$OUTPUT_DIR/wrapper-host.sha256"
+ssh "$WORKER_SSH" "test -x '$RANK_ADAPTER_HOST_BIN' && sha256sum '$RANK_ADAPTER_HOST_BIN'" \
+  | tee "$OUTPUT_DIR/rank-adapter-host.sha256"
+ssh "$WORKER_SSH" "test -x '$PIPELINE_CLIENT_HOST_BIN' && sha256sum '$PIPELINE_CLIENT_HOST_BIN'" \
+  | tee "$OUTPUT_DIR/pipeline-client-host.sha256"
 ssh "$WORKER_SSH" "test -d '$BACKEND_REPO_DIR'" \
   || die "worker1 backend repository is missing: $BACKEND_REPO_DIR"
 for artifact in deepfm_best.pt feature_vocab.json user_profiles.json item_categories.json; do
@@ -134,6 +140,12 @@ echo "== Wrapper binary identity and local Health =="
 expected="$(awk '{print $1}' "$OUTPUT_DIR/wrapper-host.sha256")"
 mounted="$(kubectl -n "$NAMESPACE" exec "$WRAPPER_POD" -c rank-burst-wrapper -- sha256sum /proc/1/exe | awk '{print $1}')"
 [[ "$expected" = "$mounted" ]] || die "running Rank wrapper binary does not match worker host binary"
+expected="$(awk '{print $1}' "$OUTPUT_DIR/rank-adapter-host.sha256")"
+mounted="$(kubectl -n "$NAMESPACE" exec "$RANK_POD" -c adapter -- sha256sum /proc/1/exe | awk '{print $1}')"
+[[ "$expected" = "$mounted" ]] || die "running Rank adapter binary does not match worker host binary"
+expected="$(awk '{print $1}' "$OUTPUT_DIR/pipeline-client-host.sha256")"
+mounted="$(kubectl -n "$NAMESPACE" exec "$RANK_POD" -c adapter -- sha256sum /opt/pairec-brpc/bin/brpc_pipeline_client | awk '{print $1}')"
+[[ "$expected" = "$mounted" ]] || die "mounted pipeline client does not match worker host binary"
 kubectl -n "$NAMESPACE" exec "$WRAPPER_POD" -c rank-burst-wrapper -- \
   /opt/pairec-brpc/bin/brpc_pipeline_client --server=127.0.0.1:18213 --service=rank --timeout_ms=1000
 
