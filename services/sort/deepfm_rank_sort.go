@@ -167,21 +167,32 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 		},
 	}
 	if config.Protocol == "brpc" {
+		businessTimeout := time.Duration(config.TimeoutMS) * time.Millisecond
 		client, err := pipelineclient.NewRankClient(
 			config.BRPCEndpoint, config.BRPCServiceName,
-			time.Duration(config.TimeoutMS)*time.Millisecond)
+			businessTimeout)
 		if err != nil {
 			return nil, err
 		}
 		ranker.brpcClient = client
 		if config.BRPCBurstEnabled {
-			burst, err := NewRankBurstCoordinator(client, RankBurstConfig{
+			pressureTimeout := time.Duration(config.BRPCBurstPressureTimeoutMS) * time.Millisecond
+			// Burst sessions carry both business and pressure lanes. Their transport
+			// deadline must not clip the longer pressure context; the outer per-lane
+			// contexts still enforce the shorter business timeout.
+			burstClient, err := pipelineclient.NewRankClient(
+				config.BRPCEndpoint, config.BRPCServiceName,
+				rankBurstTransportTimeout(businessTimeout, pressureTimeout))
+			if err != nil {
+				return nil, err
+			}
+			burst, err := NewRankBurstCoordinator(burstClient, RankBurstConfig{
 				Concurrency:     config.BRPCBurstConcurrency,
 				PoolSize:        config.BRPCBurstPoolSize,
 				PressureBytes:   config.BRPCBurstPayloadBytes,
 				BusinessBytes:   config.BRPCPayloadBytes,
-				BusinessTimeout: time.Duration(config.TimeoutMS) * time.Millisecond,
-				PressureTimeout: time.Duration(config.BRPCBurstPressureTimeoutMS) * time.Millisecond,
+				BusinessTimeout: businessTimeout,
+				PressureTimeout: pressureTimeout,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("initialize DeepFM rank burst: %w", err)
@@ -190,6 +201,13 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 		}
 	}
 	return ranker, nil
+}
+
+func rankBurstTransportTimeout(businessTimeout, pressureTimeout time.Duration) time.Duration {
+	if pressureTimeout > businessTimeout {
+		return pressureTimeout
+	}
+	return businessTimeout
 }
 
 func RegisterFromConfig() error {

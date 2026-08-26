@@ -5,11 +5,31 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	paireccontext "github.com/alibaba/pairec/v2/context"
 	"github.com/alibaba/pairec/v2/module"
 	pairecsort "github.com/alibaba/pairec/v2/sort"
 )
+
+func TestRankBurstTransportTimeoutDoesNotClipEitherLane(t *testing.T) {
+	tests := []struct {
+		name               string
+		business, pressure time.Duration
+		want               time.Duration
+	}{
+		{name: "pressure longer", business: 100 * time.Millisecond, pressure: 5 * time.Second, want: 5 * time.Second},
+		{name: "business longer", business: 2 * time.Second, pressure: 500 * time.Millisecond, want: 2 * time.Second},
+		{name: "equal", business: time.Second, pressure: time.Second, want: time.Second},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := rankBurstTransportTimeout(test.business, test.pressure); got != test.want {
+				t.Fatalf("transport timeout=%s want=%s", got, test.want)
+			}
+		})
+	}
+}
 
 func testSortData() *pairecsort.SortData {
 	ctx := paireccontext.NewRecommendContext()
