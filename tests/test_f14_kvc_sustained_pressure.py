@@ -501,6 +501,8 @@ class SustainedPressureStructureTest(unittest.TestCase):
             self.assertIn(field, contention)
         self.assertIn('"pairec_json_events": pairec_json_events', trace)
         self.assertIn('"pairec_vector_trace": vector_trace', trace)
+        self.assertIn('Wait for full-chain PaiRec pipeline trace', trace)
+        self.assertIn('REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION=1', combined)
         self.assertIn('row.get("brpc_attribution_complete") is True', combined)
 
     def test_full_chain_warmup_rejects_failed_pressure_lanes(self):

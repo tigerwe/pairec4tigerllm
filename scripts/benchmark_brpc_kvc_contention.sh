@@ -9,6 +9,7 @@ EXPECTED_ONBOARDS="${EXPECTED_ONBOARDS:-2}"
 EXPECTED_ONBOARDS_MIN="${EXPECTED_ONBOARDS_MIN:-$EXPECTED_ONBOARDS}"
 EXPECTED_ONBOARDS_MAX="${EXPECTED_ONBOARDS_MAX:-$EXPECTED_ONBOARDS}"
 REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION="${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION:-0}"
+REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION="${REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION:-0}"
 
 BRPC_ENDPOINT="${BRPC_ENDPOINT:-192.168.100.11:18100}"
 BRPC_LOAD_ENDPOINT="${BRPC_LOAD_ENDPOINT:-$BRPC_ENDPOINT}"
@@ -242,6 +243,10 @@ validate() {
   case "$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" in
     0|1) ;;
     *) die "REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION must be 0 or 1" ;;
+  esac
+  case "$REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION" in
+    0|1) ;;
+    *) die "REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION must be 0 or 1" ;;
   esac
   case "$REQUIRE_BUSINESS_ONBOARD_GET" in
     0|1) ;;
@@ -1130,6 +1135,7 @@ run_replay() {
   SIZE="$REPLAY_SIZE" \
   TIMEOUT="$REPLAY_TIMEOUT" \
   REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION="$REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION" \
+  REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION="$REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION" \
     OUT_DIR="${round_dir}/replay" \
     bash scripts/trace_single_brpc_datasystem_request.sh \
     >"${round_dir}/replay.console.log" 2>&1 || replay_code=$?
@@ -1299,6 +1305,9 @@ set_clients = int(set_clients)
 brpc_load_concurrency = int(brpc_load_concurrency)
 dsbench_sustained = dsbench_sustained == "1"
 require_exact_attribution = require_exact_attribution == "1"
+require_full_chain_attribution = (
+    os.environ.get("REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION", "0") == "1"
+)
 brpc_ready_after_first_round = brpc_ready_after_first_round == "1"
 brpc_ready_min_active = int(brpc_ready_min_active)
 kvc_pressure_required = (
@@ -1600,9 +1609,14 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
         )
     )
     pressure_ok = kvc_pressure_ok and brpc_pressure_ok
+    full_chain_attribution_ok = (
+        brpc_attribution["complete"] or not require_full_chain_attribution
+    )
     rows.append({
         "round": os.path.basename(os.path.dirname(os.path.dirname(path))).split("-")[-1],
-        "valid": response_ok and (count_ok or not strict_counts) and exact_attribution_ok and pressure_ok and runtime_ok,
+        "valid": response_ok and (count_ok or not strict_counts)
+        and exact_attribution_ok and full_chain_attribution_ok
+        and pressure_ok and runtime_ok,
         "response_ok": response_ok,
         "count_ok": count_ok,
         "exact_attribution_ok": exact_attribution_ok,
@@ -1630,6 +1644,7 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
         "rank_business_brpc_ms": brpc_attribution["rank_business_brpc_ms"],
         "rank_coordination_ms": brpc_attribution["rank_coordination_ms"],
         "brpc_attribution_complete": brpc_attribution["complete"],
+        "full_chain_attribution_ok": full_chain_attribution_ok,
         "brpc_attribution_sources": brpc_attribution["sources"],
         "offload_count": len(offloads),
         "onboard_count": len(onboards),
@@ -1770,6 +1785,15 @@ for row in rows:
         f"{row['kvc_set_qps']:>7.3f} {row['kvc_set_max_inflight']:>12} "
         f"{row['restart_delta']:>8} {row['crash_markers']:>7}"
     )
+    if not row["valid"]:
+        print(
+            "    invalid_reasons "
+            f"response_ok={row['response_ok']} count_ok={row['count_ok']} "
+            f"exact_attribution_ok={row['exact_attribution_ok']} "
+            f"pressure_ok={row['pressure_ok']} runtime_ok={row['runtime_ok']} "
+            f"brpc_attribution_complete={row['brpc_attribution_complete']} "
+            f"full_chain_attribution_ok={row['full_chain_attribution_ok']}"
+        )
 if valid:
     print("  aggregate averages:")
     for key in ("e2e_ms", "server_ms", "brpc_ms", "generative_brpc_ms", "vector_brpc_ms",

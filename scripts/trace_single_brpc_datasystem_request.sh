@@ -17,6 +17,7 @@ SIZE="${SIZE:-1}"
 SCENE_ID="${SCENE_ID:-home_feed}"
 TIMEOUT="${TIMEOUT:-30}"
 REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION="${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION:-0}"
+REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION="${REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION:-0}"
 ATTRIBUTION_WAIT_SECONDS="${ATTRIBUTION_WAIT_SECONDS:-35}"
 
 PAIREC_URL_WAS_SET=0
@@ -619,6 +620,11 @@ require_command python3
   echo "ERROR: REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION must be 0 or 1" >&2
   exit 1
 }
+[[ "$REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION" = 0 \
+  || "$REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION" = 1 ]] || {
+  echo "ERROR: REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION must be 0 or 1" >&2
+  exit 1
+}
 [[ "$ATTRIBUTION_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
   echo "ERROR: ATTRIBUTION_WAIT_SECONDS must be a positive integer" >&2
   exit 1
@@ -681,6 +687,19 @@ if [[ "$KVC_BURST_REQUIRE_COMPLETE" = 1 ]]; then
       | grep -Fq "\"request_id\":\"${REQUEST_ID}\""; do
     (( SECONDS < deadline )) || {
       echo "ERROR: no KVC burst completion for request_id=$REQUEST_ID" >&2
+      exit 1
+    }
+    sleep 0.1
+  done
+fi
+
+if [[ "$REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION" = 1 ]]; then
+  log "Wait for full-chain PaiRec pipeline trace"
+  deadline="$((SECONDS + ATTRIBUTION_WAIT_SECONDS))"
+  while ! grep -F '"event":"pipeline_trace_complete"' "$PAIREC_LOG" \
+      | grep -Fq "\"request_id\":\"${REQUEST_ID}\""; do
+    (( SECONDS < deadline )) || {
+      echo "ERROR: no pipeline_trace_complete for request_id=$REQUEST_ID" >&2
       exit 1
     }
     sleep 0.1
