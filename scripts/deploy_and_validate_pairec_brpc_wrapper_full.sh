@@ -45,6 +45,7 @@ PAIREC_MANIFEST="${PAIREC_MANIFEST:-k8s/deployment-pairec-brpc-observed-wrapper.
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-brpc-wrapper-full/$(date +%Y%m%d-%H%M%S)-c${BURST_CONCURRENCY}-n${REQUESTS}}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-10m}"
 COMPLETION_TIMEOUT_SECONDS="${COMPLETION_TIMEOUT_SECONDS:-30}"
+LOG_SINCE_LOOKBACK_SECONDS="${LOG_SINCE_LOOKBACK_SECONDS:-60}"
 SERVICE_READY_TIMEOUT_SECONDS="${SERVICE_READY_TIMEOUT_SECONDS:-60}"
 CPU_THROTTLED_PERIOD_LIMIT_PCT="${CPU_THROTTLED_PERIOD_LIMIT_PCT:-5}"
 CPU_THROTTLED_GATE_MIN_PERIODS="${CPU_THROTTLED_GATE_MIN_PERIODS:-100}"
@@ -85,6 +86,9 @@ python3 -c 'import json,sys; value=json.loads(sys.argv[1]); assert isinstance(va
 [[ "$SIZE" =~ ^[1-9][0-9]*$ ]] || die "SIZE must be positive"
 [[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
   || die "SERVICE_READY_TIMEOUT_SECONDS must be positive"
+[[ "$LOG_SINCE_LOOKBACK_SECONDS" =~ ^[0-9]+$ ]] \
+  && (( LOG_SINCE_LOOKBACK_SECONDS <= 3600 )) \
+  || die "LOG_SINCE_LOOKBACK_SECONDS must be in [0,3600]"
 [[ "$CPU_THROTTLED_PERIOD_LIMIT_PCT" =~ ^[0-9]+([.][0-9]+)?$ ]] \
   || die "CPU_THROTTLED_PERIOD_LIMIT_PCT must be numeric"
 [[ "$CPU_THROTTLED_GATE_MIN_PERIODS" =~ ^[1-9][0-9]*$ ]] \
@@ -516,7 +520,8 @@ for tuple in "${RESOURCE_TARGETS[@]}"; do
 done
 
 echo "== Run strict full-chain c${BURST_CONCURRENCY} pressure: $REQUESTS requests =="
-STARTED_AT="$(date --iso-8601=seconds)"
+LOG_SINCE_AT="$(date --date="${LOG_SINCE_LOOKBACK_SECONDS} seconds ago" --iso-8601=seconds)"
+echo "log_since_at=$LOG_SINCE_AT lookback_seconds=$LOG_SINCE_LOOKBACK_SECONDS"
 WORKLOAD_STARTED_AT="$(date +%s.%N)"
 printf 'index\te2e_ms\trequest_id\tresponse_end_epoch_ns\n' >"$OUTPUT_DIR/requests.tsv"
 for index in $(seq 1 "$REQUESTS"); do
@@ -550,11 +555,11 @@ echo "workload elapsed_seconds=$WORKLOAD_ELAPSED_SECONDS requests=$REQUESTS"
 
 deadline=$((SECONDS + COMPLETION_TIMEOUT_SECONDS))
 while true; do
-  kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec --since-time="$STARTED_AT" \
+  kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec --since-time="$LOG_SINCE_AT" \
     >"$OUTPUT_DIR/pairec.log"
-  kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper --since-time="$STARTED_AT" \
+  kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper --since-time="$LOG_SINCE_AT" \
     >"$OUTPUT_DIR/wrapper.log"
-  kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference --since-time="$STARTED_AT" \
+  kubectl -n "$NAMESPACE" logs "$INFERENCE_POD" -c brpc-inference --since-time="$LOG_SINCE_AT" \
     >"$OUTPUT_DIR/inference.log"
   if python3 - "$OUTPUT_DIR/requests.tsv" "$OUTPUT_DIR/pairec.log" \
       "$OUTPUT_DIR/inference.log" <<'PY'

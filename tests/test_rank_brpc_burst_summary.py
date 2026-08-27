@@ -48,6 +48,30 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
         ):
             self.assertIn(token, combined)
 
+    def test_cross_node_log_collection_uses_bounded_lookback(self):
+        combined = (
+            ROOT / "scripts" / "validate_pairec_brpc_wrapper_kvc_combined.sh"
+        ).read_text()
+        full_chain = (
+            ROOT / "scripts" / "deploy_and_validate_pairec_brpc_wrapper_full.sh"
+        ).read_text()
+        self.assertIn(
+            'LOG_SINCE_LOOKBACK_SECONDS="${LOG_SINCE_LOOKBACK_SECONDS:-60}"',
+            full_chain,
+        )
+        self.assertEqual(3, full_chain.count('--since-time="$LOG_SINCE_AT"'))
+        self.assertNotIn('--since-time="$STARTED_AT"', full_chain)
+        self.assertIn(
+            'LOG_SINCE_LOOKBACK_SECONDS=${LOG_SINCE_LOOKBACK_SECONDS:-60}',
+            combined,
+        )
+        self.assertIn(
+            'LOG_SINCE_LOOKBACK_SECONDS="$LOG_SINCE_LOOKBACK_SECONDS"',
+            combined,
+        )
+        self.assertEqual(3, combined.count('--since-time="$LOG_SINCE_AT"'))
+        self.assertNotIn('--since-time="$STARTED_AT"', combined)
+
     def test_generation_kvc_rank_ab_summary_math(self):
         def case(concurrency, base):
             names = set(marginal_module.KEY_METRICS) | {

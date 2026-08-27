@@ -39,6 +39,7 @@ RANK_DEPLOYMENT=${RANK_DEPLOYMENT:-deepfm-rank-brpc}
 RANK_SERVICE=${RANK_SERVICE:-$RANK_DEPLOYMENT}
 RANK_PORT=${RANK_PORT:-18211}
 RANK_COMPLETION_TIMEOUT_SECONDS=${RANK_COMPLETION_TIMEOUT_SECONDS:-30}
+LOG_SINCE_LOOKBACK_SECONDS=${LOG_SINCE_LOOKBACK_SECONDS:-60}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 mkdir -p "$OUTPUT_DIR"
@@ -99,6 +100,9 @@ done
   || die "RANK_BURST_PRESSURE_TIMEOUT_MS must be positive"
 [[ "$RANK_COMPLETION_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
   || die "RANK_COMPLETION_TIMEOUT_SECONDS must be positive"
+[[ "$LOG_SINCE_LOOKBACK_SECONDS" =~ ^[0-9]+$ ]] \
+  && (( LOG_SINCE_LOOKBACK_SECONDS <= 3600 )) \
+  || die "LOG_SINCE_LOOKBACK_SECONDS must be in [0,3600]"
 if [[ "$RANK_BURST_ENABLED" = 1 ]]; then
   [[ "$RANK_ENDPOINT_OVERRIDE" == *:* ]] \
     || die "Rank burst combination requires direct RANK_ENDPOINT_OVERRIDE=host:port"
@@ -145,6 +149,7 @@ NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
   RANK_BURST_PAYLOAD_BYTES="$RANK_BURST_PAYLOAD_BYTES" \
   RANK_BUSINESS_PAYLOAD_BYTES="$RANK_BUSINESS_PAYLOAD_BYTES" \
   RANK_BURST_PRESSURE_TIMEOUT_MS="$RANK_BURST_PRESSURE_TIMEOUT_MS" \
+  LOG_SINCE_LOOKBACK_SECONDS="$LOG_SINCE_LOOKBACK_SECONDS" \
   OUTPUT_DIR="$WRAPPER_OUTPUT_DIR" \
   bash scripts/deploy_and_validate_pairec_brpc_wrapper_full.sh \
   | tee "$OUTPUT_DIR/wrapper-console.log"
@@ -153,7 +158,8 @@ set -e
 [[ "$wrapper_code" -eq 0 ]] || die "BRPC Wrapper full-chain validation failed: exit=$wrapper_code"
 
 echo "== Run KVC contention through the deployed BRPC Wrapper =="
-STARTED_AT="$(date --iso-8601=seconds)"
+LOG_SINCE_AT="$(date --date="${LOG_SINCE_LOOKBACK_SECONDS} seconds ago" --iso-8601=seconds)"
+echo "log_since_at=$LOG_SINCE_AT lookback_seconds=$LOG_SINCE_LOOKBACK_SECONDS"
 set +e
 NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE=baseline \
   KVC_BURST_CONTAINER=kvc-burst-wrapper KVC_BURST_REQUIRE_COMPLETE=1 \
@@ -199,7 +205,7 @@ PY
   rank_deadline=$((SECONDS + RANK_COMPLETION_TIMEOUT_SECONDS))
   while true; do
     kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec \
-      --since-time="$STARTED_AT" --timestamps >"$PAIREC_RANK_MEASURED_LOG"
+      --since-time="$LOG_SINCE_AT" --timestamps >"$PAIREC_RANK_MEASURED_LOG"
     if python3 - "$PAIREC_RANK_MEASURED_LOG" "${RANK_REQUEST_IDS[@]}" <<'PY'
 import json,pathlib,sys
 expected=set(sys.argv[2:]); found=set()
@@ -220,7 +226,7 @@ PY
     sleep 0.2
   done
   kubectl -n "$NAMESPACE" logs "$RANK_POD" -c rank-burst-wrapper \
-    --since-time="$STARTED_AT" --timestamps >"$RANK_WRAPPER_MEASURED_LOG"
+    --since-time="$LOG_SINCE_AT" --timestamps >"$RANK_WRAPPER_MEASURED_LOG"
   echo "PAIREC_COMBINED_RANK_BURST_DRAINED requests=${#RANK_REQUEST_IDS[@]} concurrency=$RANK_BURST_CONCURRENCY"
 fi
 
@@ -228,7 +234,7 @@ WRAPPER_POD="$(kubectl -n "$NAMESPACE" get pod -l app=brpc-burst-wrapper \
   --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
 [[ -n "$WRAPPER_POD" ]] || die "BRPC Wrapper Pod not found"
 kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c brpc-burst-wrapper \
-  --since-time="$STARTED_AT" >"$OUTPUT_DIR/wrapper-measured.log" 2>&1 || true
+  --since-time="$LOG_SINCE_AT" >"$OUTPUT_DIR/wrapper-measured.log" 2>&1 || true
 
 python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log" \
   "$OUTPUT_DIR/summary.json" "$WRAPPER_CONCURRENCY" "$KVC_CONCURRENCY" \
