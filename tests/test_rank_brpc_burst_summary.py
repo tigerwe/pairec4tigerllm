@@ -45,6 +45,9 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
             'rank_endpoint.get("rank_endpoint_source") == "override"',
             '"rank_front_brpc_ms"',
             '"rank_pressure_pipeline_overlap_ms"',
+            'RANK_DEPLOYMENT=deepfm-rank-burst-wrapper',
+            'does not contain rank-burst-wrapper',
+            'PAIREC_COMBINED_RANK_WRAPPER_READY',
         ):
             self.assertIn(token, combined)
 

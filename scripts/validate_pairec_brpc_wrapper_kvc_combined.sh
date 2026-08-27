@@ -35,7 +35,14 @@ RANK_BURST_PAYLOAD_BYTES=${RANK_BURST_PAYLOAD_BYTES:-102400}
 RANK_BUSINESS_PAYLOAD_BYTES=${RANK_BUSINESS_PAYLOAD_BYTES:-102400}
 RANK_BURST_PRESSURE_TIMEOUT_MS=${RANK_BURST_PRESSURE_TIMEOUT_MS:-5000}
 RANK_ENDPOINT_OVERRIDE=${RANK_ENDPOINT_OVERRIDE:-}
-RANK_DEPLOYMENT=${RANK_DEPLOYMENT:-deepfm-rank-brpc}
+RANK_DEPLOYMENT=${RANK_DEPLOYMENT:-}
+if [[ -z "$RANK_DEPLOYMENT" ]]; then
+  if [[ "$RANK_BURST_ENABLED" = 1 ]]; then
+    RANK_DEPLOYMENT=deepfm-rank-burst-wrapper
+  else
+    RANK_DEPLOYMENT=deepfm-rank-brpc
+  fi
+fi
 RANK_SERVICE=${RANK_SERVICE:-$RANK_DEPLOYMENT}
 RANK_PORT=${RANK_PORT:-18211}
 RANK_COMPLETION_TIMEOUT_SECONDS=${RANK_COMPLETION_TIMEOUT_SECONDS:-30}
@@ -156,6 +163,17 @@ NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
 wrapper_code=${PIPESTATUS[0]}
 set -e
 [[ "$wrapper_code" -eq 0 ]] || die "BRPC Wrapper full-chain validation failed: exit=$wrapper_code"
+
+if [[ "$RANK_BURST_ENABLED" = 1 ]]; then
+  RANK_POD="$(kubectl -n "$NAMESPACE" get pod -l "app=$RANK_DEPLOYMENT" \
+    --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  [[ -n "$RANK_POD" ]] || die "Rank Wrapper Pod not found for app=$RANK_DEPLOYMENT"
+  kubectl -n "$NAMESPACE" get pod "$RANK_POD" \
+    -o jsonpath='{.spec.containers[*].name}' \
+    | tr ' ' '\n' | grep -Fxq rank-burst-wrapper \
+    || die "app=$RANK_DEPLOYMENT pod=$RANK_POD does not contain rank-burst-wrapper"
+  echo "PAIREC_COMBINED_RANK_WRAPPER_READY deployment=$RANK_DEPLOYMENT pod=$RANK_POD"
+fi
 
 echo "== Run KVC contention through the deployed BRPC Wrapper =="
 LOG_SINCE_AT="$(date --date="${LOG_SINCE_LOOKBACK_SECONDS} seconds ago" --iso-8601=seconds)"
