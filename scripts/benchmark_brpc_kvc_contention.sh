@@ -1280,6 +1280,8 @@ import os
 import statistics
 import sys
 
+from scripts.brpc_chain_attribution import attribute_brpc_chain
+
 (
     out_dir, mode, repeats, expected_offloads, expected_onboards,
     expected_onboards_min, expected_onboards_max, strict_counts, result_path,
@@ -1433,7 +1435,8 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
     offload_ms = sum(number(event.get("total_ms")) for event in offloads)
     onboard_ms = sum(number(event.get("total_ms")) for event in onboards)
     kvc_ms = offload_ms + onboard_ms
-    brpc_ms = max(0.0, rpc_ms - server_ms)
+    brpc_attribution = attribute_brpc_chain(raw)
+    brpc_ms = brpc_attribution["brpc_ms"]
     outer_ms = max(0.0, e2e_ms - rpc_ms)
     server_other_ms = max(0.0, server_ms - kvc_ms)
     round_dir = os.path.dirname(os.path.dirname(path))
@@ -1621,6 +1624,13 @@ for path in sorted(glob.glob(os.path.join(out_dir, "round-*", "replay", "summary
         "rpc_ms": rpc_ms,
         "server_ms": server_ms,
         "brpc_ms": brpc_ms,
+        "generative_brpc_ms": brpc_attribution["generative_brpc_ms"],
+        "vector_brpc_ms": brpc_attribution["vector_brpc_ms"],
+        "rank_brpc_ms": brpc_attribution["rank_brpc_ms"],
+        "rank_business_brpc_ms": brpc_attribution["rank_business_brpc_ms"],
+        "rank_coordination_ms": brpc_attribution["rank_coordination_ms"],
+        "brpc_attribution_complete": brpc_attribution["complete"],
+        "brpc_attribution_sources": brpc_attribution["sources"],
         "offload_count": len(offloads),
         "onboard_count": len(onboards),
         "offload_ms": offload_ms,
@@ -1691,7 +1701,9 @@ brpc_cpu_throttled_period_pct = (
 )
 brpc_cpu_throttled_ms = sum(row["brpc_pressure_cpu_throttled_ms"] for row in valid)
 metrics = {}
-for key in ("e2e_ms", "server_ms", "brpc_ms", "kvc_ms", "offload_ms", "onboard_ms", "server_other_ms", "outer_ms"):
+for key in ("e2e_ms", "server_ms", "brpc_ms", "generative_brpc_ms", "vector_brpc_ms",
+            "rank_brpc_ms", "rank_business_brpc_ms", "rank_coordination_ms",
+            "kvc_ms", "offload_ms", "onboard_ms", "server_other_ms", "outer_ms"):
     values = [row[key] for row in valid]
     metrics[key] = None if not values else {
         "avg": statistics.mean(values),
@@ -1704,6 +1716,7 @@ status = "PASS" if len(valid) == repeats else "FAIL"
 result = {
     "mode": mode,
     "status": status,
+    "brpc_accounting_model": "additive_stage_overhead_nonexclusive",
     "expected_repeats": repeats,
     "valid_repeats": len(valid),
     "expected_counts": {
@@ -1734,17 +1747,21 @@ with open(result_path, "w", encoding="utf-8") as handle:
 
 print("BRPC/KVC contention summary")
 print(f"  mode={mode} status={status} valid_repeats={len(valid)}/{repeats}")
+print("  brpc_accounting=generative+vector+rank stage overhead; additive and not an E2E closure")
 if pressure_required:
     print(
         f"  pressure_engine={pressure_engine} expected_get_inflight={get_clients if mode in {'kvc-get', 'kvc-mixed', 'combined'} else 0} "
         f"expected_set_inflight={set_clients if mode in {'kvc-set', 'kvc-mixed', 'combined'} else 0} "
         f"expected_brpc_active={brpc_load_concurrency if brpc_pressure_required else 0}"
     )
-print("  round valid e2e_ms server_ms brpc_ms kvc_ms offloads onboards exact_set exact_get exact_ok server_other_ms outer_ms brpc_qps brpc_gbps brpc_active cpu_thr_pct get_qps get_inflight set_qps set_inflight restarts crashes")
+print("  round valid e2e_ms gen_server brpc_ms gen_brpc vector_brpc rank_brpc rank_business rank_coord attrib kvc_ms offloads onboards exact_set exact_get exact_ok server_other outside_gen brpc_qps brpc_gbps brpc_active cpu_thr_pct get_qps get_inflight set_qps set_inflight restarts crashes")
 for row in rows:
     print(
         f"  {row['round']:>5} {str(row['valid']):>5} {row['e2e_ms']:>7.3f} {row['server_ms']:>9.3f} "
-        f"{row['brpc_ms']:>7.3f} {row['kvc_ms']:>6.3f} {row['offload_count']:>8} "
+        f"{row['brpc_ms']:>7.3f} {row['generative_brpc_ms']:>8.3f} "
+        f"{row['vector_brpc_ms']:>11.3f} {row['rank_brpc_ms']:>9.3f} "
+        f"{row['rank_business_brpc_ms']:>13.3f} {row['rank_coordination_ms']:>10.3f} "
+        f"{str(row['brpc_attribution_complete']):>6} {row['kvc_ms']:>6.3f} {row['offload_count']:>8} "
         f"{row['onboard_count']:>8} {row['exact_set_count']:>9} {row['exact_get_count']:>9} "
         f"{str(row['exact_attribution_ok']):>8} {row['server_other_ms']:>15.3f} {row['outer_ms']:>8.3f} "
         f"{row['brpc_pressure_qps']:>9.3f} {row['brpc_pressure_gbps']:>10.3f} "
@@ -1755,7 +1772,9 @@ for row in rows:
     )
 if valid:
     print("  aggregate averages:")
-    for key in ("e2e_ms", "server_ms", "brpc_ms", "kvc_ms", "offload_ms", "onboard_ms", "server_other_ms", "outer_ms"):
+    for key in ("e2e_ms", "server_ms", "brpc_ms", "generative_brpc_ms", "vector_brpc_ms",
+                "rank_brpc_ms", "rank_business_brpc_ms", "rank_coordination_ms",
+                "kvc_ms", "offload_ms", "onboard_ms", "server_other_ms", "outer_ms"):
         print(f"    {key}={metrics[key]['avg']:.3f}")
     e2e_avg = metrics["e2e_ms"]["avg"]
     print(f"    brpc_e2e_pct={metrics['brpc_ms']['avg'] / e2e_avg * 100:.2f}%")

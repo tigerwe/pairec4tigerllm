@@ -6,7 +6,8 @@ from pathlib import Path
 
 DEFAULT_RANGES = {
     "e2e_ms": (320.0, 360.0),
-    "brpc_ms": (40.0, 50.0),
+    # Historical target for the generation caller-to-inference delta.
+    "generative_brpc_ms": (40.0, 50.0),
     "kvc_ms": (200.0, 210.0),
     "server_other_ms": (80.0, 90.0),
 }

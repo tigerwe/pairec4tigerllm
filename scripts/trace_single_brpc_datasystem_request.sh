@@ -317,13 +317,24 @@ for line in (pairec_log + "\n" + pairec_extra).splitlines():
         pairec_lines.append(line)
 
 generative_trace = {}
+vector_trace = {}
 recommend_trace = {}
+pairec_json_events = []
 for line in pairec_lines:
     fields = parse_kv_fields(line)
     if fields.get("module") == "GenerativeRecall":
         generative_trace = fields
+    elif fields.get("module") == "MilvusRecall":
+        vector_trace = fields
     elif fields.get("module") == "RecommendTrace":
         recommend_trace = fields
+    try:
+        pos = line.index("{")
+        candidate = json.loads(line[pos:])
+    except (ValueError, json.JSONDecodeError):
+        candidate = None
+    if candidate and candidate.get("request_id") == request_id:
+        pairec_json_events.append(candidate)
 
 brpc_lines = [
     line for line in trt_log.splitlines()
@@ -407,7 +418,9 @@ summary = {
         "onboard_events": onboards,
     },
     "pairec_generative_trace": generative_trace,
+    "pairec_vector_trace": vector_trace,
     "pairec_recommend_trace": recommend_trace,
+    "pairec_json_events": pairec_json_events,
     "datasystem_request_complete": datasystem_completion,
     "datasystem_request_completion_count": len(datasystem_completions),
     "trt_executor_request_completions": executor_completions,

@@ -486,6 +486,23 @@ class SustainedPressureStructureTest(unittest.TestCase):
         self.assertIn('start_brpc_stop_watcher', contention)
         self.assertIn('PressureErrorSamples []string', coordinator)
 
+    def test_contention_reports_full_chain_brpc_attribution(self):
+        contention = CONTENTION.read_text()
+        trace = (ROOT / "scripts/trace_single_brpc_datasystem_request.sh").read_text()
+        combined = COMBINED.read_text()
+        for field in (
+            '"generative_brpc_ms"',
+            '"vector_brpc_ms"',
+            '"rank_brpc_ms"',
+            '"rank_business_brpc_ms"',
+            '"rank_coordination_ms"',
+            '"brpc_attribution_complete"',
+        ):
+            self.assertIn(field, contention)
+        self.assertIn('"pairec_json_events": pairec_json_events', trace)
+        self.assertIn('"pairec_vector_trace": vector_trace', trace)
+        self.assertIn('row.get("brpc_attribution_complete") is True', combined)
+
     def test_full_chain_warmup_rejects_failed_pressure_lanes(self):
         deploy = FULL_DEPLOY.read_text()
         self.assertIn('event["pressure_success"] == expected - 1', deploy)

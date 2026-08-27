@@ -17,6 +17,25 @@ and each BRPC call has one total attempt (zero retries).
 The deployment renderer resolves all three BRPC Services to numeric ClusterIPs before creating
 the observed PaiRec Pod, so request traffic and readiness do not depend on CoreDNS.
 
+## Full-chain BRPC latency attribution
+
+The contention summary uses `brpc_ms` for the sum of BRPC overhead across the
+recommendation pipeline, rather than only the generative-recall RPC delta:
+
+- `generative_brpc_ms`: generative caller wall time minus inference service time.
+- `vector_brpc_ms`: vector-recall span duration minus vector service time.
+- `rank_brpc_ms`: DeepFM rank span duration minus rank service time.
+- `rank_business_brpc_ms`: business Rank RPC wall time minus rank service time.
+- `rank_coordination_ms`: remaining Rank coordinator/pressure-tail time, so
+  `rank_brpc_ms = rank_business_brpc_ms + rank_coordination_ms`.
+
+`brpc_attribution_complete=true` requires generative, vector, and rank evidence.
+The combined c1000 generation + c32 KVC + c1000 Rank validation fails if any
+stage is missing, so absent events cannot silently appear as zero latency.
+The total is additive stage work, not an exclusive E2E decomposition: vector
+and generative recall can overlap, so `brpc_ms` must not be used to close the
+wall-clock timeline by subtraction.
+
 ## Trace contract
 
 `proto/pipeline_service.proto` defines the protocol-neutral request context and service trace.

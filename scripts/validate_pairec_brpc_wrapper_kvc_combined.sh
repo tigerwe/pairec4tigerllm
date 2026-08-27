@@ -330,6 +330,7 @@ def overlap_ms(left_start, left_end, right_start, right_end):
 rank_pairec_events = json_events(rank_pairec_log_path) if rank_pairec_log_path.is_file() else []
 
 for row in contention.get("rows", []):
+    assert row.get("brpc_attribution_complete") is True, row
     replay = pathlib.Path(row["summary_path"]).parent
     trace = json.load(open(replay / "summary.json"))
     request_id = trace["request_id"]
