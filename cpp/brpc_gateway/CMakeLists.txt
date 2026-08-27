@@ -412,8 +412,17 @@ target_link_libraries(
     Threads::Threads
 )
 
-add_executable(brpc_rank_burst_wrapper brpc_rank_burst_wrapper.cpp)
-target_include_directories(brpc_rank_burst_wrapper PRIVATE ${BRPC_INCLUDE_DIR})
+add_executable(
+  brpc_rank_burst_wrapper
+  brpc_rank_burst_wrapper.cpp
+  ../kvc_burst/kvc_operation_proxy.cpp
+)
+target_include_directories(
+  brpc_rank_burst_wrapper
+  PRIVATE
+    ${BRPC_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../kvc_burst
+)
 target_link_libraries(
   brpc_rank_burst_wrapper
   PRIVATE
@@ -469,8 +478,24 @@ if(PAIREC_ENABLE_DATASYSTEM_KV_PROBE)
   target_compile_definitions(brpc_inference_server PRIVATE PAIREC_ENABLE_DATASYSTEM_KV_PROBE=1)
   target_include_directories(brpc_inference_server PRIVATE ${DATASYSTEM_INCLUDE_DIR})
   target_link_libraries(brpc_inference_server PRIVATE ${DATASYSTEM_LIBRARY})
+  target_compile_definitions(brpc_rank_burst_wrapper PRIVATE PAIREC_ENABLE_DATASYSTEM_KV_PROBE=1)
+  target_include_directories(brpc_rank_burst_wrapper PRIVATE ${DATASYSTEM_INCLUDE_DIR})
+  target_link_libraries(brpc_rank_burst_wrapper PRIVATE ${DATASYSTEM_LIBRARY})
+  add_executable(kvc_burst_wrapper ../kvc_burst/kvc_burst_wrapper.cpp)
+  target_include_directories(
+    kvc_burst_wrapper
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/../kvc_burst
+      ${DATASYSTEM_INCLUDE_DIR}
+  )
+  target_link_libraries(kvc_burst_wrapper PRIVATE ${DATASYSTEM_LIBRARY} Threads::Threads)
   set_property(
     TARGET brpc_inference_server
+    APPEND
+    PROPERTY INSTALL_RPATH "$ORIGIN/../lib;${DATASYSTEM_LIBRARY_DIR}"
+  )
+  set_property(
+    TARGET brpc_rank_burst_wrapper kvc_burst_wrapper
     APPEND
     PROPERTY INSTALL_RPATH "$ORIGIN/../lib;${DATASYSTEM_LIBRARY_DIR}"
   )
@@ -488,3 +513,7 @@ install(
     brpc_pipeline_client
   RUNTIME DESTINATION bin
 )
+
+if(PAIREC_ENABLE_DATASYSTEM_KV_PROBE)
+  install(TARGETS kvc_burst_wrapper RUNTIME DESTINATION bin)
+endif()

@@ -58,6 +58,40 @@ bool inProcessPressureEnabled()
     return parseEnabled(std::getenv("PAIREC_KVC_INPROCESS_BURST"));
 }
 
+uint32_t expectedBusinessGets()
+{
+    auto const* configured = std::getenv("KVC_BURST_EXPECTED_BUSINESS_GETS");
+    if (configured == nullptr) return 2U;
+    try
+    {
+        auto const parsed = std::stoul(configured);
+        return parsed == 1U || parsed == 2U ? static_cast<uint32_t>(parsed) : 0U;
+    }
+    catch (...)
+    {
+        return 0U;
+    }
+}
+
+uint32_t requiredPressureFirst(uint32_t lanes)
+{
+    return expectedBusinessGets() == 1U ? lanes : RequiredPressureFirst(lanes);
+}
+
+uint64_t expectedObjectBytes()
+{
+    auto const* configured = std::getenv("KVC_BURST_EXPECTED_OBJECT_BYTES");
+    if (configured == nullptr) return 3670016ULL;
+    try
+    {
+        return std::stoull(configured);
+    }
+    catch (...)
+    {
+        return 0ULL;
+    }
+}
+
 std::string pressurePrefix()
 {
     auto const* configured = std::getenv("PAIREC_KVC_INPROCESS_PRESSURE_PREFIX");
@@ -204,7 +238,12 @@ class InProcessPressureCoordinator
 public:
     ~InProcessPressureCoordinator()
     {
-        mStopping.store(true, std::memory_order_release);
+        shutdown();
+    }
+
+    void shutdown()
+    {
+        if (mStopping.exchange(true, std::memory_order_acq_rel)) return;
         if (auto* control = mapping().get())
         {
             FetchAdd(&control->pressure_command_generation, 1U);
@@ -214,6 +253,8 @@ public:
         {
             if (worker.joinable()) worker.join();
         }
+        mWorkers.clear();
+        mGet.reset();
     }
 
     bool registerClient(InProcessPressureGet get)
@@ -334,7 +375,7 @@ private:
     static void maybeMarkEstablished(SharedControl* control, uint32_t generation)
     {
         auto const lanes = Load(&control->pressure_lanes);
-        auto const required = RequiredPressureFirst(lanes);
+        auto const required = requiredPressureFirst(lanes);
         if (Load(&control->pressure_started_lanes) == lanes
             && Load(&control->pressure_active_gets) >= required)
         {
@@ -421,7 +462,7 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
         && requestMatches(*control, requestId))
     {
         auto const started = Load(&control->business_get_started_count);
-        if (started == 1U)
+        if (expectedBusinessGets() == 2U && started == 1U)
         {
             token.status = TriggerStatus::kTriggered;
             token.inProcessPressure = true;
@@ -455,9 +496,14 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
     }
     auto const pressureLanes = Load(&control->pressure_lanes);
     auto const pressureKeyCount = Load(&control->pressure_key_count);
-    auto const inProcessShapeValid = Load(&control->configured_concurrency) == 32U
-        && pressureLanes == 31U && pressureKeyCount > 0U && pressureKeyCount <= pressureLanes
-        && Load(&control->object_size_bytes) == 3670016ULL;
+    auto const concurrency = Load(&control->configured_concurrency);
+    auto const rankC1Shape = concurrency == 1U && pressureLanes == 0U
+        && pressureKeyCount == 0U;
+    auto const pressuredShape = concurrency == 32U && pressureLanes == 31U
+        && pressureKeyCount > 0U && pressureKeyCount <= pressureLanes;
+    auto const inProcessShapeValid = (rankC1Shape || pressuredShape)
+        && expectedBusinessGets() > 0U
+        && Load(&control->object_size_bytes) == expectedObjectBytes();
     if (Load(&control->keys_verified) != pressureLanes
         || (inProcess ? !inProcessShapeValid : Load(&control->clients_connected) != pressureLanes))
     {
@@ -524,9 +570,10 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
     if (token.inProcessPressure)
     {
         auto const waitStarted = MonotonicNs();
-        auto const required = RequiredPressureFirst(pressureLanes);
+        auto const required = requiredPressureFirst(pressureLanes);
         auto const deadline = DeadlineNs(Load(&control->barrier_timeout_ms));
-        while ((Load(&control->pressure_established_generation) != token.generation
+        while (required > 0U
+            && (Load(&control->pressure_established_generation) != token.generation
                    || Load(&control->pressure_active_gets) < required)
             && Load(&control->completed_pressure_lanes) == 0U && MonotonicNs() < deadline)
         {
@@ -534,9 +581,9 @@ BusinessGetToken beginBusinessGet(std::string const& requestId, BusinessApi api,
         }
         token.pressureWaitUs = (MonotonicNs() - waitStarted) / 1000ULL;
         auto const active = Load(&control->pressure_active_gets);
-        token.pressureEstablished
-            = Load(&control->pressure_established_generation) == token.generation
-            && active >= required;
+        token.pressureEstablished = required == 0U
+            || (Load(&control->pressure_established_generation) == token.generation
+                && active >= required);
         Store(&control->business_pressure_wait_us, token.pressureWaitUs);
         Store(&control->business_pressure_active_snapshot, active);
         if (!token.pressureEstablished)
@@ -577,10 +624,20 @@ InProcessPressureSession beginInProcessPressure(
     // first MGet/parallel client observed during prime would recreate the
     // original client/socket isolation ambiguity.
     if (token.api != BusinessApi::kGet) return {};
-    auto const registered = inProcessCoordinator().registerClient(std::move(get));
+    auto const registered = registerInProcessPressureClient(std::move(get));
     if (!registered) return {};
     return InProcessPressureSession(
         token.inProcessPressure ? std::make_unique<InProcessPressureSession::Impl>() : nullptr);
+}
+
+bool registerInProcessPressureClient(InProcessPressureGet get)
+{
+    return inProcessCoordinator().registerClient(std::move(get));
+}
+
+void shutdownInProcessPressureClient()
+{
+    inProcessCoordinator().shutdown();
 }
 
 void finishBusinessGet(BusinessGetToken const& token, bool success, uint64_t businessEndedNs)
@@ -601,18 +658,25 @@ void finishBusinessGet(BusinessGetToken const& token, bool success, uint64_t bus
     }
     FetchAdd(&control->business_get_completed_count, 1U);
     if (success) FetchAdd(&control->business_get_success_count, 1U);
+    auto const expectedGets = expectedBusinessGets();
     if (token.businessGetOrdinal == 1U)
     {
         Store(&control->business_get_1_end_ns, ended);
         Store(&control->business_get_1_us, elapsedUs);
+        if (expectedGets == 2U) return;
+    }
+    else if (token.businessGetOrdinal == 2U && expectedGets == 2U)
+    {
+        Store(&control->business_get_2_end_ns, ended);
+        Store(&control->business_get_2_us, elapsedUs);
+    }
+    else
+    {
         return;
     }
-    if (token.businessGetOrdinal != 2U) return;
-    Store(&control->business_get_2_end_ns, ended);
-    Store(&control->business_get_2_us, elapsedUs);
     Store(&control->business_end_ns, ended);
     Store(&control->business_success,
-        Load(&control->business_get_success_count) == 2U ? 1U : 0U);
+        expectedGets > 0U && Load(&control->business_get_success_count) == expectedGets ? 1U : 0U);
     auto const stopNs = MonotonicNs();
     Store(&control->pressure_active_at_stop, Load(&control->pressure_active_gets));
     Store(&control->pressure_completed_at_stop, Load(&control->pressure_completed_gets));

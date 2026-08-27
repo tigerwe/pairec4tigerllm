@@ -59,6 +59,8 @@ private:
     std::string const& requestId, BusinessApi api, uint32_t keyCount);
 [[nodiscard]] InProcessPressureSession beginInProcessPressure(
     BusinessGetToken const& token, InProcessPressureGet get);
+[[nodiscard]] bool registerInProcessPressureClient(InProcessPressureGet get);
+void shutdownInProcessPressureClient();
 void finishBusinessGet(BusinessGetToken const& token, bool success, uint64_t businessEndedNs = 0);
 void observeAddTokenStart(std::string const& requestId);
 void observeAddTokenEnd(std::string const& requestId);

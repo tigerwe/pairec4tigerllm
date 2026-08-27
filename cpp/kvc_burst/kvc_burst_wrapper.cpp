@@ -11,6 +11,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <exception>
 #include <fstream>
@@ -58,6 +59,8 @@ struct Config
     uint32_t sustainedMaxDurationMs{1000};
     uint32_t sustainedMaxLoops{100};
     bool inProcessPressure{false};
+    uint32_t expectedBusinessGets{2};
+    uint32_t ttlSeconds{0};
 };
 
 struct Mapping
@@ -189,6 +192,16 @@ bool ParseArgs(int argc, char** argv, Config* config)
         {
             if (!ParseBool(value, &config->inProcessPressure)) return false;
         }
+        else if (name == "expected_business_gets")
+        {
+            if (!ParseUnsigned(value, &parsed) || (parsed != 1U && parsed != 2U)) return false;
+            config->expectedBusinessGets = static_cast<uint32_t>(parsed);
+        }
+        else if (name == "ttl_sec")
+        {
+            if (!ParseUnsigned(value, &parsed) || parsed > UINT32_MAX) return false;
+            config->ttlSeconds = static_cast<uint32_t>(parsed);
+        }
         else if (name == "cleanup_keys")
         {
             if (!ParseBool(value, &config->cleanupKeys)) return false;
@@ -213,14 +226,20 @@ bool ParseArgs(int argc, char** argv, Config* config)
         std::cerr << "sustained pressure requires positive max duration and max loops" << std::endl;
         return false;
     }
+    auto const rankC1Shape = config->expectedBusinessGets == 1U
+        && config->concurrency == 1U && config->pressureKeyCount == 0U;
+    auto const pressuredShape = config->concurrency == 32U
+        && config->pressureKeyCount > 0U && config->pressureKeyCount <= 31U;
+    auto const generationShape = config->expectedBusinessGets == 2U
+        && pressuredShape && config->objectSize == 3670016ULL;
+    auto const rankShape = config->expectedBusinessGets == 1U
+        && (rankC1Shape || pressuredShape);
     if (config->inProcessPressure
-        && (config->concurrency != 32U || config->pressureKeyCount == 0U
-            || config->pressureKeyCount > 31U
-            || config->objectSize != 3670016ULL || !config->sustainedPressure
+        && (!(generationShape || rankShape) || !config->sustainedPressure
             || config->initiallyArmed))
     {
-        std::cerr << "in-process pressure requires c32, 1..31 keys, 3670016-byte objects, "
-                     "sustained pressure, and dynamic arm"
+        std::cerr << "in-process pressure requires the generation c32/3670016-byte/2-Get "
+                     "shape or Rank c1|c32/1-Get shape, sustained pressure, and dynamic arm"
                   << std::endl;
         return false;
     }
@@ -262,10 +281,26 @@ std::vector<std::string> BuildGenerationKeys(const Config& config, uint32_t coun
     return BuildKeys(generationConfig, count);
 }
 
-bool PrefillAndVerify(datasystem::KVClient& client, const std::vector<std::string>& keys, const std::string& value)
+std::string BuildDeterministicValue(uint64_t size, uint64_t seed)
+{
+    std::string value(size, '\0');
+    std::mt19937_64 random(seed);
+    for (uint64_t offset = 0; offset < size; offset += sizeof(uint64_t))
+    {
+        auto const word = random();
+        auto const bytes = static_cast<size_t>(
+            std::min<uint64_t>(sizeof(word), size - offset));
+        std::memcpy(value.data() + offset, &word, bytes);
+    }
+    return value;
+}
+
+bool PrefillAndVerify(datasystem::KVClient& client, const std::vector<std::string>& keys,
+    const std::string& value, uint32_t ttlSeconds)
 {
     datasystem::SetParam param;
     param.writeMode = datasystem::WriteMode::NONE_L2_CACHE_EVICT;
+    param.ttlSecond = ttlSeconds;
     for (const auto& key : keys)
     {
         auto setStatus = client.Set(key, datasystem::StringView(value), param);
@@ -276,9 +311,12 @@ bool PrefillAndVerify(datasystem::KVClient& client, const std::vector<std::strin
         }
         datasystem::Optional<datasystem::Buffer> buffer;
         auto getStatus = client.Get(key, buffer, 0);
-        if (getStatus.IsError() || !buffer)
+        if (getStatus.IsError() || !buffer || buffer->GetSize() != value.size())
         {
-            std::cerr << "verification Get failed key=" << key << " detail=" << getStatus.ToString() << std::endl;
+            std::cerr << "verification Get failed key=" << key << " expected_bytes="
+                      << value.size() << " actual_bytes="
+                      << (buffer ? buffer->GetSize() : 0U)
+                      << " detail=" << getStatus.ToString() << std::endl;
             return false;
         }
     }
@@ -577,7 +615,7 @@ struct Aggregate
     uint64_t pressureMaxUs{0};
 };
 
-Aggregate AggregateResult(SharedControl& control)
+Aggregate AggregateResult(const Config& config, SharedControl& control)
 {
     Aggregate result;
     auto pressureLanes = pairec::kvc_burst::Load(&control.pressure_lanes);
@@ -667,15 +705,19 @@ Aggregate AggregateResult(SharedControl& control)
     }
 
     auto concurrency = pairec::kvc_burst::Load(&control.configured_concurrency);
-    auto requiredActive = (concurrency * 95U + 99U) / 100U;
-    auto requiredOverlap = (pressureLanes * 95U + 99U) / 100U;
+    auto requiredActive = config.expectedBusinessGets == 1U
+        ? concurrency : (concurrency * 95U + 99U) / 100U;
+    auto requiredOverlap = config.expectedBusinessGets == 1U
+        ? pressureLanes : (pressureLanes * 95U + 99U) / 100U;
     if (pairec::kvc_burst::Load(&control.barrier_failed) != 0)
     {
         result.failure = Failure::kBarrierTimeout;
     }
     else if (pairec::kvc_burst::Load(&control.pressure_client_registered) != 0U
-        && (pairec::kvc_burst::Load(&control.business_get_completed_count) != 2U
-            || pairec::kvc_burst::Load(&control.business_get_success_count) != 2U))
+        && (pairec::kvc_burst::Load(&control.business_get_completed_count)
+                != config.expectedBusinessGets
+            || pairec::kvc_burst::Load(&control.business_get_success_count)
+                != config.expectedBusinessGets))
     {
         result.failure = Failure::kBusinessGetCountMismatch;
     }
@@ -689,9 +731,14 @@ Aggregate AggregateResult(SharedControl& control)
         result.failure = Failure::kPressureGetFailed;
     }
     else if (pairec::kvc_burst::Load(&control.pressure_first_failed) != 0
-        || !pairec::kvc_burst::PressureFirstSatisfied(pressureLanes,
-            result.pressureStartedBeforeBusiness, result.pressureInflightAtBusinessStart,
-            result.businessSubmitRank))
+        || (config.expectedBusinessGets == 1U
+                ? !(result.pressureStartedBeforeBusiness >= pressureLanes
+                    && result.pressureInflightAtBusinessStart >= pressureLanes
+                    && result.businessSubmitRank == pressureLanes + 1U)
+                : !pairec::kvc_burst::PressureFirstSatisfied(pressureLanes,
+                    result.pressureStartedBeforeBusiness,
+                    result.pressureInflightAtBusinessStart,
+                    result.businessSubmitRank)))
     {
         result.failure = Failure::kPressureNotEstablished;
     }
@@ -815,6 +862,7 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
            << ",\"business_get_ms\":" << static_cast<double>(result.businessGetUs) / 1000.0
            << ",\"business_get_count\":" << control.business_get_completed_count
            << ",\"business_get_success_count\":" << control.business_get_success_count
+           << ",\"expected_business_gets\":" << config.expectedBusinessGets
            << ",\"business_get_1_ms\":" << static_cast<double>(control.business_get_1_us) / 1000.0
            << ",\"business_get_2_ms\":" << static_cast<double>(control.business_get_2_us) / 1000.0
            << ",\"pressure_active_at_stop\":" << control.pressure_active_at_stop
@@ -859,7 +907,9 @@ std::string JsonResult(const Config& config, const SharedControl& control, uint3
            << ",\"pressure_completed_before_business\":"
            << result.pressureCompletedBeforeBusiness
            << ",\"pressure_first_required\":"
-           << pairec::kvc_burst::RequiredPressureFirst(control.pressure_lanes);
+           << (config.expectedBusinessGets == 1U
+                  ? control.pressure_lanes
+                  : pairec::kvc_burst::RequiredPressureFirst(control.pressure_lanes));
     {
         auto businessStart = pairec::kvc_burst::Load(&control.business_start_ns);
         auto businessEnd = pairec::kvc_burst::Load(&control.business_end_ns);
@@ -1184,7 +1234,7 @@ int Run(int argc, char** argv)
     auto pressureKeyCount = config.pressureKeyCount == 0 ? pressureLanes : config.pressureKeyCount;
     uint32_t pressureKeyGeneration = 0;
     auto keys = BuildGenerationKeys(config, pressureKeyCount, pressureKeyGeneration);
-    std::string value(config.objectSize, 'k');
+    std::string value = BuildDeterministicValue(config.objectSize, config.seed);
 
     std::unique_ptr<datasystem::KVClient> controlClient;
     if (pressureLanes > 0)
@@ -1193,7 +1243,7 @@ int Run(int argc, char** argv)
         controlClient = CreateClient(config, false);
         if (!controlClient) return 1;
         gStartupStage = "prefill_and_verify";
-        if (!PrefillAndVerify(*controlClient, keys, value)) return 1;
+        if (!PrefillAndVerify(*controlClient, keys, value, config.ttlSeconds)) return 1;
     }
     pairec::kvc_burst::Store(&control.keys_verified, pressureLanes);
 
@@ -1306,7 +1356,8 @@ int Run(int argc, char** argv)
             {
                 DeleteKeys(*controlClient, keys);
                 refreshedKeys = BuildGenerationKeys(config, pressureKeyCount, pressureKeyGeneration);
-                refreshed = PrefillAndVerify(*controlClient, refreshedKeys, value);
+                refreshed = PrefillAndVerify(
+                    *controlClient, refreshedKeys, value, config.ttlSeconds);
                 if (!refreshed) DeleteKeys(*controlClient, refreshedKeys);
             }
             if (refreshed)
@@ -1351,7 +1402,7 @@ int Run(int argc, char** argv)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        auto result = AggregateResult(control);
+        auto result = AggregateResult(config, control);
         auto sustainedReport = SummarizeSustained(config, control, sustainedStats);
         pairec::kvc_burst::Store(&control.result_valid, result.valid ? 1U : 0U);
         pairec::kvc_burst::Store(&control.result_failure, static_cast<uint32_t>(result.failure));

@@ -31,6 +31,7 @@ WORKDIR /src
 
 COPY proto /src/proto
 COPY cpp/brpc_gateway /src/cpp/brpc_gateway
+COPY cpp/kvc_burst /src/cpp/kvc_burst
 
 RUN unset LD_PRELOAD \
  && cmake -S /src/cpp/brpc_gateway -B /tmp/brpc-gateway-build \

@@ -3,6 +3,11 @@ set -euo pipefail
 
 MODE="${MODE:-baseline}"
 REPEATS="${REPEATS:-3}"
+RANK_KVC_DYNAMIC_ARM="${RANK_KVC_DYNAMIC_ARM:-0}"
+RANK_KVC_DEPLOYMENT="${RANK_KVC_DEPLOYMENT:-deepfm-rank-burst-wrapper}"
+RANK_KVC_CONTAINER="${RANK_KVC_CONTAINER:-rank-kvc-burst-wrapper}"
+RANK_KVC_CONTROL_PATH="${RANK_KVC_CONTROL_PATH:-/run/pairec-rank-kvc-burst/control}"
+RANK_KVC_COMPLETION_TIMEOUT_SECONDS="${RANK_KVC_COMPLETION_TIMEOUT_SECONDS:-30}"
 STRICT_COUNTS="${STRICT_COUNTS:-1}"
 EXPECTED_OFFLOADS="${EXPECTED_OFFLOADS:-3}"
 EXPECTED_ONBOARDS="${EXPECTED_ONBOARDS:-2}"
@@ -979,6 +984,61 @@ set_kvc_burst_arm() {
     "--prefix=PairecKvcBurstV2" \
     "--control_path=/run/pairec-kvc-burst/control" \
     >>"${round_dir}/kvc-burst-control.log" 2>&1
+}
+
+rank_kvc_pod() {
+  kubectl -n "$NAMESPACE" get pod -l "app=$RANK_KVC_DEPLOYMENT" \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1:].metadata.name}'
+}
+
+arm_rank_kvc_burst() {
+  local round_dir="$1"
+  [ "$RANK_KVC_DYNAMIC_ARM" = 1 ] || return 0
+  local pod
+  pod="$(rank_kvc_pod)"
+  [ -n "$pod" ] || { echo "Rank KVC Pod not found" >&2; return 1; }
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$RANK_KVC_CONTAINER" -- \
+    /opt/pairec-brpc/bin/kvc_burst_wrapper \
+      --control_action=refresh-and-arm \
+      --control_path="$RANK_KVC_CONTROL_PATH" \
+    >>"${round_dir}/rank-kvc-burst-control.log" 2>&1
+}
+
+wait_rank_kvc_burst() {
+  local round_dir="$1"
+  [ "$RANK_KVC_DYNAMIC_ARM" = 1 ] || return 0
+  local pod request_id deadline snapshot
+  pod="$(rank_kvc_pod)"
+  request_id="$(python3 - "${round_dir}/replay/summary.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["request_id"])
+PY
+)"
+  deadline=$((SECONDS + RANK_KVC_COMPLETION_TIMEOUT_SECONDS))
+  snapshot="${round_dir}/rank-kvc-burst-results.jsonl"
+  while (( SECONDS < deadline )); do
+    kubectl -n "$NAMESPACE" exec "$pod" -c "$RANK_KVC_CONTAINER" -- \
+      cat /run/pairec-rank-kvc-burst/results.jsonl >"$snapshot" 2>/dev/null || true
+    if python3 - "$snapshot" "$request_id" "${round_dir}/rank-kvc-burst.json" <<'PY'
+import json,pathlib,sys
+source,request_id,target=sys.argv[1:]
+matches=[]
+for line in pathlib.Path(source).read_text(errors="replace").splitlines():
+    try: event=json.loads(line)
+    except json.JSONDecodeError: continue
+    if event.get("event")=="kvc_burst_complete" and event.get("request_id")==request_id:
+        matches.append(event)
+if len(matches)!=1: raise SystemExit(1)
+pathlib.Path(target).write_text(json.dumps(matches[0],indent=2)+"\n")
+PY
+    then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "timed out waiting for Rank KVC completion request_id=$request_id" >&2
+  return 1
 }
 
 replay_retry_churn_uids() {
@@ -1991,12 +2051,20 @@ for round in $(seq 1 "$REPEATS"); do
 
   replay_attempt=1
   while true; do
+    if ! arm_rank_kvc_burst "$round_dir"; then
+      replay_code=1
+      echo "ERROR: round ${round} failed to arm Rank KVC burst" >&2
+      break
+    fi
     start_brpc_stop_watcher "$round_dir"
     set +e
     run_replay "$round_dir"
     replay_code="$?"
     set -e
     finish_brpc_stop_watcher "$round_dir"
+    if [ "$replay_code" -eq 0 ] && ! wait_rank_kvc_burst "$round_dir"; then
+      replay_code=1
+    fi
     if [ "$replay_code" -ne 0 ] && [ "$KVC_BURST_REQUIRE_COMPLETE" = "1" ]; then
       # Preserve the armed control state and Proxy skip reason before disarm.
       capture_kvc_burst_failure "$round_dir"

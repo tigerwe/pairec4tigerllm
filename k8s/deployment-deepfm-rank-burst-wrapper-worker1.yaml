@@ -22,12 +22,26 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - {name: LD_PRELOAD, value: ""}
+            - {name: KVC_BURST_ENABLED, value: "1"}
+            - {name: KVC_BURST_CONTROL_PATH, value: /run/pairec-rank-kvc-burst/control}
+            - {name: KVC_BURST_EXPECTED_BUSINESS_GETS, value: "1"}
+            - {name: KVC_BURST_EXPECTED_OBJECT_BYTES, value: "8388608"}
+            - {name: PAIREC_KVC_INPROCESS_BURST, value: "1"}
+            - {name: PAIREC_KVC_INPROCESS_PRESSURE_PREFIX, value: PairecRankKvcBurstV1}
           command: [/opt/pairec-brpc/bin/brpc_rank_burst_wrapper]
           args:
             - --listen_port=18213
             - --backend=__RANK_BACKEND_ENDPOINT__
             - --backend_timeout_ms=250
             - --idle_timeout_sec=-1
+            - --rank_kvc_enabled=true
+            - --rank_kvc_host=192.168.100.12
+            - --rank_kvc_port=18482
+            - --rank_kvc_business_key=rank_feature_context_v1_business
+            - --rank_kvc_object_size=8388608
+            - --rank_kvc_ttl_sec=600
+            - --rank_kvc_business_timeout_ms=1000
+            - --rank_kvc_pressure_timeout_ms=2000
           ports:
             - {name: brpc-wrapper, containerPort: 18213, hostPort: 18213}
           resources:
@@ -40,6 +54,8 @@ spec:
             - name: pipeline-client-bin
               mountPath: /opt/pairec-brpc/bin/brpc_pipeline_client
               readOnly: true
+            - name: rank-kvc-control
+              mountPath: /run/pairec-rank-kvc-burst
           startupProbe:
             tcpSocket: {port: 18213}
             periodSeconds: 2
@@ -55,11 +71,57 @@ spec:
             periodSeconds: 15
             timeoutSeconds: 2
             failureThreshold: 3
+        - name: rank-kvc-burst-wrapper
+          image: docker.io/library/pairec-brpc-inference:k8s-arm64-v1
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: LD_PRELOAD, value: ""}
+          command: [/opt/pairec-brpc/bin/kvc_burst_wrapper]
+          args:
+            - --host=192.168.100.12
+            - --port=18482
+            - --concurrency=__RANK_KVC_CONCURRENCY__
+            - --pressure_key_count=__RANK_KVC_PRESSURE_KEY_COUNT__
+            - --object_size=8388608
+            - --barrier_timeout_ms=100
+            - --pressure_lead_us=0
+            - --seed=20260827
+            - --prefix=PairecRankKvcBurstV1
+            - --control_path=/run/pairec-rank-kvc-burst/control
+            - --ready_file=/run/pairec-rank-kvc-burst/ready
+            - --stats_file=/run/pairec-rank-kvc-burst/results.jsonl
+            - --sustained_pressure=true
+            - --sustained_max_duration_ms=2000
+            - --sustained_max_loops=1
+            - --initially_armed=false
+            - --inprocess_pressure=true
+            - --expected_business_gets=1
+            - --ttl_sec=600
+            - --cleanup_keys=true
+          resources:
+            requests: {cpu: "1", memory: "256Mi"}
+            limits: {cpu: "2", memory: "512Mi"}
+          volumeMounts:
+            - name: rank-kvc-burst-bin
+              mountPath: /opt/pairec-brpc/bin/kvc_burst_wrapper
+              readOnly: true
+            - name: rank-kvc-control
+              mountPath: /run/pairec-rank-kvc-burst
+          readinessProbe:
+            exec:
+              command: [/bin/sh, -c, test -s /run/pairec-rank-kvc-burst/ready]
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 60
       volumes:
         - name: rank-burst-wrapper-bin
           hostPath: {path: /home/zcx/bin/brpc_rank_burst_wrapper, type: File}
         - name: pipeline-client-bin
           hostPath: {path: /home/zcx/bin/brpc_pipeline_client, type: File}
+        - name: rank-kvc-burst-bin
+          hostPath: {path: /home/zcx/bin/kvc_burst_wrapper, type: File}
+        - name: rank-kvc-control
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

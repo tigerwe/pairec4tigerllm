@@ -15,6 +15,9 @@ DEEPFM_MODEL_ROLE="${DEEPFM_MODEL_ROLE:-engineering}"
 WRAPPER_HOST_BIN="${WRAPPER_HOST_BIN:-/home/zcx/bin/brpc_rank_burst_wrapper}"
 RANK_ADAPTER_HOST_BIN="${RANK_ADAPTER_HOST_BIN:-/home/zcx/bin/brpc_deepfm_rank_adapter}"
 PIPELINE_CLIENT_HOST_BIN="${PIPELINE_CLIENT_HOST_BIN:-/home/zcx/bin/brpc_pipeline_client}"
+RANK_KVC_BURST_HOST_BIN="${RANK_KVC_BURST_HOST_BIN:-/home/zcx/bin/kvc_burst_wrapper}"
+RANK_KVC_CONCURRENCY="${RANK_KVC_CONCURRENCY:-32}"
+RANK_KVC_PRESSURE_KEY_COUNT="${RANK_KVC_PRESSURE_KEY_COUNT:-4}"
 WORKER_SSH="${WORKER_SSH:-root@192.168.100.11}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-10m}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/deepfm-rank-burst-worker1/$(date +%Y%m%d-%H%M%S)}"
@@ -38,6 +41,15 @@ for command in kubectl python3 ssh sha256sum; do
 done
 [[ "$DEEPFM_MODEL_ROLE" = engineering || "$DEEPFM_MODEL_ROLE" = production_candidate ]] \
   || die "invalid DEEPFM_MODEL_ROLE=$DEEPFM_MODEL_ROLE"
+[[ "$RANK_KVC_CONCURRENCY" = 1 || "$RANK_KVC_CONCURRENCY" = 32 ]] \
+  || die "RANK_KVC_CONCURRENCY must be 1 or 32"
+if [[ "$RANK_KVC_CONCURRENCY" = 1 ]]; then
+  [[ "$RANK_KVC_PRESSURE_KEY_COUNT" = 0 ]] \
+    || die "Rank KVC c1 requires RANK_KVC_PRESSURE_KEY_COUNT=0"
+else
+  [[ "$RANK_KVC_PRESSURE_KEY_COUNT" = 4 ]] \
+    || die "Rank KVC c32 requires RANK_KVC_PRESSURE_KEY_COUNT=4"
+fi
 test -f "$RANK_MANIFEST" || die "missing manifest: $RANK_MANIFEST"
 test -f "$WRAPPER_MANIFEST" || die "missing manifest: $WRAPPER_MANIFEST"
 mkdir -p "$OUTPUT_DIR"
@@ -50,6 +62,8 @@ ssh "$WORKER_SSH" "test -x '$RANK_ADAPTER_HOST_BIN' && sha256sum '$RANK_ADAPTER_
   | tee "$OUTPUT_DIR/rank-adapter-host.sha256"
 ssh "$WORKER_SSH" "test -x '$PIPELINE_CLIENT_HOST_BIN' && sha256sum '$PIPELINE_CLIENT_HOST_BIN'" \
   | tee "$OUTPUT_DIR/pipeline-client-host.sha256"
+ssh "$WORKER_SSH" "test -x '$RANK_KVC_BURST_HOST_BIN' && sha256sum '$RANK_KVC_BURST_HOST_BIN'" \
+  | tee "$OUTPUT_DIR/rank-kvc-burst-host.sha256"
 ssh "$WORKER_SSH" "test -d '$BACKEND_REPO_DIR'" \
   || die "worker1 backend repository is missing: $BACKEND_REPO_DIR"
 for artifact in deepfm_best.pt feature_vocab.json user_profiles.json item_categories.json; do
@@ -77,9 +91,15 @@ RANK_IP="$(kubectl -n "$NAMESPACE" get service "$RANK_DEPLOYMENT" -o jsonpath='{
 [[ -n "$RANK_IP" && "$RANK_IP" != None ]] || die "worker1 Rank service has no ClusterIP"
 
 echo "== Deploy Rank burst wrapper =="
-python3 - "$WRAPPER_MANIFEST" "$OUTPUT_DIR/wrapper.yaml" "${RANK_IP}:18211" <<'PY'
+python3 - "$WRAPPER_MANIFEST" "$OUTPUT_DIR/wrapper.yaml" "${RANK_IP}:18211" \
+  "$RANK_KVC_CONCURRENCY" "$RANK_KVC_PRESSURE_KEY_COUNT" <<'PY'
 import pathlib,sys
-text=pathlib.Path(sys.argv[1]).read_text().replace("__RANK_BACKEND_ENDPOINT__",sys.argv[3])
+text=pathlib.Path(sys.argv[1]).read_text()
+for old,new in {
+    "__RANK_BACKEND_ENDPOINT__":sys.argv[3],
+    "__RANK_KVC_CONCURRENCY__":sys.argv[4],
+    "__RANK_KVC_PRESSURE_KEY_COUNT__":sys.argv[5],
+}.items(): text=text.replace(old,new)
 assert "__" not in text
 pathlib.Path(sys.argv[2]).write_text(text)
 PY
@@ -151,9 +171,19 @@ mounted="$(kubectl -n "$NAMESPACE" exec "$RANK_POD" -c adapter -- sha256sum /pro
 expected="$(awk '{print $1}' "$OUTPUT_DIR/pipeline-client-host.sha256")"
 mounted="$(kubectl -n "$NAMESPACE" exec "$RANK_POD" -c adapter -- sha256sum /opt/pairec-brpc/bin/brpc_pipeline_client | awk '{print $1}')"
 [[ "$expected" = "$mounted" ]] || die "mounted pipeline client does not match worker host binary"
+expected="$(awk '{print $1}' "$OUTPUT_DIR/rank-kvc-burst-host.sha256")"
+mounted="$(kubectl -n "$NAMESPACE" exec "$WRAPPER_POD" -c rank-kvc-burst-wrapper -- sha256sum /proc/1/exe | awk '{print $1}')"
+[[ "$expected" = "$mounted" ]] || die "running Rank KVC sidecar does not match worker host binary"
+kubectl -n "$NAMESPACE" exec "$WRAPPER_POD" -c rank-kvc-burst-wrapper -- \
+  test -s /run/pairec-rank-kvc-burst/ready \
+  || die "Rank KVC sidecar is not ready"
+kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c rank-burst-wrapper --tail=200 \
+  | grep -F '"event":"rank_kvc_preflight_complete"' \
+  | tail -1 | tee "$OUTPUT_DIR/rank-kvc-preflight.json"
 kubectl -n "$NAMESPACE" exec "$WRAPPER_POD" -c rank-burst-wrapper -- \
   /opt/pairec-brpc/bin/brpc_pipeline_client --server=127.0.0.1:18213 --service=rank --timeout_ms=1000
 
 echo "DEEPFM_RANK_BURST_WORKER1_DEPLOYMENT_OK"
+echo "RANK_KVC_WRAPPER_READY concurrency=$RANK_KVC_CONCURRENCY object_size_bytes=8388608 shared_client=true"
 echo "rank_pod=$RANK_POD wrapper_pod=$WRAPPER_POD rank_wrapper_endpoint=$(kubectl -n "$NAMESPACE" get service "$WRAPPER_DEPLOYMENT" -o jsonpath='{.spec.clusterIP}'):18213"
 echo "output_dir=$OUTPUT_DIR"

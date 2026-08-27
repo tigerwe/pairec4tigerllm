@@ -65,6 +65,10 @@ if [ "$ENABLE_TRTLLM_CPP" = "ON" ] || [ "$ENABLE_TRTLLM_CPP" = "1" ]; then
         exit 1
       fi
     done
+    if test -x /opt/pairec-brpc/bin/kvc_burst_wrapper; then
+      ldd /opt/pairec-brpc/bin/kvc_burst_wrapper | tee /tmp/kvc_burst_wrapper.ldd
+      ! grep -q "not found" /tmp/kvc_burst_wrapper.ldd
+    fi
 
     echo "== readelf -d /opt/pairec-brpc/bin/brpc_inference_server =="
     readelf -d /opt/pairec-brpc/bin/brpc_inference_server | grep NEEDED || true
@@ -86,6 +90,10 @@ else
         exit 1
       fi
     done
+    if test -x /opt/pairec-brpc/bin/kvc_burst_wrapper; then
+      ldd /opt/pairec-brpc/bin/kvc_burst_wrapper | tee /tmp/kvc_burst_wrapper.ldd
+      ! grep -q "not found" /tmp/kvc_burst_wrapper.ldd
+    fi
   '
 fi
 

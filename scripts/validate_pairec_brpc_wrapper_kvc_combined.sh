@@ -34,6 +34,7 @@ RANK_BURST_POOL_SIZE=${RANK_BURST_POOL_SIZE:-$RANK_BURST_CONCURRENCY}
 RANK_BURST_PAYLOAD_BYTES=${RANK_BURST_PAYLOAD_BYTES:-102400}
 RANK_BUSINESS_PAYLOAD_BYTES=${RANK_BUSINESS_PAYLOAD_BYTES:-102400}
 RANK_BURST_PRESSURE_TIMEOUT_MS=${RANK_BURST_PRESSURE_TIMEOUT_MS:-5000}
+RANK_TIMEOUT_MS=${RANK_TIMEOUT_MS:-1500}
 RANK_ENDPOINT_OVERRIDE=${RANK_ENDPOINT_OVERRIDE:-}
 RANK_DEPLOYMENT=${RANK_DEPLOYMENT:-}
 if [[ -z "$RANK_DEPLOYMENT" ]]; then
@@ -46,6 +47,12 @@ fi
 RANK_SERVICE=${RANK_SERVICE:-$RANK_DEPLOYMENT}
 RANK_PORT=${RANK_PORT:-18211}
 RANK_COMPLETION_TIMEOUT_SECONDS=${RANK_COMPLETION_TIMEOUT_SECONDS:-30}
+RANK_KVC_ENABLED=${RANK_KVC_ENABLED:-0}
+RANK_KVC_CONCURRENCY=${RANK_KVC_CONCURRENCY:-1}
+RANK_KVC_OBJECT_SIZE=${RANK_KVC_OBJECT_SIZE:-8388608}
+RANK_KVC_BUSINESS_TIMEOUT_MS=${RANK_KVC_BUSINESS_TIMEOUT_MS:-500}
+RANK_KVC_SERVICE_TIMEOUT_MS=${RANK_KVC_SERVICE_TIMEOUT_MS:-750}
+E2E_TIMEOUT_MS=${E2E_TIMEOUT_MS:-1500}
 LOG_SINCE_LOOKBACK_SECONDS=${LOG_SINCE_LOOKBACK_SECONDS:-60}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -91,7 +98,7 @@ KVC_BARRIER_TIMEOUT_MS=5
 [[ "$KVC_INPROCESS_PRESSURE" = 0 ]] || KVC_BARRIER_TIMEOUT_MS=100
 [[ "$PRIME_REQUESTS" =~ ^[1-9][0-9]*$ ]] \
   || die "PRIME_REQUESTS must be positive"
-for flag in "$BUILD_PAIREC_IMAGE" "$IMPORT_PAIREC_IMAGE" "$RANK_BURST_ENABLED"; do
+for flag in "$BUILD_PAIREC_IMAGE" "$IMPORT_PAIREC_IMAGE" "$RANK_BURST_ENABLED" "$RANK_KVC_ENABLED"; do
   [[ "$flag" = 0 || "$flag" = 1 ]] || die "boolean flags must be 0 or 1"
 done
 [[ "$RANK_BURST_CONCURRENCY" =~ ^(1|1000)$ ]] \
@@ -113,6 +120,13 @@ done
 if [[ "$RANK_BURST_ENABLED" = 1 ]]; then
   [[ "$RANK_ENDPOINT_OVERRIDE" == *:* ]] \
     || die "Rank burst combination requires direct RANK_ENDPOINT_OVERRIDE=host:port"
+fi
+if [[ "$RANK_KVC_ENABLED" = 1 ]]; then
+  [[ "$RANK_BURST_ENABLED" = 1 ]] || die "Rank KVC experiment requires Rank BRPC burst"
+  [[ "$RANK_KVC_CONCURRENCY" = 1 || "$RANK_KVC_CONCURRENCY" = 32 ]] \
+    || die "RANK_KVC_CONCURRENCY must be 1 or 32"
+  [[ "$RANK_KVC_OBJECT_SIZE" = 8388608 ]] \
+    || die "Rank KVC experiment requires exact 8MiB objects"
 fi
 
 restore_kvc() {
@@ -156,6 +170,7 @@ NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
   RANK_BURST_PAYLOAD_BYTES="$RANK_BURST_PAYLOAD_BYTES" \
   RANK_BUSINESS_PAYLOAD_BYTES="$RANK_BUSINESS_PAYLOAD_BYTES" \
   RANK_BURST_PRESSURE_TIMEOUT_MS="$RANK_BURST_PRESSURE_TIMEOUT_MS" \
+  RANK_TIMEOUT_MS="$RANK_TIMEOUT_MS" \
   LOG_SINCE_LOOKBACK_SECONDS="$LOG_SINCE_LOOKBACK_SECONDS" \
   OUTPUT_DIR="$WRAPPER_OUTPUT_DIR" \
   bash scripts/deploy_and_validate_pairec_brpc_wrapper_full.sh \
@@ -188,6 +203,9 @@ NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE=baseline \
   EXPECTED_ONBOARDS_MAX="$EXPECTED_ONBOARDS_MAX" \
   REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION=1 PRIME_REQUESTS="$PRIME_REQUESTS" \
   REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION=1 \
+  RANK_KVC_DYNAMIC_ARM="$RANK_KVC_ENABLED" \
+  RANK_KVC_DEPLOYMENT="$RANK_DEPLOYMENT" \
+  RANK_KVC_COMPLETION_TIMEOUT_SECONDS="$RANK_COMPLETION_TIMEOUT_SECONDS" \
   RESET_INFERENCE_BEFORE_ROUND=1 RESET_INFERENCE_MODE=pod-recreate \
   MIN_ROOT_AVAILABLE_KB="$MIN_ROOT_AVAILABLE_KB" \
   PAIREC_TARGET=deploy/pairec-brpc-observed-wrapper \
@@ -249,6 +267,27 @@ PY
   echo "PAIREC_COMBINED_RANK_BURST_DRAINED requests=${#RANK_REQUEST_IDS[@]} concurrency=$RANK_BURST_CONCURRENCY"
 fi
 
+if [[ "$RANK_KVC_ENABLED" = 1 ]]; then
+  kubectl -n "$NAMESPACE" logs "$RANK_POD" -c rank-kvc-burst-wrapper \
+    --since="$((LOG_SINCE_LOOKBACK_SECONDS + 1))s" --timestamps \
+    >"$OUTPUT_DIR/rank-kvc-sidecar.log"
+  kubectl -n "$NAMESPACE" get pod "$RANK_POD" -o json \
+    >"$OUTPUT_DIR/rank-kvc-pod.json"
+  python3 - "$OUTPUT_DIR/rank-kvc-pod.json" <<'PY'
+import json,sys
+pod=json.load(open(sys.argv[1]))
+statuses={item["name"]:item for item in pod["status"]["containerStatuses"]}
+for name in ("rank-burst-wrapper","rank-kvc-burst-wrapper"):
+    assert statuses[name]["restartCount"] == 0, statuses[name]
+    assert statuses[name]["ready"] is True, statuses[name]
+PY
+  if grep -iE 'out of memory|oomkilled|segmentation fault' \
+      "$OUTPUT_DIR/rank-kvc-sidecar.log" "$RANK_WRAPPER_MEASURED_LOG"; then
+    die "Rank KVC runtime contains crash/OOM markers"
+  fi
+  echo "PAIREC_COMBINED_RANK_KVC_RUNTIME_OK restarts=0 oom=0"
+fi
+
 WRAPPER_POD="$(kubectl -n "$NAMESPACE" get pod -l app=brpc-burst-wrapper \
   --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
 [[ -n "$WRAPPER_POD" ]] || die "BRPC Wrapper Pod not found"
@@ -263,8 +302,10 @@ python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log
   "$PAIREC_RANK_MEASURED_LOG" "$RANK_WRAPPER_MEASURED_LOG" \
   "$RANK_BURST_ENABLED" "$RANK_BURST_CONCURRENCY" \
   "$RANK_BUSINESS_PAYLOAD_BYTES" "$RANK_BURST_PAYLOAD_BYTES" \
-  "$WRAPPER_OUTPUT_DIR/rank-endpoint.txt" "$BURST_POOL_SIZE" <<'PY'
-import json, math, pathlib, statistics, sys
+  "$WRAPPER_OUTPUT_DIR/rank-endpoint.txt" "$BURST_POOL_SIZE" \
+  "$RANK_KVC_ENABLED" "$RANK_KVC_CONCURRENCY" "$RANK_KVC_OBJECT_SIZE" \
+  "$RANK_KVC_BUSINESS_TIMEOUT_MS" "$RANK_KVC_SERVICE_TIMEOUT_MS" "$E2E_TIMEOUT_MS" <<'PY'
+import hashlib, json, math, pathlib, statistics, sys
 contention = json.load(open(sys.argv[1]))
 wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
 wrapper_concurrency = int(sys.argv[4])
@@ -284,6 +325,12 @@ rank_burst_concurrency = int(sys.argv[17])
 rank_business_payload_bytes = int(sys.argv[18])
 rank_pressure_payload_bytes = int(sys.argv[19])
 brpc_burst_pool_size = int(sys.argv[21])
+rank_kvc_enabled = sys.argv[22] == "1"
+rank_kvc_concurrency = int(sys.argv[23])
+rank_kvc_object_size = int(sys.argv[24])
+rank_kvc_business_timeout_ms = float(sys.argv[25])
+rank_kvc_service_timeout_ms = float(sys.argv[26])
+e2e_timeout_ms = float(sys.argv[27])
 rank_endpoint = {}
 for line in pathlib.Path(sys.argv[20]).read_text(errors="replace").splitlines():
     if "=" in line:
@@ -293,6 +340,7 @@ if rank_burst_enabled:
     assert rank_endpoint.get("rank_endpoint_source") == "override", rank_endpoint
 valid = contention.get("valid_repeats") == contention.get("expected_repeats")
 rows = []
+response_semantic_fingerprints = []
 
 def json_events(path):
     events = []
@@ -334,6 +382,13 @@ for row in contention.get("rows", []):
     assert row.get("brpc_attribution_complete") is True, row
     replay = pathlib.Path(row["summary_path"]).parent
     trace = json.load(open(replay / "summary.json"))
+    response = json.load(open(replay / "response.json"))
+    response_items = response.get("items") or []
+    assert response_items, (replay, response)
+    semantic_payload = json.dumps(
+        response_items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    response_semantic_fingerprints.append(
+        hashlib.sha256(semantic_payload.encode("utf-8")).hexdigest())
     request_id = trace["request_id"]
     pairec_events = json_events(replay / "pairec_stdout.log")
     pipeline = one(pairec_events, "pipeline_trace_complete", request_id)
@@ -471,6 +526,12 @@ for row in contention.get("rows", []):
         "rank_pressure_requests": 0.0,
         "rank_pressure_success": 0.0,
         "rank_pressure_errors": 0.0,
+        "rank_kvc_business_get_ms": 0.0,
+        "rank_kvc_pressure_p99_ms": 0.0,
+        "rank_kvc_max_active": 0.0,
+        "rank_kvc_pressure_inflight_at_business_start": 0.0,
+        "rank_kvc_pressure_tail_ms": 0.0,
+        "rank_kvc_rank_brpc_overlap_ms": 0.0,
     }
     if rank_burst_enabled:
         rank_own = [event for event in rank_pairec_events
@@ -508,10 +569,39 @@ for row in contention.get("rows", []):
         assert int(log_value(rank_wrapper, "code")) == 200, rank_wrapper
         assert int(log_value(rank_wrapper, "front_payload_bytes")) == rank_business_payload_bytes, rank_wrapper
         assert int(log_value(rank_wrapper, "backend_payload_bytes")) == 0, rank_wrapper
+        if rank_kvc_enabled:
+            assert log_value(rank_wrapper, "rank_kvc_success") == "true", rank_wrapper
+            assert log_value(rank_wrapper, "rank_kvc_coordinated") == "true", rank_wrapper
+            assert int(log_value(rank_wrapper, "rank_kvc_get_bytes")) == rank_kvc_object_size, rank_wrapper
+            rank_kvc = json.load(open(replay.parent / "rank-kvc-burst.json"))
+            assert rank_kvc["event"] == "kvc_burst_complete", rank_kvc
+            assert rank_kvc["request_id"] == request_id, rank_kvc
+            assert rank_kvc["valid"] is True, rank_kvc
+            assert rank_kvc["concurrency"] == rank_kvc_concurrency, rank_kvc
+            assert rank_kvc["object_size_bytes"] == rank_kvc_object_size, rank_kvc
+            assert rank_kvc["expected_business_gets"] == 1, rank_kvc
+            assert rank_kvc["business_get_count"] == 1, rank_kvc
+            assert rank_kvc["business_get_success_count"] == 1, rank_kvc
+            assert rank_kvc["business_bytes"] == rank_kvc_object_size, rank_kvc
+            expected_rank_kvc_pressure = rank_kvc_concurrency - 1
+            assert rank_kvc["pressure_success"] == expected_rank_kvc_pressure, rank_kvc
+            assert rank_kvc["pressure_errors"] == 0, rank_kvc
+            assert rank_kvc["business_submit_rank"] == rank_kvc_concurrency, rank_kvc
+            assert rank_kvc["pressure_inflight_at_business_start"] == expected_rank_kvc_pressure, rank_kvc
         rank_business_start = int(rank_business["rank_business_start_epoch_ns"])
         rank_business_end = int(rank_business["rank_business_end_epoch_ns"])
         pressure_start = int(rank_complete.get("rank_pressure_first_start_epoch_ns") or rank_business_start)
         pressure_end = int(rank_complete.get("rank_pressure_last_end_epoch_ns") or rank_business_end)
+        rank_kvc_rank_brpc_overlap_ms = 0.0
+        if rank_kvc_enabled and rank_kvc["pressure_lanes"]:
+            kvc_starts = [int(value) for value in rank_kvc["pressure_start_epoch_ns"]
+                          if value is not None]
+            kvc_ends = [int(value) for value in rank_kvc["pressure_end_epoch_ns"]
+                        if value is not None]
+            assert len(kvc_starts) == rank_kvc["pressure_lanes"], rank_kvc
+            assert len(kvc_ends) == rank_kvc["pressure_lanes"], rank_kvc
+            rank_kvc_rank_brpc_overlap_ms = overlap_ms(
+                min(kvc_starts), max(kvc_ends), pressure_start, pressure_end)
         generative = spans["generative_recall"]
         inference_end = int(pipeline["start_epoch_ns"]) + 1000 * (
             int(generative["start_offset_us"]) + int(generative["duration_us"]))
@@ -540,6 +630,13 @@ for row in contention.get("rows", []):
             "rank_pressure_requests": float(rank_complete["pressure_requests"]),
             "rank_pressure_success": float(rank_complete["pressure_success"]),
             "rank_pressure_errors": float(rank_complete["pressure_errors"]),
+            "rank_kvc_business_get_ms": float(rank_kvc["business_get_ms"]) if rank_kvc_enabled else 0.0,
+            "rank_kvc_pressure_p99_ms": float(rank_kvc["pressure_get_p99_ms"]) if rank_kvc_enabled else 0.0,
+            "rank_kvc_max_active": float(rank_kvc["max_active_all_gets"]) if rank_kvc_enabled else 0.0,
+            "rank_kvc_pressure_inflight_at_business_start": float(
+                rank_kvc["pressure_inflight_at_business_start"]) if rank_kvc_enabled else 0.0,
+            "rank_kvc_pressure_tail_ms": float(rank_kvc["pressure_tail_after_stop_ms"]) if rank_kvc_enabled else 0.0,
+            "rank_kvc_rank_brpc_overlap_ms": rank_kvc_rank_brpc_overlap_ms,
         }
         if rank_burst_concurrency > 1:
             assert rank_metrics["rank_wrapper_health_calls_during_rank"] > 0, rank_wrapper
@@ -644,6 +741,10 @@ for row in contention.get("rows", []):
         "wrapper_log_matches": len(matches),
         **rank_metrics,
     })
+    if rank_kvc_enabled:
+        assert rows[-1]["rank_kvc_business_get_ms"] <= rank_kvc_business_timeout_ms, rows[-1]
+        assert rows[-1]["rank_service_ms"] <= rank_kvc_service_timeout_ms, rows[-1]
+        assert rows[-1]["client_e2e_ms"] < e2e_timeout_ms, rows[-1]
 
 def percentile(values, q):
     values = sorted(values)
@@ -703,6 +804,10 @@ result = {
     "rank_pressure_payload_bytes": rank_pressure_payload_bytes if rank_burst_enabled else 0,
     "rank_endpoint": rank_endpoint.get("rank_endpoint", ""),
     "rank_endpoint_source": rank_endpoint.get("rank_endpoint_source", ""),
+    "rank_kvc_enabled": rank_kvc_enabled,
+    "rank_kvc_concurrency": rank_kvc_concurrency if rank_kvc_enabled else 0,
+    "rank_kvc_object_size_bytes": rank_kvc_object_size if rank_kvc_enabled else 0,
+    "response_semantic_fingerprints": response_semantic_fingerprints,
     "expected_onboards_min": expected_onboards_min,
     "expected_onboards_max": expected_onboards_max,
     "contention": contention,

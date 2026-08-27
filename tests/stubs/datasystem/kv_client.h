@@ -15,6 +15,8 @@ struct Status
 
 struct Buffer
 {
+    size_t GetSize() const { return 0; }
+    const void* ImmutableData() const { return nullptr; }
 };
 
 template <typename T>
@@ -36,6 +38,7 @@ enum class WriteMode
 struct SetParam
 {
     WriteMode writeMode{WriteMode::NONE_L2_CACHE_EVICT};
+    uint32_t ttlSecond{0};
 };
 
 class StringView

@@ -6,7 +6,7 @@ LOCAL_DIR="${LOCAL_DIR:-/home/zcx/pairec-rank-burst-bins}"
 WORKER="${WORKER:-root@192.168.100.11}"
 REMOTE_DIR="${REMOTE_DIR:-/home/zcx/bin}"
 CONTAINER_NAME="pairec-rank-wrapper-extract-$$"
-BINARIES=(brpc_rank_burst_wrapper brpc_deepfm_rank_adapter brpc_pipeline_client)
+BINARIES=(brpc_rank_burst_wrapper brpc_deepfm_rank_adapter brpc_pipeline_client kvc_burst_wrapper)
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 cleanup() { docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true; }
