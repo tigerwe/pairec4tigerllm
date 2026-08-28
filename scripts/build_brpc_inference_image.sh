@@ -48,6 +48,18 @@ env -u LD_PRELOAD docker build \
   -f docker/Dockerfile.brpc.gateway \
   -t "$IMAGE" .
 
+echo "Checking reverse BRPC control protocol support ..."
+docker run --rm --entrypoint /bin/bash -e LD_PRELOAD= "$IMAGE" -lc '
+  set -euo pipefail
+  unset LD_PRELOAD || true
+  for binary in brpc_recommend_client brpc_pipeline_client; do
+    grep -a -q PAIREC_RETURN_CONTROL_V1 "/opt/pairec-brpc/bin/$binary" || {
+      echo "ERROR: $binary does not contain reverse BRPC control support" >&2
+      exit 1
+    }
+  done
+'
+
 echo "Checking runtime dynamic library dependencies ..."
 if [ "$ENABLE_TRTLLM_CPP" = "ON" ] || [ "$ENABLE_TRTLLM_CPP" = "1" ]; then
   docker run --rm --entrypoint /bin/bash -e LD_PRELOAD= "$IMAGE" -lc '

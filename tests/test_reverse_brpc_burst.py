@@ -94,6 +94,25 @@ class ReverseBrpcBurstTest(unittest.TestCase):
             for item in mounts
         ))
 
+    def test_control_protocol_is_gated_before_remote_benchmark(self):
+        build = (ROOT / "scripts/build_brpc_inference_image.sh").read_text()
+        generation_ship = (
+            ROOT / "scripts/ship_brpc_burst_wrapper_binary_to_worker.sh"
+        ).read_text()
+        rank_ship = (
+            ROOT / "scripts/ship_brpc_rank_burst_wrapper_binary_to_worker.sh"
+        ).read_text()
+        benchmark = (
+            ROOT / "scripts/benchmark_pairec_reverse_brpc_abba.sh"
+        ).read_text()
+        for source in (build, generation_ship, rank_ship, benchmark):
+            self.assertIn("PAIREC_RETURN_CONTROL_V1", source)
+        self.assertLess(
+            benchmark.index("Preflight reverse BRPC control clients"),
+            benchmark.index("Deploy master return pressure Sinks"),
+        )
+        self.assertIn("brpc_recommend_client brpc_pipeline_client", benchmark)
+
     def test_abba_summary_splits_ten_and_ten(self):
         path = ROOT / "scripts/summarize_pairec_reverse_brpc_ab.py"
         spec = importlib.util.spec_from_file_location("reverse_ab", path)

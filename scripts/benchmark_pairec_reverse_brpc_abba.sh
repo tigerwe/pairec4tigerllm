@@ -5,8 +5,20 @@ NAMESPACE="${NAMESPACE:-pairec}"
 PRIME_REQUESTS="${PRIME_REQUESTS:-20}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-reverse-brpc-abba/$(date +%Y%m%d-%H%M%S)}"
 PATTERN="A,B,B,A,A,B,B,A,A,B,B,A,A,B,B,A,A,B,B,A"
+WRAPPER_WORKER="${WRAPPER_WORKER:-root@192.168.100.11}"
 
 mkdir -p "$OUTPUT_DIR"
+
+echo "== Preflight reverse BRPC control clients on worker1 =="
+for binary in brpc_recommend_client brpc_pipeline_client; do
+  ssh "$WRAPPER_WORKER" \
+    "grep -a -q PAIREC_RETURN_CONTROL_V1 '/home/zcx/bin/$binary'" \
+    || {
+      echo "ERROR: worker1 $binary does not support reverse BRPC control" >&2
+      echo "Re-ship it from the reverse-burst runtime image before running ABBA." >&2
+      exit 1
+    }
+done
 
 echo "== Deploy master return pressure Sinks =="
 NAMESPACE="$NAMESPACE" bash scripts/k8s_apply_brpc_return_pressure_sinks_master.sh \

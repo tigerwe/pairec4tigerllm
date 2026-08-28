@@ -25,12 +25,20 @@ for binary in "${BINARIES[@]}"; do
   remote_path="$REMOTE_DIR/$binary"
   docker cp "${CONTAINER_NAME}:/opt/pairec-brpc/bin/$binary" "$local_path"
   chmod 0755 "$local_path"
+  if [[ "$binary" = brpc_recommend_client || "$binary" = brpc_pipeline_client ]]; then
+    grep -a -q PAIREC_RETURN_CONTROL_V1 "$local_path" \
+      || die "$binary from $IMAGE does not support reverse BRPC control"
+  fi
   local_sha="$(sha256sum "$local_path" | awk '{print $1}')"
   scp "$local_path" "${WORKER}:${remote_path}.part"
   remote_sha="$(ssh "$WORKER" "sha256sum '${remote_path}.part'" | awk '{print $1}')"
   [[ "$local_sha" = "$remote_sha" ]] \
     || die "$binary checksum mismatch: local=$local_sha remote=$remote_sha"
   ssh "$WORKER" "chmod 0755 '${remote_path}.part' && mv -f '${remote_path}.part' '${remote_path}'"
+  if [[ "$binary" = brpc_recommend_client || "$binary" = brpc_pipeline_client ]]; then
+    ssh "$WORKER" "grep -a -q PAIREC_RETURN_CONTROL_V1 '${remote_path}'" \
+      || die "$binary installed on $WORKER does not support reverse BRPC control"
+  fi
   echo "binary=$binary remote_path=$remote_path sha256=$local_sha"
 done
 
