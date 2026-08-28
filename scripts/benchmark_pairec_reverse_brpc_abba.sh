@@ -6,6 +6,14 @@ PRIME_REQUESTS="${PRIME_REQUESTS:-20}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-reverse-brpc-abba/$(date +%Y%m%d-%H%M%S)}"
 PATTERN="A,B,B,A,A,B,B,A,A,B,B,A,A,B,B,A,A,B,B,A"
 WRAPPER_WORKER="${WRAPPER_WORKER:-root@192.168.100.11}"
+GENERATION_BURST_POOL_SIZE="${GENERATION_BURST_POOL_SIZE:-2000}"
+
+[[ "$GENERATION_BURST_POOL_SIZE" =~ ^[1-9][0-9]*$ ]] && \
+  (( GENERATION_BURST_POOL_SIZE >= 1000 && GENERATION_BURST_POOL_SIZE <= 10000 )) \
+  || {
+    echo "ERROR: GENERATION_BURST_POOL_SIZE must be in [1000,10000]" >&2
+    exit 1
+  }
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -19,6 +27,16 @@ for binary in brpc_recommend_client brpc_pipeline_client; do
       exit 1
     }
 done
+
+echo "== Quiesce previous generation connection pool =="
+if kubectl -n "$NAMESPACE" get deployment pairec-brpc-observed-wrapper \
+    >/dev/null 2>&1; then
+  kubectl -n "$NAMESPACE" scale deployment/pairec-brpc-observed-wrapper \
+    --replicas=0
+  kubectl -n "$NAMESPACE" wait --for=delete pod \
+    -l app=pairec-brpc-observed-wrapper --timeout=120s
+fi
+echo "PAIREC_PREVIOUS_GENERATION_POOL_DRAINED target_pool_size=$GENERATION_BURST_POOL_SIZE"
 
 echo "== Redeploy generation Wrapper after host binary update =="
 NAMESPACE="$NAMESPACE" WRAPPER_WORKER="$WRAPPER_WORKER" \
@@ -38,7 +56,8 @@ NAMESPACE="$NAMESPACE" RANK_KVC_CONCURRENCY=32 RANK_KVC_PRESSURE_KEY_COUNT=4 \
 common_env=(
   NAMESPACE="$NAMESPACE" WARMUP_REQUESTS=1 PRIME_REQUESTS="$PRIME_REQUESTS"
   BUILD_PAIREC_IMAGE=0 IMPORT_PAIREC_IMAGE=0
-  WRAPPER_CONCURRENCY=1000 BURST_POOL_SIZE=10000 BURST_ACTIVE_CONNECTIONS=1000
+  WRAPPER_CONCURRENCY=1000 BURST_POOL_SIZE="$GENERATION_BURST_POOL_SIZE"
+  BURST_ACTIVE_CONNECTIONS=1000
   BUSINESS_PAYLOAD_BYTES=102400 BRPC_PRESSURE_PAYLOAD_BYTES=102400
   KVC_CONCURRENCY=32 KVC_PRESSURE_KEY_COUNT=4 KVC_OBJECT_SIZE=3670016
   KVC_PRESSURE_LEAD_US=1000 KVC_INPROCESS_PRESSURE=1
@@ -52,6 +71,8 @@ common_env=(
   RANK_KVC_ENABLED=1 RANK_KVC_CONCURRENCY=32 RANK_KVC_OBJECT_SIZE=8388608
   REVERSE_BURST_ENABLED=1 REVERSE_BURST_COMPLETION_TIMEOUT_SECONDS=15
 )
+
+echo "generation_burst_pool_size=$GENERATION_BURST_POOL_SIZE active_connections=1000"
 
 echo "== Functional treatment smoke n1 =="
 env "${common_env[@]}" REQUESTS=1 OUTPUT_DIR="$OUTPUT_DIR/smoke" \

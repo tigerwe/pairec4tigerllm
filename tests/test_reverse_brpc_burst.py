@@ -139,13 +139,37 @@ class ReverseBrpcBurstTest(unittest.TestCase):
         generation_deploy = benchmark.index(
             "bash scripts/k8s_apply_brpc_burst_wrapper_188.sh"
         )
+        previous_pool_drain = benchmark.index(
+            "PAIREC_PREVIOUS_GENERATION_POOL_DRAINED"
+        )
         self.assertLess(
             benchmark.index("Preflight reverse BRPC control clients"),
-            generation_deploy,
+            previous_pool_drain,
         )
+        self.assertLess(previous_pool_drain, generation_deploy)
         self.assertLess(
             generation_deploy,
             benchmark.index("Functional treatment smoke n1"),
+        )
+
+    def test_abba_uses_two_thousand_generation_sessions(self):
+        benchmark = (
+            ROOT / "scripts/benchmark_pairec_reverse_brpc_abba.sh"
+        ).read_text()
+        self.assertIn(
+            'GENERATION_BURST_POOL_SIZE="${GENERATION_BURST_POOL_SIZE:-2000}"',
+            benchmark,
+        )
+        self.assertIn(
+            'BURST_POOL_SIZE="$GENERATION_BURST_POOL_SIZE"', benchmark
+        )
+        self.assertIn("GENERATION_BURST_POOL_SIZE >= 1000", benchmark)
+        self.assertIn("BURST_ACTIVE_CONNECTIONS=1000", benchmark)
+        self.assertIn(
+            "scale deployment/pairec-brpc-observed-wrapper", benchmark
+        )
+        self.assertIn(
+            "-l app=pairec-brpc-observed-wrapper --timeout=120s", benchmark
         )
 
     def test_abba_summary_splits_ten_and_ten(self):

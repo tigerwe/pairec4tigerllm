@@ -53,6 +53,14 @@ create 1000 sessions. Unique groups also isolate the marker Socket from the 999
 pressure Sockets and keep each 100 KiB write below the per-Socket unwritten-byte
 limit.
 
+The forward generation burst keeps 1000 active lanes but uses a 2000-session
+preconnected pool for this ABBA experiment. This replaces the previous
+10000-session pool to reduce concurrent socket residency and reconnect pressure
+while preserving the measured c1000 burst. Before restarting the generation
+Wrapper, the ABBA runner scales the previous PaiRec instance to zero and waits
+for its old pool to disconnect. The full-chain validator then recreates PaiRec
+with the 2000-session pool after the reverse Wrapper is Ready.
+
 The Wrapper waits for the marker and fails closed on marker error or its 1000 ms
 timeout. It does not wait for the 999 Health requests. Health calls have a
 5000 ms timeout and finish asynchronously. Their errors invalidate the measured
