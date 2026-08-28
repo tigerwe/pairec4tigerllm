@@ -6,6 +6,7 @@ NODE="${NODE:-worker1}"
 RANK_DEPLOYMENT="${RANK_DEPLOYMENT:-deepfm-rank-brpc-worker1}"
 WRAPPER_DEPLOYMENT="${WRAPPER_DEPLOYMENT:-deepfm-rank-burst-wrapper}"
 INFERENCE_DEPLOYMENT="${INFERENCE_DEPLOYMENT:-inference-brpc-trtllm}"
+INFERENCE_CONTAINER="${INFERENCE_CONTAINER:-brpc-inference}"
 ROLLBACK_RANK_DEPLOYMENT="${ROLLBACK_RANK_DEPLOYMENT:-deepfm-rank-brpc}"
 RANK_MANIFEST="${RANK_MANIFEST:-k8s/deployment-deepfm-rank-brpc-worker1.yaml}"
 WRAPPER_MANIFEST="${WRAPPER_MANIFEST:-k8s/deployment-deepfm-rank-burst-wrapper-worker1.yaml}"
@@ -91,9 +92,14 @@ RANK_IP="$(kubectl -n "$NAMESPACE" get service "$RANK_DEPLOYMENT" -o jsonpath='{
 [[ -n "$RANK_IP" && "$RANK_IP" != None ]] || die "worker1 Rank service has no ClusterIP"
 
 echo "== Deploy Rank burst wrapper =="
+INFERENCE_POD="$(ready_pod "$INFERENCE_DEPLOYMENT")"
+INFERENCE_RUNTIME_ENV="$OUTPUT_DIR/inference-runtime.env"
+kubectl -n "$NAMESPACE" exec "$INFERENCE_POD" -c "$INFERENCE_CONTAINER" -- env \
+  >"$INFERENCE_RUNTIME_ENV"
 python3 - "$WRAPPER_MANIFEST" "$OUTPUT_DIR/wrapper.yaml" "${RANK_IP}:18211" \
-  "$RANK_KVC_CONCURRENCY" "$RANK_KVC_PRESSURE_KEY_COUNT" <<'PY'
-import pathlib,sys
+  "$RANK_KVC_CONCURRENCY" "$RANK_KVC_PRESSURE_KEY_COUNT" \
+  "$INFERENCE_RUNTIME_ENV" <<'PY'
+import pathlib,re,sys,yaml
 text=pathlib.Path(sys.argv[1]).read_text()
 for old,new in {
     "__RANK_BACKEND_ENDPOINT__":sys.argv[3],
@@ -101,7 +107,38 @@ for old,new in {
     "__RANK_KVC_PRESSURE_KEY_COUNT__":sys.argv[5],
 }.items(): text=text.replace(old,new)
 assert "__" not in text
-pathlib.Path(sys.argv[2]).write_text(text)
+runtime={}
+for line in pathlib.Path(sys.argv[6]).read_text().splitlines():
+    name,separator,value=line.partition("=")
+    if separator: runtime[name]=value
+preload_tokens=[token for token in re.split(r"[\s:]+", runtime.get("LD_PRELOAD", ""))
+                if token and "libnvidia-ml.so" not in token]
+runtime["LD_PRELOAD"]=" ".join(preload_tokens)
+required_preloads=("block_ds_consumer.so", "stub_gpu.so", "libabseil_dll.so")
+missing=[name for name in required_preloads if name not in runtime["LD_PRELOAD"]]
+if missing:
+    raise RuntimeError("inference LD_PRELOAD lacks required Rank KVC libraries: "
+                       + ",".join(missing))
+required_env=("HOST_IP", "LD_LIBRARY_PATH", "LD_PRELOAD")
+missing_env=[name for name in required_env if not runtime.get(name)]
+if missing_env:
+    raise RuntimeError("inference runtime environment is empty: " + ",".join(missing_env))
+runtime_names={"HOST_IP", "LD_LIBRARY_PATH", "LD_PRELOAD", "NVIDIA_DRIVER_CAPABILITIES"}
+runtime_names.update(name for name in runtime if name.startswith("DATASYSTEM_"))
+inherited=[{"name":name, "value":runtime[name]} for name in sorted(runtime_names)
+           if runtime.get(name)]
+documents=list(yaml.safe_load_all(text))
+deployment=documents[0]
+containers=deployment["spec"]["template"]["spec"]["containers"]
+for container_name in ("rank-burst-wrapper", "rank-kvc-burst-wrapper"):
+    container=next(item for item in containers if item["name"] == container_name)
+    existing=[entry for entry in container.get("env", [])
+              if entry.get("name") not in runtime_names]
+    container["env"]=inherited + existing
+pathlib.Path(sys.argv[2]).write_text(
+    yaml.safe_dump_all(documents, sort_keys=False), encoding="utf-8")
+print("Rank KVC runtime environment inherited from inference Pod; LD_PRELOAD="
+      + runtime["LD_PRELOAD"])
 PY
 kubectl apply -f "$OUTPUT_DIR/wrapper.yaml"
 kubectl -n "$NAMESPACE" rollout restart "deployment/$WRAPPER_DEPLOYMENT"
@@ -122,7 +159,6 @@ for pod in "$RANK_POD" "$WRAPPER_POD"; do
   qos="$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.status.qosClass}')"
   echo "pod=$pod qos=$qos" | tee -a "$OUTPUT_DIR/cpu-isolation.txt"
 done
-INFERENCE_POD="$(ready_pod "$INFERENCE_DEPLOYMENT")"
 python3 - "$NAMESPACE" "$RANK_POD" "$WRAPPER_POD" "$INFERENCE_POD" \
   "$OUTPUT_DIR/cpu-isolation.json" <<'PY'
 import json,subprocess,sys

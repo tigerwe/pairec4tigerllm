@@ -1,6 +1,9 @@
 import importlib.util
 import json
 import pathlib
+import re
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -55,6 +58,51 @@ class RankKvcWrapperTest(unittest.TestCase):
             "--inprocess_pressure=true",
         ):
             self.assertIn(expected, args)
+
+    def test_rank_deploy_inherits_datasystem_arm_runtime(self):
+        deploy = (
+            ROOT / "scripts/deploy_deepfm_rank_burst_worker1.sh"
+        ).read_text()
+        for token in (
+            'INFERENCE_CONTAINER="${INFERENCE_CONTAINER:-brpc-inference}"',
+            'INFERENCE_RUNTIME_ENV="$OUTPUT_DIR/inference-runtime.env"',
+            'name.startswith("DATASYSTEM_")',
+            '"block_ds_consumer.so", "stub_gpu.so", "libabseil_dll.so"',
+            '"libnvidia-ml.so" not in token',
+            'for container_name in ("rank-burst-wrapper", "rank-kvc-burst-wrapper")',
+        ):
+            self.assertIn(token, deploy)
+
+        renderer = next(
+            block for block in re.findall(r"<<'PY'\n(.*?)\nPY", deploy, re.DOTALL)
+            if "required_preloads" in block
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            output = root / "wrapper.yaml"
+            runtime = root / "inference.env"
+            runtime.write_text(
+                "HOST_IP=141.61.91.188\n"
+                "LD_LIBRARY_PATH=/datasystem/lib:/usr/local/lib\n"
+                "LD_PRELOAD=/opt/block_ds_consumer.so /opt/stub_gpu.so "
+                "/usr/lib/libnvidia-ml.so /ds/libabseil_dll.so\n"
+                "DATASYSTEM_CLUSTER_NAME=pairec\n"
+            )
+            subprocess.run(
+                [sys.executable, "-c", renderer,
+                 str(ROOT / "k8s/deployment-deepfm-rank-burst-wrapper-worker1.yaml"),
+                 str(output), "10.0.0.1:18211", "1", "0", str(runtime)],
+                check=True, capture_output=True, text=True,
+            )
+            documents = list(yaml.safe_load_all(output.read_text()))
+        containers = documents[0]["spec"]["template"]["spec"]["containers"]
+        for container_name in ("rank-burst-wrapper", "rank-kvc-burst-wrapper"):
+            container = next(item for item in containers if item["name"] == container_name)
+            env = {entry["name"]: entry["value"] for entry in container["env"]}
+            self.assertEqual("141.61.91.188", env["HOST_IP"])
+            self.assertEqual("pairec", env["DATASYSTEM_CLUSTER_NAME"])
+            self.assertNotIn("libnvidia-ml.so", env["LD_PRELOAD"])
+            self.assertIn("block_ds_consumer.so", env["LD_PRELOAD"])
 
     def test_full_combination_ab_wiring(self):
         benchmark = (
