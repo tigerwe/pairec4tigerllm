@@ -30,6 +30,7 @@ docker run --rm --entrypoint /bin/bash "$IMAGE" -lc '
   for bin in \
       /opt/pairec-brpc/bin/brpc_gateway \
       /opt/pairec-brpc/bin/brpc_burst_wrapper \
+      /opt/pairec-brpc/bin/brpc_return_pressure_sink \
       /opt/pairec-brpc/bin/brpc_recommend_client \
       /opt/pairec-brpc/bin/brpc_inference_server \
       /opt/pairec-brpc/bin/brpc_vector_recall_adapter \

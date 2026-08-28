@@ -350,7 +350,11 @@ target_link_libraries(
     Threads::Threads
 )
 
-add_executable(brpc_burst_wrapper brpc_burst_wrapper.cpp)
+add_executable(
+  brpc_burst_wrapper
+  brpc_burst_wrapper.cpp
+  reverse_burst.cpp
+)
 target_include_directories(brpc_burst_wrapper PRIVATE ${BRPC_INCLUDE_DIR})
 target_link_libraries(
   brpc_burst_wrapper
@@ -366,6 +370,18 @@ add_executable(brpc_recommend_client recommend_client.cpp)
 target_include_directories(brpc_recommend_client PRIVATE ${BRPC_INCLUDE_DIR})
 target_link_libraries(
   brpc_recommend_client
+  PRIVATE
+    pairec_recommend_proto
+    ${BRPC_LIBRARY}
+    ${ABSL_EXTRA_LIBS}
+    ${BRPC_EXTRA_LIBS}
+    Threads::Threads
+)
+
+add_executable(brpc_return_pressure_sink brpc_return_pressure_sink.cpp)
+target_include_directories(brpc_return_pressure_sink PRIVATE ${BRPC_INCLUDE_DIR})
+target_link_libraries(
+  brpc_return_pressure_sink
   PRIVATE
     pairec_recommend_proto
     ${BRPC_LIBRARY}
@@ -415,6 +431,7 @@ target_link_libraries(
 add_executable(
   brpc_rank_burst_wrapper
   brpc_rank_burst_wrapper.cpp
+  reverse_burst.cpp
   ../kvc_burst/kvc_operation_proxy.cpp
 )
 target_include_directories(
@@ -427,6 +444,7 @@ target_link_libraries(
   brpc_rank_burst_wrapper
   PRIVATE
     pairec_pipeline_proto
+    pairec_recommend_proto
     ${BRPC_LIBRARY}
     ${ABSL_EXTRA_LIBS}
     ${BRPC_EXTRA_LIBS}
@@ -506,6 +524,7 @@ install(
     brpc_gateway
     brpc_burst_wrapper
     brpc_recommend_client
+    brpc_return_pressure_sink
     brpc_inference_server
     brpc_vector_recall_adapter
     brpc_deepfm_rank_adapter

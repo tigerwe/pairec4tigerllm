@@ -13,6 +13,7 @@
 #include <butil/time.h>
 
 #include "recommend.pb.h"
+#include "reverse_burst.h"
 
 namespace {
 
@@ -22,6 +23,7 @@ struct WrapperConfig {
   int backend_timeout_ms = 5000;
   int backend_max_retry = 0;
   int idle_timeout_sec = -1;
+  pairec::reverse_burst::Config reverse_burst;
 };
 
 bool ConsumeArgValue(const char* arg, const std::string& name, std::string* out) {
@@ -41,10 +43,18 @@ void PrintUsage(const char* argv0) {
       << "  --backend=127.0.0.1:18100\n"
       << "  --backend_timeout_ms=5000\n"
       << "  --backend_max_retry=0\n"
+      << "  --reverse_burst_endpoint=\n"
+      << "  --reverse_burst_stage=generation_return\n"
+      << "  --reverse_burst_concurrency=1000\n"
+      << "  --reverse_burst_payload_bytes=102400\n"
+      << "  --reverse_burst_marker_timeout_ms=1000\n"
+      << "  --reverse_burst_pressure_timeout_ms=5000\n"
+      << "  --reverse_burst_startup_timeout_ms=30000\n"
       << "  --idle_timeout_sec=-1\n";
 }
 
 bool ParseArgs(int argc, char** argv, WrapperConfig* config) {
+  config->reverse_burst.stage = "generation_return";
   for (int i = 1; i < argc; ++i) {
     std::string value;
     if (ConsumeArgValue(argv[i], "listen_port", &value)) {
@@ -55,6 +65,20 @@ bool ParseArgs(int argc, char** argv, WrapperConfig* config) {
       config->backend_timeout_ms = std::atoi(value.c_str());
     } else if (ConsumeArgValue(argv[i], "backend_max_retry", &value)) {
       config->backend_max_retry = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_endpoint", &value)) {
+      config->reverse_burst.endpoint = value;
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_stage", &value)) {
+      config->reverse_burst.stage = value;
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_concurrency", &value)) {
+      config->reverse_burst.concurrency = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_payload_bytes", &value)) {
+      config->reverse_burst.payload_bytes = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_marker_timeout_ms", &value)) {
+      config->reverse_burst.marker_timeout_ms = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_pressure_timeout_ms", &value)) {
+      config->reverse_burst.pressure_timeout_ms = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_startup_timeout_ms", &value)) {
+      config->reverse_burst.startup_timeout_ms = std::atoi(value.c_str());
     } else if (ConsumeArgValue(argv[i], "idle_timeout_sec", &value)) {
       config->idle_timeout_sec = std::atoi(value.c_str());
     } else if (std::string(argv[i]) == "--help") {
@@ -70,6 +94,13 @@ bool ParseArgs(int argc, char** argv, WrapperConfig* config) {
       config->backend_timeout_ms <= 0 || config->backend_max_retry < 0) {
     std::cerr << "Invalid wrapper configuration\n";
     PrintUsage(argv[0]);
+    return false;
+  }
+  if (!config->reverse_burst.endpoint.empty() &&
+      (config->reverse_burst.stage != "generation_return" ||
+       config->reverse_burst.concurrency != 1000 ||
+       config->reverse_burst.payload_bytes != 102400)) {
+    std::cerr << "Invalid generation reverse burst configuration\n";
     return false;
   }
   return true;
@@ -157,8 +188,11 @@ class BackendForwarder {
 
 class BurstWrapperService final : public pairec::inference::RecommendService {
  public:
-  BurstWrapperService(BackendForwarder* forwarder, std::string backend)
-      : forwarder_(forwarder), backend_(std::move(backend)) {}
+  BurstWrapperService(BackendForwarder* forwarder,
+                      pairec::reverse_burst::Coordinator* reverse_burst,
+                      std::string backend)
+      : forwarder_(forwarder), reverse_burst_(reverse_burst),
+        backend_(std::move(backend)) {}
 
   void Recommend(
       google::protobuf::RpcController* controller,
@@ -231,6 +265,22 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
     } else {
       error = "BRPC pressure did not drain before backend forwarding";
     }
+    pairec::reverse_burst::MarkerResult reverse_result;
+    if (ok && response->code() == 200) {
+      pairec::reverse_burst::Marker marker;
+      marker.request_id = request->request_id();
+      marker.backend_code = response->code();
+      marker.item_count = response->recommendations_size();
+      marker.response_sha256 =
+          pairec::reverse_burst::Sha256(response->SerializeAsString());
+      if (!reverse_burst_->Trigger(marker, &reverse_result)) {
+        ok = false;
+        error = "generation reverse burst marker failed: " + reverse_result.error;
+      }
+    } else if (ok) {
+      ok = false;
+      error = "generation backend returned code=" + std::to_string(response->code());
+    }
     wrapper_timer.stop();
     active_recommend_.fetch_sub(1, std::memory_order_relaxed);
 
@@ -292,6 +342,11 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
               << health_payload_bytes_during_backend
               << " front_payload_bytes=" << front_payload_bytes
               << " backend_payload_bytes=" << backend_request.payload_padding().size()
+              << " reverse_burst_enabled=" << reverse_result.enabled
+              << " reverse_marker_success=" << reverse_result.success
+              << " reverse_marker_wall_ms=" << reverse_result.wall_ms
+              << " reverse_marker_sink_ms=" << reverse_result.sink_ms
+              << " reverse_marker_front_ms=" << reverse_result.front_ms
               << " backend=" << backend_
               << " error=" << (error.empty() ? "none" : error) << std::endl;
   }
@@ -302,6 +357,25 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
       pairec::inference::HealthResponse* response,
       google::protobuf::Closure* done) override {
     brpc::ClosureGuard done_guard(done);
+    std::string action;
+    if (pairec::reverse_burst::ParseControl(request->payload_padding(), &action)) {
+      std::string error;
+      bool success = true;
+      if (action == "arm") success = reverse_burst_->Arm(&error);
+      if (action == "disarm") success = reverse_burst_->Disarm(&error);
+      response->set_code(success ? 200 : 409);
+      response->set_status(reverse_burst_->armed() ? "armed" : "disarmed");
+      response->set_backend("brpc_burst_wrapper");
+      response->set_raw_json(
+          "{\"action\":\"" + action + "\",\"success\":" +
+          (success ? "true" : "false") + ",\"armed\":" +
+          (reverse_burst_->armed() ? "true" : "false") +
+          ",\"idle\":" + (reverse_burst_->idle() ? "true" : "false") +
+          ",\"connected_sessions\":" +
+          std::to_string(reverse_burst_->connected_sessions()) +
+          ",\"error\":\"" + error + "\"}");
+      return;
+    }
     ActiveCounterGuard total_guard(&active_total_, &max_active_total_);
     ActiveCounterGuard health_guard(&active_health_, &max_active_health_);
     health_calls_.fetch_add(1, std::memory_order_relaxed);
@@ -326,6 +400,7 @@ class BurstWrapperService final : public pairec::inference::RecommendService {
 
  private:
   BackendForwarder* forwarder_;
+  pairec::reverse_burst::Coordinator* reverse_burst_;
   std::string backend_;
   std::atomic<int64_t> active_total_{0};
   std::atomic<int64_t> max_active_total_{0};
@@ -353,7 +428,15 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  BurstWrapperService service(&forwarder, config.backend);
+  pairec::reverse_burst::Coordinator reverse_burst;
+  std::string reverse_error;
+  if (!reverse_burst.Init(config.reverse_burst, &reverse_error)) {
+    std::cerr << "Failed to initialize generation reverse burst: "
+              << reverse_error << std::endl;
+    return 1;
+  }
+
+  BurstWrapperService service(&forwarder, &reverse_burst, config.backend);
   brpc::Server server;
   if (server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
     std::cerr << "Failed to add RecommendService" << std::endl;

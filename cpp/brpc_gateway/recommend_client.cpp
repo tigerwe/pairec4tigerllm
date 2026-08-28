@@ -19,6 +19,7 @@ struct ClientConfig {
   int max_retry = 1;
   int requests = 1;
   bool print_raw_json = false;
+  std::string control;
 };
 
 bool ConsumeArgValue(const char* arg, const std::string& name, std::string* out) {
@@ -41,7 +42,8 @@ void PrintUsage(const char* argv0) {
       << "  --requests=1\n"
       << "  --timeout_ms=5000\n"
       << "  --max_retry=1\n"
-      << "  --print_raw_json=0|1\n";
+      << "  --print_raw_json=0|1\n"
+      << "  --control=arm|disarm|status\n";
 }
 
 bool ParseArgs(int argc, char** argv, ClientConfig* config) {
@@ -63,6 +65,8 @@ bool ParseArgs(int argc, char** argv, ClientConfig* config) {
       config->max_retry = std::atoi(value.c_str());
     } else if (ConsumeArgValue(argv[i], "print_raw_json", &value)) {
       config->print_raw_json = value == "1" || value == "true";
+    } else if (ConsumeArgValue(argv[i], "control", &value)) {
+      config->control = value;
     } else if (std::string(argv[i]) == "--help") {
       PrintUsage(argv[0]);
       return false;
@@ -71,6 +75,11 @@ bool ParseArgs(int argc, char** argv, ClientConfig* config) {
       PrintUsage(argv[0]);
       return false;
     }
+  }
+  if (!config->control.empty() && config->control != "arm" &&
+      config->control != "disarm" && config->control != "status") {
+    std::cerr << "Invalid control action\n";
+    return false;
   }
   return true;
 }
@@ -132,12 +141,22 @@ int main(int argc, char** argv) {
 
     if (config.method == "health") {
       pairec::inference::HealthRequest request;
+      if (!config.control.empty()) {
+        request.set_payload_padding("PAIREC_RETURN_CONTROL_V1:" + config.control);
+      }
       pairec::inference::HealthResponse response;
       stub.Health(&cntl, &request, &response, nullptr);
       timer.stop();
       if (cntl.Failed()) {
         std::cerr << "health failed latency_ms=" << timer.m_elapsed()
                   << " error=" << cntl.ErrorText() << std::endl;
+        continue;
+      }
+      if (response.code() != 200) {
+        std::cerr << "health rejected latency_ms=" << timer.m_elapsed()
+                  << " code=" << response.code()
+                  << " status=" << response.status() << std::endl;
+        if (config.print_raw_json) std::cerr << response.raw_json() << std::endl;
         continue;
       }
       ++ok_count;

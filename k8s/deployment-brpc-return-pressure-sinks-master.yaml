@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: generation-return-pressure-sink
+  namespace: pairec
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: generation-return-pressure-sink}
+  template:
+    metadata:
+      labels: {app: generation-return-pressure-sink}
+    spec:
+      nodeName: master
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: return-pressure-sink
+          image: docker.io/library/pairec-brpc-inference:k8s-arm64-v1
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: LD_PRELOAD, value: ""}
+          command: [/opt/pairec-brpc/bin/brpc_return_pressure_sink]
+          args:
+            - --listen_port=18301
+            - --stage=generation_return
+            - --expected_payload_bytes=102400
+            - --expected_requests=1000
+            - --idle_timeout_sec=-1
+          ports:
+            - {name: brpc-return, containerPort: 18301, hostPort: 18301}
+          resources:
+            requests: {cpu: "8", memory: 2Gi}
+            limits: {cpu: "8", memory: 2Gi}
+          volumeMounts:
+            - name: return-pressure-sink-bin
+              mountPath: /opt/pairec-brpc/bin/brpc_return_pressure_sink
+              readOnly: true
+          startupProbe:
+            tcpSocket: {port: 18301}
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: [/opt/pairec-brpc/bin/brpc_recommend_client, --server=127.0.0.1:18301, --method=health, --requests=1, --timeout_ms=1000, --max_retry=0]
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket: {port: 18301}
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
+      volumes:
+        - name: return-pressure-sink-bin
+          hostPath: {path: /home/zcx/bin/brpc_return_pressure_sink, type: File}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rank-return-pressure-sink
+  namespace: pairec
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: rank-return-pressure-sink}
+  template:
+    metadata:
+      labels: {app: rank-return-pressure-sink}
+    spec:
+      nodeName: master
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: return-pressure-sink
+          image: docker.io/library/pairec-brpc-inference:k8s-arm64-v1
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: LD_PRELOAD, value: ""}
+          command: [/opt/pairec-brpc/bin/brpc_return_pressure_sink]
+          args:
+            - --listen_port=18302
+            - --stage=rank_return
+            - --expected_payload_bytes=102400
+            - --expected_requests=1000
+            - --idle_timeout_sec=-1
+          ports:
+            - {name: brpc-return, containerPort: 18302, hostPort: 18302}
+          resources:
+            requests: {cpu: "8", memory: 2Gi}
+            limits: {cpu: "8", memory: 2Gi}
+          volumeMounts:
+            - name: return-pressure-sink-bin
+              mountPath: /opt/pairec-brpc/bin/brpc_return_pressure_sink
+              readOnly: true
+          startupProbe:
+            tcpSocket: {port: 18302}
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: [/opt/pairec-brpc/bin/brpc_recommend_client, --server=127.0.0.1:18302, --method=health, --requests=1, --timeout_ms=1000, --max_retry=0]
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket: {port: 18302}
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
+      volumes:
+        - name: return-pressure-sink-bin
+          hostPath: {path: /home/zcx/bin/brpc_return_pressure_sink, type: File}

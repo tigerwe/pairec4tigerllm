@@ -15,6 +15,13 @@ EXPECTED_ONBOARDS_MIN="${EXPECTED_ONBOARDS_MIN:-$EXPECTED_ONBOARDS}"
 EXPECTED_ONBOARDS_MAX="${EXPECTED_ONBOARDS_MAX:-$EXPECTED_ONBOARDS}"
 REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION="${REQUIRE_EXACT_DATASYSTEM_ATTRIBUTION:-0}"
 REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION="${REQUIRE_FULL_CHAIN_BRPC_ATTRIBUTION:-0}"
+REVERSE_BURST_DRAIN_ENABLED="${REVERSE_BURST_DRAIN_ENABLED:-0}"
+REVERSE_BURST_COMPLETION_TIMEOUT_SECONDS="${REVERSE_BURST_COMPLETION_TIMEOUT_SECONDS:-15}"
+GENERATION_REVERSE_WRAPPER_APP="${GENERATION_REVERSE_WRAPPER_APP:-brpc-burst-wrapper}"
+RANK_REVERSE_WRAPPER_APP="${RANK_REVERSE_WRAPPER_APP:-deepfm-rank-burst-wrapper}"
+GENERATION_REVERSE_SINK_APP="${GENERATION_REVERSE_SINK_APP:-generation-return-pressure-sink}"
+RANK_REVERSE_SINK_APP="${RANK_REVERSE_SINK_APP:-rank-return-pressure-sink}"
+REVERSE_BURST_PATTERN="${REVERSE_BURST_PATTERN:-}"
 
 BRPC_ENDPOINT="${BRPC_ENDPOINT:-192.168.100.11:18100}"
 BRPC_LOAD_ENDPOINT="${BRPC_LOAD_ENDPOINT:-$BRPC_ENDPOINT}"
@@ -1041,6 +1048,101 @@ PY
   return 1
 }
 
+wait_reverse_bursts() {
+  local round_dir="$1"
+  [ "$REVERSE_BURST_DRAIN_ENABLED" = 1 ] || return 0
+  [ "$(cat "${round_dir}/reverse-burst-case" 2>/dev/null || echo B)" = B ] || return 0
+  local request_id generation_wrapper rank_wrapper generation_sink rank_sink deadline
+  request_id="$(python3 - "${round_dir}/replay/summary.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))["request_id"])
+PY
+)"
+  generation_wrapper="$(kubectl -n "$NAMESPACE" get pod -l "app=$GENERATION_REVERSE_WRAPPER_APP" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  rank_wrapper="$(kubectl -n "$NAMESPACE" get pod -l "app=$RANK_REVERSE_WRAPPER_APP" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  generation_sink="$(kubectl -n "$NAMESPACE" get pod -l "app=$GENERATION_REVERSE_SINK_APP" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  rank_sink="$(kubectl -n "$NAMESPACE" get pod -l "app=$RANK_REVERSE_SINK_APP" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  for value in "$generation_wrapper" "$rank_wrapper" "$generation_sink" "$rank_sink"; do
+    [ -n "$value" ] || { echo "ERROR: reverse burst Pod lookup failed" >&2; return 1; }
+  done
+  deadline=$((SECONDS + REVERSE_BURST_COMPLETION_TIMEOUT_SECONDS))
+  while true; do
+    kubectl -n "$NAMESPACE" logs "$generation_wrapper" -c brpc-burst-wrapper --since=10m >"${round_dir}/generation-reverse-wrapper.log" 2>&1 || true
+    kubectl -n "$NAMESPACE" logs "$rank_wrapper" -c rank-burst-wrapper --since=10m >"${round_dir}/rank-reverse-wrapper.log" 2>&1 || true
+    kubectl -n "$NAMESPACE" logs "$generation_sink" -c return-pressure-sink --since=10m >"${round_dir}/generation-return-sink.log" 2>&1 || true
+    kubectl -n "$NAMESPACE" logs "$rank_sink" -c return-pressure-sink --since=10m >"${round_dir}/rank-return-sink.log" 2>&1 || true
+    if python3 - "$request_id" "$round_dir" <<'PY'
+import json,pathlib,sys
+request_id,root=sys.argv[1],pathlib.Path(sys.argv[2])
+
+def events(name):
+    result=[]
+    for line in (root/name).read_text(errors="replace").splitlines():
+        pos=line.find("{")
+        if pos < 0: continue
+        try: item=json.loads(line[pos:])
+        except json.JSONDecodeError: continue
+        if item.get("request_id") == request_id: result.append(item)
+    return result
+
+for stage,prefix in (("generation_return","generation"),("rank_return","rank")):
+    wrapper=events(f"{prefix}-reverse-wrapper.log")
+    marker=next((e for e in wrapper if e.get("event")=="pairec_reverse_brpc_burst_marker_complete" and e.get("stage")==stage),None)
+    complete=next((e for e in wrapper if e.get("event")=="pairec_reverse_brpc_burst_complete" and e.get("stage")==stage),None)
+    sink=next((e for e in events(f"{prefix}-return-sink.log") if e.get("event")=="pairec_return_sink_burst_complete" and e.get("stage")==stage),None)
+    assert marker and marker["success"] is True, marker
+    assert complete and complete["completed"] == 1000, complete
+    assert complete["pressure_requests"] == 999, complete
+    assert complete["pressure_success"] == 999 and complete["pressure_errors"] == 0, complete
+    assert complete["accepted_bytes"] == 102400000, complete
+    assert sink and sink["received"] == 1000 and sink["unique_lanes"] == 1000, sink
+    assert sink["marker_count"] == 1, sink
+    assert sink["health_count"] == 999 and sink["errors"] == 0, sink
+    assert sink["accepted_bytes"] == 102400000 and sink["payload_valid"] is True, sink
+PY
+    then
+      echo "PAIREC_REVERSE_BRPC_DRAINED request_id=$request_id generation=1000/1000 rank=1000/1000"
+      return 0
+    fi
+    (( SECONDS < deadline )) || { echo "ERROR: reverse burst completion timed out request_id=$request_id" >&2; return 1; }
+    sleep 0.2
+  done
+}
+
+set_reverse_burst_round() {
+  local round="$1" round_dir="$2" case_label=A action=disarm
+  if [ -n "$REVERSE_BURST_PATTERN" ]; then
+    IFS=',' read -r -a reverse_cases <<<"$REVERSE_BURST_PATTERN"
+    [ "${#reverse_cases[@]}" -eq "$REPEATS" ] || {
+      echo "ERROR: REVERSE_BURST_PATTERN entries must equal REPEATS" >&2
+      return 1
+    }
+    case_label="${reverse_cases[$((round - 1))]}"
+  elif [ "$REVERSE_BURST_DRAIN_ENABLED" = 1 ]; then
+    case_label=B
+  fi
+  case "$case_label" in
+    A) action=disarm ;;
+    B) action=arm ;;
+    *) echo "ERROR: reverse burst case must be A or B: $case_label" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$case_label" >"${round_dir}/reverse-burst-case"
+  local generation_pod rank_pod
+  generation_pod="$(kubectl -n "$NAMESPACE" get pod -l "app=$GENERATION_REVERSE_WRAPPER_APP" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  rank_pod="$(kubectl -n "$NAMESPACE" get pod -l "app=$RANK_REVERSE_WRAPPER_APP" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  [ -n "$generation_pod" ] && [ -n "$rank_pod" ] || return 1
+  kubectl -n "$NAMESPACE" exec "$generation_pod" -c brpc-burst-wrapper -- \
+    /opt/pairec-brpc/bin/brpc_recommend_client \
+      --server=127.0.0.1:18103 --method=health --requests=1 \
+      --timeout_ms=3000 --max_retry=0 --control="$action" \
+      >>"${round_dir}/reverse-burst-control.log" 2>&1 || return 1
+  kubectl -n "$NAMESPACE" exec "$rank_pod" -c rank-burst-wrapper -- \
+    /opt/pairec-brpc/bin/brpc_pipeline_client \
+      --server=127.0.0.1:18213 --service=rank --timeout_ms=3000 --control="$action" \
+      >>"${round_dir}/reverse-burst-control.log" 2>&1 || return 1
+  echo "reverse_burst_case=$case_label action=$action round=$round"
+}
+
 replay_retry_churn_uids() {
   local source="${REPLAY_RETRY_CHURN_UIDS:-$PRIME_UIDS}"
   local uid output=""
@@ -2025,6 +2127,14 @@ for round in $(seq 1 "$REPEATS"); do
     break
   fi
 
+  if { [ "$REVERSE_BURST_DRAIN_ENABLED" = 1 ] || [ -n "$REVERSE_BURST_PATTERN" ]; } &&
+      ! set_reverse_burst_round "$round" "$round_dir"; then
+    overall_code=1
+    echo "ERROR: round ${round} failed to configure reverse BRPC burst" >&2
+    stop_loads
+    break
+  fi
+
   capture_inference_state "$round_dir" before
   capture_brpc_pressure_cpu_stat "$round_dir" before
   capture_datasystem_worker_metrics "$round_dir" before
@@ -2062,6 +2172,9 @@ for round in $(seq 1 "$REPEATS"); do
     replay_code="$?"
     set -e
     finish_brpc_stop_watcher "$round_dir"
+    if [ "$replay_code" -eq 0 ] && ! wait_reverse_bursts "$round_dir"; then
+      replay_code=1
+    fi
     if [ "$replay_code" -eq 0 ] && ! wait_rank_kvc_burst "$round_dir"; then
       replay_code=1
     fi

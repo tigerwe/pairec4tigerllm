@@ -72,7 +72,7 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
             'LOG_SINCE_LOOKBACK_SECONDS="$LOG_SINCE_LOOKBACK_SECONDS"',
             combined,
         )
-        self.assertEqual(3, combined.count('--since-time="$LOG_SINCE_AT"'))
+        self.assertEqual(4, combined.count('--since-time="$LOG_SINCE_AT"'))
         self.assertNotIn('--since-time="$STARTED_AT"', combined)
 
     def test_generation_kvc_rank_ab_summary_math(self):

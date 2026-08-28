@@ -8,6 +8,7 @@ WRAPPER_ENDPOINT="${WRAPPER_ENDPOINT:-192.168.100.11:18103}"
 BACKEND_ENDPOINT="${BACKEND_ENDPOINT:-192.168.100.11:18100}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
 WRAPPER_HOST_BIN="${WRAPPER_HOST_BIN:-/home/zcx/bin/brpc_burst_wrapper}"
+RECOMMEND_CLIENT_HOST_BIN="${RECOMMEND_CLIENT_HOST_BIN:-/home/zcx/bin/brpc_recommend_client}"
 WRAPPER_WORKER="${WRAPPER_WORKER:-root@192.168.100.11}"
 
 die() {
@@ -22,13 +23,18 @@ command -v ssh >/dev/null 2>&1 || die "ssh is required"
 echo "== Wrapper binary preflight on worker1 =="
 kubectl get node worker1 >/dev/null 2>&1 || die "Kubernetes node worker1 does not exist"
 ssh "$WRAPPER_WORKER" \
-  "test -x '${WRAPPER_HOST_BIN}' && ls -lh '${WRAPPER_HOST_BIN}'" \
-  || die "wrapper binary is missing on worker1: ${WRAPPER_HOST_BIN}"
+  "test -x '${WRAPPER_HOST_BIN}' && test -x '${RECOMMEND_CLIENT_HOST_BIN}' && ls -lh '${WRAPPER_HOST_BIN}' '${RECOMMEND_CLIENT_HOST_BIN}'" \
+  || die "wrapper binary or control client is missing on worker1"
 expected_wrapper_sha="$(ssh "$WRAPPER_WORKER" \
   "sha256sum '${WRAPPER_HOST_BIN}'" | awk '{print $1}')"
 [[ "$expected_wrapper_sha" =~ ^[0-9a-f]{64}$ ]] \
   || die "failed to read wrapper SHA256 on worker1"
 echo "worker_wrapper_sha256=${expected_wrapper_sha}"
+expected_client_sha="$(ssh "$WRAPPER_WORKER" \
+  "sha256sum '${RECOMMEND_CLIENT_HOST_BIN}'" | awk '{print $1}')"
+[[ "$expected_client_sha" =~ ^[0-9a-f]{64}$ ]] \
+  || die "failed to read recommend client SHA256 on worker1"
+echo "worker_recommend_client_sha256=${expected_client_sha}"
 
 echo "== Backend preflight =="
 backend_host="${BACKEND_ENDPOINT%:*}"
@@ -54,12 +60,18 @@ mounted_wrapper_sha="$(kubectl -n "$NAMESPACE" exec "$POD" -- \
   | awk '{print $1}')"
 running_wrapper_sha="$(kubectl -n "$NAMESPACE" exec "$POD" -- \
   env -u LD_PRELOAD sha256sum /proc/1/exe | awk '{print $1}')"
+mounted_client_sha="$(kubectl -n "$NAMESPACE" exec "$POD" -- \
+  env -u LD_PRELOAD sha256sum /opt/pairec-brpc/bin/brpc_recommend_client \
+  | awk '{print $1}')"
 echo "mounted_wrapper_sha256=${mounted_wrapper_sha}"
 echo "running_wrapper_sha256=${running_wrapper_sha}"
+echo "mounted_recommend_client_sha256=${mounted_client_sha}"
 [[ "$mounted_wrapper_sha" = "$expected_wrapper_sha" ]] \
   || die "Pod-mounted Wrapper binary does not match worker1 host binary"
 [[ "$running_wrapper_sha" = "$expected_wrapper_sha" ]] \
   || die "running Wrapper process does not match worker1 host binary"
+[[ "$mounted_client_sha" = "$expected_client_sha" ]] \
+  || die "Pod-mounted control client does not match worker1 host binary"
 
 echo "== Wrapper runtime and CPU placement =="
 qos_class="$(kubectl -n "$NAMESPACE" get pod "$POD" \

@@ -54,6 +54,9 @@ RANK_KVC_BUSINESS_TIMEOUT_MS=${RANK_KVC_BUSINESS_TIMEOUT_MS:-500}
 RANK_KVC_SERVICE_TIMEOUT_MS=${RANK_KVC_SERVICE_TIMEOUT_MS:-750}
 E2E_TIMEOUT_MS=${E2E_TIMEOUT_MS:-1500}
 LOG_SINCE_LOOKBACK_SECONDS=${LOG_SINCE_LOOKBACK_SECONDS:-60}
+REVERSE_BURST_ENABLED=${REVERSE_BURST_ENABLED:-0}
+REVERSE_BURST_COMPLETION_TIMEOUT_SECONDS=${REVERSE_BURST_COMPLETION_TIMEOUT_SECONDS:-15}
+REVERSE_BURST_PATTERN=${REVERSE_BURST_PATTERN:-}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 mkdir -p "$OUTPUT_DIR"
@@ -101,6 +104,21 @@ KVC_BARRIER_TIMEOUT_MS=5
 for flag in "$BUILD_PAIREC_IMAGE" "$IMPORT_PAIREC_IMAGE" "$RANK_BURST_ENABLED" "$RANK_KVC_ENABLED"; do
   [[ "$flag" = 0 || "$flag" = 1 ]] || die "boolean flags must be 0 or 1"
 done
+[[ "$REVERSE_BURST_ENABLED" = 0 || "$REVERSE_BURST_ENABLED" = 1 ]] \
+  || die "REVERSE_BURST_ENABLED must be 0 or 1"
+if [[ "$REVERSE_BURST_ENABLED" = 1 ]]; then
+  [[ "$WRAPPER_CONCURRENCY" = 1000 && "$RANK_BURST_CONCURRENCY" = 1000 ]] \
+    || die "reverse burst requires generation and Rank forward concurrency=1000"
+fi
+if [[ -n "$REVERSE_BURST_PATTERN" ]]; then
+  pattern_count="$(awk -F, '{print NF}' <<<"$REVERSE_BURST_PATTERN")"
+  [[ "$pattern_count" = "$REQUESTS" ]] \
+    || die "REVERSE_BURST_PATTERN entries must equal REQUESTS"
+  [[ "$REVERSE_BURST_PATTERN" =~ ^[AB](,[AB])*$ ]] \
+    || die "REVERSE_BURST_PATTERN must contain only comma-separated A/B labels"
+  [[ "$REVERSE_BURST_ENABLED" = 1 ]] \
+    || die "REVERSE_BURST_PATTERN requires REVERSE_BURST_ENABLED=1"
+fi
 [[ "$RANK_BURST_CONCURRENCY" =~ ^(1|1000)$ ]] \
   || die "RANK_BURST_CONCURRENCY must be 1 or 1000"
 [[ "$RANK_BURST_POOL_SIZE" =~ ^[1-9][0-9]*$ ]] \
@@ -129,6 +147,31 @@ if [[ "$RANK_KVC_ENABLED" = 1 ]]; then
     || die "Rank KVC experiment requires exact 8MiB objects"
 fi
 
+reverse_burst_control() {
+  local action="$1" generation_pod rank_pod
+  generation_pod="$(kubectl -n "$NAMESPACE" get pod -l app=brpc-burst-wrapper --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  rank_pod="$(kubectl -n "$NAMESPACE" get pod -l app=deepfm-rank-burst-wrapper --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  [[ -n "$generation_pod" && -n "$rank_pod" ]] || die "reverse burst Wrapper Pod lookup failed"
+  kubectl -n "$NAMESPACE" exec "$generation_pod" -c brpc-burst-wrapper -- \
+    /opt/pairec-brpc/bin/brpc_recommend_client \
+      --server=127.0.0.1:18103 --method=health --requests=1 \
+      --timeout_ms=3000 --max_retry=0 --print_raw_json=1 --control="$action"
+  kubectl -n "$NAMESPACE" exec "$rank_pod" -c rank-burst-wrapper -- \
+    /opt/pairec-brpc/bin/brpc_pipeline_client \
+      --server=127.0.0.1:18213 --service=rank --timeout_ms=3000 --control="$action"
+}
+
+capture_reverse_sink_cpu() {
+  local phase="$1" app pod
+  for app in generation-return-pressure-sink rank-return-pressure-sink; do
+    pod="$(kubectl -n "$NAMESPACE" get pod -l "app=$app" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+    [[ -n "$pod" ]] || die "reverse Sink Pod not found: $app"
+    kubectl -n "$NAMESPACE" exec "$pod" -c return-pressure-sink -- sh -c \
+      'if test -f /sys/fs/cgroup/cpu.stat; then cat /sys/fs/cgroup/cpu.stat; elif test -f /sys/fs/cgroup/cpu/cpu.stat; then cat /sys/fs/cgroup/cpu/cpu.stat; fi' \
+      >"$OUTPUT_DIR/${app}.cpu-stat.${phase}"
+  done
+}
+
 restore_kvc() {
   if [[ -f "$KVC_OVERLAY_BACKUP" ]]; then
     NAMESPACE="$NAMESPACE" DEPLOYMENT=inference-brpc-trtllm \
@@ -136,7 +179,13 @@ restore_kvc() {
       bash scripts/deploy_f14_kvc_burst_overlay.sh restore || true
   fi
 }
-trap restore_kvc EXIT INT TERM
+cleanup() {
+  if [[ "$REVERSE_BURST_ENABLED" = 1 ]]; then
+    reverse_burst_control disarm >/dev/null 2>&1 || true
+  fi
+  restore_kvc
+}
+trap cleanup EXIT INT TERM
 
 echo "== Apply KVC c${KVC_CONCURRENCY} overlay =="
 NAMESPACE="$NAMESPACE" DEPLOYMENT=inference-brpc-trtllm \
@@ -190,6 +239,17 @@ if [[ "$RANK_BURST_ENABLED" = 1 ]]; then
   echo "PAIREC_COMBINED_RANK_WRAPPER_READY deployment=$RANK_DEPLOYMENT pod=$RANK_POD"
 fi
 
+echo "== Configure reverse BRPC bursts =="
+if [[ "$REVERSE_BURST_ENABLED" = 1 && -z "$REVERSE_BURST_PATTERN" ]]; then
+  reverse_burst_control arm | tee "$OUTPUT_DIR/reverse-burst-control.log"
+  capture_reverse_sink_cpu before
+else
+  reverse_burst_control disarm | tee "$OUTPUT_DIR/reverse-burst-control.log"
+  if [[ "$REVERSE_BURST_ENABLED" = 1 ]]; then
+    capture_reverse_sink_cpu before
+  fi
+fi
+
 echo "== Run KVC contention through the deployed BRPC Wrapper =="
 LOG_SINCE_AT="$(date --date="${LOG_SINCE_LOOKBACK_SECONDS} seconds ago" --iso-8601=seconds)"
 echo "log_since_at=$LOG_SINCE_AT lookback_seconds=$LOG_SINCE_LOOKBACK_SECONDS"
@@ -206,6 +266,9 @@ NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE=baseline \
   RANK_KVC_DYNAMIC_ARM="$RANK_KVC_ENABLED" \
   RANK_KVC_DEPLOYMENT="$RANK_DEPLOYMENT" \
   RANK_KVC_COMPLETION_TIMEOUT_SECONDS="$RANK_COMPLETION_TIMEOUT_SECONDS" \
+  REVERSE_BURST_DRAIN_ENABLED="$REVERSE_BURST_ENABLED" \
+  REVERSE_BURST_COMPLETION_TIMEOUT_SECONDS="$REVERSE_BURST_COMPLETION_TIMEOUT_SECONDS" \
+  REVERSE_BURST_PATTERN="$REVERSE_BURST_PATTERN" \
   RESET_INFERENCE_BEFORE_ROUND=1 RESET_INFERENCE_MODE=pod-recreate \
   MIN_ROOT_AVAILABLE_KB="$MIN_ROOT_AVAILABLE_KB" \
   PAIREC_TARGET=deploy/pairec-brpc-observed-wrapper \
@@ -216,6 +279,45 @@ NAMESPACE="$NAMESPACE" REPEATS="$REQUESTS" MODE=baseline \
 contention_code=${PIPESTATUS[0]}
 set -e
 [[ "$contention_code" -eq 0 ]] || die "KVC contention through Wrapper failed: exit=$contention_code"
+
+if [[ "$REVERSE_BURST_ENABLED" = 1 ]]; then
+  capture_reverse_sink_cpu after
+  python3 - "$OUTPUT_DIR" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1])
+for app in ("generation-return-pressure-sink","rank-return-pressure-sink"):
+    def read(phase):
+        values={}
+        for line in (root/f"{app}.cpu-stat.{phase}").read_text().splitlines():
+            parts=line.split()
+            if len(parts)==2: values[parts[0]]=int(parts[1])
+        return values
+    before,after=read("before"),read("after")
+    key="nr_throttled"
+    assert key in before and key in after, (app,before,after)
+    delta=after[key]-before[key]
+    assert delta==0, f"{app} CPU throttling delta={delta}"
+print("PAIREC_REVERSE_SINK_CPU_THROTTLING_OK delta_nr_throttled=0")
+PY
+  for app in generation-return-pressure-sink rank-return-pressure-sink; do
+    sink_pod="$(kubectl -n "$NAMESPACE" get pod -l "app=$app" \
+      --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+    [[ -n "$sink_pod" ]] || die "reverse Sink Pod not found after run: $app"
+    sink_ready="$(kubectl -n "$NAMESPACE" get pod "$sink_pod" \
+      -o jsonpath='{.status.containerStatuses[?(@.name=="return-pressure-sink")].ready}')"
+    sink_restarts="$(kubectl -n "$NAMESPACE" get pod "$sink_pod" \
+      -o jsonpath='{.status.containerStatuses[?(@.name=="return-pressure-sink")].restartCount}')"
+    [[ "$sink_ready" = true ]] || die "reverse Sink is not Ready: app=$app pod=$sink_pod"
+    [[ "$sink_restarts" = 0 ]] || die "reverse Sink restarted: app=$app pod=$sink_pod restarts=$sink_restarts"
+    kubectl -n "$NAMESPACE" logs "$sink_pod" -c return-pressure-sink \
+      --since-time="$LOG_SINCE_AT" >"$OUTPUT_DIR/${app}.runtime.log"
+    if grep -iEq 'out of memory|oomkilled|segmentation fault|terminate called|core dumped' \
+      "$OUTPUT_DIR/${app}.runtime.log"; then
+      die "reverse Sink crash/OOM marker found: app=$app pod=$sink_pod"
+    fi
+  done
+  echo "PAIREC_REVERSE_SINK_RUNTIME_OK ready=2/2 restarts=0 oom=0"
+fi
 
 PAIREC_RANK_MEASURED_LOG="$OUTPUT_DIR/pairec-rank-measured.log"
 RANK_WRAPPER_MEASURED_LOG="$OUTPUT_DIR/rank-wrapper-measured.log"
@@ -304,7 +406,8 @@ python3 - "$CONTENTION_OUTPUT_DIR/result.json" "$OUTPUT_DIR/wrapper-measured.log
   "$RANK_BUSINESS_PAYLOAD_BYTES" "$RANK_BURST_PAYLOAD_BYTES" \
   "$WRAPPER_OUTPUT_DIR/rank-endpoint.txt" "$BURST_POOL_SIZE" \
   "$RANK_KVC_ENABLED" "$RANK_KVC_CONCURRENCY" "$RANK_KVC_OBJECT_SIZE" \
-  "$RANK_KVC_BUSINESS_TIMEOUT_MS" "$RANK_KVC_SERVICE_TIMEOUT_MS" "$E2E_TIMEOUT_MS" <<'PY'
+  "$RANK_KVC_BUSINESS_TIMEOUT_MS" "$RANK_KVC_SERVICE_TIMEOUT_MS" "$E2E_TIMEOUT_MS" \
+  "$REVERSE_BURST_ENABLED" "$REVERSE_BURST_PATTERN" <<'PY'
 import hashlib, json, math, pathlib, statistics, sys
 contention = json.load(open(sys.argv[1]))
 wrapper_log = pathlib.Path(sys.argv[2]).read_text(errors="replace")
@@ -331,6 +434,8 @@ rank_kvc_object_size = int(sys.argv[24])
 rank_kvc_business_timeout_ms = float(sys.argv[25])
 rank_kvc_service_timeout_ms = float(sys.argv[26])
 e2e_timeout_ms = float(sys.argv[27])
+reverse_burst_enabled = sys.argv[28] == "1"
+reverse_burst_pattern = sys.argv[29]
 rank_endpoint = {}
 for line in pathlib.Path(sys.argv[20]).read_text(errors="replace").splitlines():
     if "=" in line:
@@ -390,6 +495,53 @@ for row in contention.get("rows", []):
     response_semantic_fingerprints.append(
         hashlib.sha256(semantic_payload.encode("utf-8")).hexdigest())
     request_id = trace["request_id"]
+    reverse_metrics = {}
+    reverse_events = {}
+    reverse_round = pathlib.Path(row["summary_path"]).parent.parent
+    round_case_path = reverse_round / "reverse-burst-case"
+    row_reverse_enabled = (round_case_path.read_text().strip() == "B"
+                           if round_case_path.is_file() else reverse_burst_enabled)
+    if row_reverse_enabled:
+        for stage,prefix in (("generation_return","generation"),("rank_return","rank")):
+            wrapper_events = json_events(reverse_round / f"{prefix}-reverse-wrapper.log")
+            marker = one(wrapper_events, "pairec_reverse_brpc_burst_marker_complete", request_id)
+            complete = one(wrapper_events, "pairec_reverse_brpc_burst_complete", request_id)
+            sink_events = json_events(reverse_round / f"{prefix}-return-sink.log")
+            sink_complete = one(
+                sink_events, "pairec_return_sink_burst_complete", request_id)
+            assert marker["stage"] == stage and marker["success"] is True, marker
+            assert complete["stage"] == stage and complete["pressure_success"] == 999, complete
+            assert complete["pressure_errors"] == 0 and complete["accepted_bytes"] == 102400000, complete
+            assert sink_complete["stage"] == stage, sink_complete
+            assert sink_complete["received"] == 1000, sink_complete
+            assert sink_complete["marker_count"] == 1, sink_complete
+            assert sink_complete["health_count"] == 999, sink_complete
+            assert sink_complete["unique_lanes"] == 1000, sink_complete
+            assert sink_complete["errors"] == 0, sink_complete
+            assert sink_complete["accepted_bytes"] == 102400000, sink_complete
+            assert sink_complete["payload_valid"] is True, sink_complete
+            reverse_events[prefix] = {
+                "wrapper_complete": complete,
+                "sink_complete": sink_complete,
+            }
+            reverse_metrics.update({
+                f"{prefix}_reverse_marker_wall_ms": float(marker["marker_wall_ms"]),
+                f"{prefix}_reverse_marker_sink_ms": float(marker["marker_sink_ms"]),
+                f"{prefix}_reverse_marker_front_ms": float(marker["marker_front_ms"]),
+                f"{prefix}_reverse_pressure_p95_ms": float(complete["pressure_latency_p95_ms"]),
+                f"{prefix}_reverse_pressure_max_ms": float(complete["pressure_latency_max_ms"]),
+                f"{prefix}_reverse_max_active": float(complete["max_active"]),
+                f"{prefix}_reverse_start_skew_us": float(complete["start_skew_us"]),
+                f"{prefix}_reverse_tail_ms": float(complete["tail_after_marker_ms"]),
+            })
+    else:
+        for prefix in ("generation","rank"):
+            for suffix in ("marker_wall_ms","marker_sink_ms","marker_front_ms",
+                           "pressure_p95_ms","pressure_max_ms","max_active",
+                           "start_skew_us","tail_ms"):
+                reverse_metrics[f"{prefix}_reverse_{suffix}"] = 0.0
+        reverse_metrics["generation_reverse_tail_rank_overlap_ms"] = 0.0
+        reverse_metrics["rank_reverse_tail_rerank_overlap_ms"] = 0.0
     pairec_events = json_events(replay / "pairec_stdout.log")
     pipeline = one(pairec_events, "pipeline_trace_complete", request_id)
     wrapper_burst_start = one(
@@ -588,6 +740,19 @@ for row in contention.get("rows", []):
             assert rank_kvc["pressure_errors"] == 0, rank_kvc
             assert rank_kvc["business_submit_rank"] == rank_kvc_concurrency, rank_kvc
             assert rank_kvc["pressure_inflight_at_business_start"] == expected_rank_kvc_pressure, rank_kvc
+        if row_reverse_enabled:
+            generation_complete = reverse_events["generation"]["wrapper_complete"]
+            rank_sink_complete = reverse_events["rank"]["sink_complete"]
+            reverse_metrics["generation_reverse_tail_rank_overlap_ms"] = overlap_ms(
+                int(generation_complete["marker_end_epoch_ns"]),
+                int(generation_complete["last_end_epoch_ns"]),
+                int(log_value(rank_wrapper, "rank_start_epoch_ns")),
+                int(log_value(rank_wrapper, "rank_end_epoch_ns")))
+            reverse_metrics["rank_reverse_tail_rerank_overlap_ms"] = overlap_ms(
+                int(rank_sink_complete["marker_end_epoch_ns"]),
+                int(rank_sink_complete["last_end_epoch_ns"]),
+                int(rerank_event["start_epoch_ns"]),
+                int(rerank_event["end_epoch_ns"]))
         rank_business_start = int(rank_business["rank_business_start_epoch_ns"])
         rank_business_end = int(rank_business["rank_business_end_epoch_ns"])
         pressure_start = int(rank_complete.get("rank_pressure_first_start_epoch_ns") or rank_business_start)
@@ -646,6 +811,7 @@ for row in contention.get("rows", []):
     runner_actual_ms = executor[0]["runner_us"] / 1000.0
     rows.append({
         "request_id": request_id,
+        "reverse_burst_treatment": 1.0 if row_reverse_enabled else 0.0,
         "client_e2e_ms": client_e2e_actual_ms,
         "client_e2e_adjusted_ms": max(0.0, client_e2e_actual_ms - coordination_ms),
         "pairec_total_ms": pipeline["pairec_total_us"] / 1000.0,
@@ -740,6 +906,7 @@ for row in contention.get("rows", []):
         "wrapper_max_active": wrapper_burst["max_active_workers"],
         "wrapper_log_matches": len(matches),
         **rank_metrics,
+        **reverse_metrics,
     })
     if rank_kvc_enabled:
         assert rows[-1]["rank_kvc_business_get_ms"] <= rank_kvc_business_timeout_ms, rows[-1]
@@ -807,6 +974,8 @@ result = {
     "rank_kvc_enabled": rank_kvc_enabled,
     "rank_kvc_concurrency": rank_kvc_concurrency if rank_kvc_enabled else 0,
     "rank_kvc_object_size_bytes": rank_kvc_object_size if rank_kvc_enabled else 0,
+    "reverse_burst_enabled": reverse_burst_enabled,
+    "reverse_burst_pattern": reverse_burst_pattern,
     "response_semantic_fingerprints": response_semantic_fingerprints,
     "expected_onboards_min": expected_onboards_min,
     "expected_onboards_max": expected_onboards_max,

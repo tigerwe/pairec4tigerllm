@@ -27,6 +27,7 @@
 
 #include "kvc_operation_proxy.h"
 #include "pipeline_service.pb.h"
+#include "reverse_burst.h"
 
 namespace {
 
@@ -47,6 +48,7 @@ struct WrapperConfig {
   int rank_kvc_pressure_timeout_ms = 2000;
   int rank_kvc_registration_timeout_ms = 30000;
   uint64_t rank_kvc_seed = 20260827;
+  pairec::reverse_burst::Config reverse_burst;
 };
 
 bool ParseBool(const std::string& value, bool* output) {
@@ -74,6 +76,7 @@ bool ConsumeArgValue(const char* arg, const std::string& name, std::string* out)
 }
 
 bool ParseArgs(int argc, char** argv, WrapperConfig* config) {
+  config->reverse_burst.stage = "rank_return";
   for (int i = 1; i < argc; ++i) {
     std::string value;
     if (ConsumeArgValue(argv[i], "listen_port", &value)) {
@@ -104,6 +107,20 @@ bool ParseArgs(int argc, char** argv, WrapperConfig* config) {
       config->rank_kvc_registration_timeout_ms = std::atoi(value.c_str());
     } else if (ConsumeArgValue(argv[i], "rank_kvc_seed", &value)) {
       config->rank_kvc_seed = std::strtoull(value.c_str(), nullptr, 10);
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_endpoint", &value)) {
+      config->reverse_burst.endpoint = value;
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_stage", &value)) {
+      config->reverse_burst.stage = value;
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_concurrency", &value)) {
+      config->reverse_burst.concurrency = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_payload_bytes", &value)) {
+      config->reverse_burst.payload_bytes = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_marker_timeout_ms", &value)) {
+      config->reverse_burst.marker_timeout_ms = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_pressure_timeout_ms", &value)) {
+      config->reverse_burst.pressure_timeout_ms = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_startup_timeout_ms", &value)) {
+      config->reverse_burst.startup_timeout_ms = std::atoi(value.c_str());
     } else {
       std::cerr << "Unknown argument: " << argv[i] << std::endl;
       return false;
@@ -116,7 +133,11 @@ bool ParseArgs(int argc, char** argv, WrapperConfig* config) {
        config->rank_kvc_object_size > 0 && config->rank_kvc_ttl_sec > 0 &&
        config->rank_kvc_business_timeout_ms > 0 &&
        config->rank_kvc_pressure_timeout_ms > 0 &&
-       config->rank_kvc_registration_timeout_ms > 0));
+       config->rank_kvc_registration_timeout_ms > 0)) &&
+      (config->reverse_burst.endpoint.empty() ||
+       (config->reverse_burst.stage == "rank_return" &&
+        config->reverse_burst.concurrency == 1000 &&
+        config->reverse_burst.payload_bytes == 102400));
 }
 
 int64_t SystemNanos() {
@@ -369,8 +390,10 @@ class RankForwarder {
 class RankBurstWrapper final : public pairec::pipeline::DeepFMRankService {
  public:
   RankBurstWrapper(RankForwarder* forwarder, RankKvcClient* rank_kvc,
+                   pairec::reverse_burst::Coordinator* reverse_burst,
                    std::string backend)
-      : forwarder_(forwarder), rank_kvc_(rank_kvc), backend_(std::move(backend)) {}
+      : forwarder_(forwarder), rank_kvc_(rank_kvc),
+        reverse_burst_(reverse_burst), backend_(std::move(backend)) {}
 
   void Rank(google::protobuf::RpcController* controller,
             const pairec::pipeline::RankRequest* request,
@@ -420,14 +443,30 @@ class RankBurstWrapper final : public pairec::pipeline::DeepFMRankService {
     }
     double backend_rpc_ms = 0;
     std::string error;
-    const bool ok = forwarder_->Rank(
+    bool ok = forwarder_->Rank(
         backend_request, response, &backend_rpc_ms, &error);
+    pairec::reverse_burst::MarkerResult reverse_result;
+    if (ok && response->code() == 200) {
+      pairec::reverse_burst::Marker marker;
+      marker.request_id = request_id;
+      marker.backend_code = response->code();
+      marker.item_count = response->items_size();
+      marker.response_sha256 =
+          pairec::reverse_burst::Sha256(response->SerializeAsString());
+      if (!reverse_burst_->Trigger(marker, &reverse_result)) {
+        ok = false;
+        error = "rank reverse burst marker failed: " + reverse_result.error;
+      }
+    } else if (ok) {
+      ok = false;
+      error = "rank backend returned code=" + std::to_string(response->code());
+    }
     wrapper_timer.stop();
-    if (ok && rank_kvc_->enabled() && response->has_trace() &&
-        response->trace().has_total_us()) {
+    if (ok && response->has_trace() && response->trace().has_total_us()) {
+      const double rank_kvc_ms = rank_kvc_->enabled() ? rank_kvc_result.elapsed_ms : 0.0;
       response->mutable_trace()->set_total_us(
-          response->trace().total_us() +
-          static_cast<int64_t>(rank_kvc_result.elapsed_ms * 1000.0));
+          response->trace().total_us() + static_cast<int64_t>(
+              (rank_kvc_ms + reverse_result.wall_ms) * 1000.0));
     }
     const int64_t ended_epoch_ns = SystemNanos();
     active_rank_.fetch_sub(1, std::memory_order_relaxed);
@@ -472,6 +511,11 @@ class RankBurstWrapper final : public pairec::pipeline::DeepFMRankService {
               << " health_payload_bytes_during_backend=" << bytes_during_backend
               << " front_payload_bytes=" << front_payload_bytes
               << " backend_payload_bytes=" << PayloadBytes(backend_request)
+              << " reverse_burst_enabled=" << reverse_result.enabled
+              << " reverse_marker_success=" << reverse_result.success
+              << " reverse_marker_wall_ms=" << reverse_result.wall_ms
+              << " reverse_marker_sink_ms=" << reverse_result.sink_ms
+              << " reverse_marker_front_ms=" << reverse_result.front_ms
               << " backend=" << backend_
               << " error=" << (error.empty() ? "none" : error) << std::endl;
   }
@@ -481,6 +525,24 @@ class RankBurstWrapper final : public pairec::pipeline::DeepFMRankService {
               pairec::pipeline::HealthResponse* response,
               google::protobuf::Closure* done) override {
     brpc::ClosureGuard guard(done);
+    std::string action;
+    if (pairec::reverse_burst::ParseControl(request->payload_padding(), &action)) {
+      std::string error;
+      bool success = true;
+      if (action == "arm") success = reverse_burst_->Arm(&error);
+      if (action == "disarm") success = reverse_burst_->Disarm(&error);
+      response->set_code(success ? 200 : 409);
+      response->set_status(reverse_burst_->armed() ? "armed" : "disarmed");
+      response->set_backend("brpc_rank_burst_wrapper");
+      auto* trace = response->mutable_trace();
+      if (request->has_context()) trace->mutable_context()->CopyFrom(request->context());
+      trace->set_component("brpc_rank_burst_wrapper");
+      trace->set_protocol("brpc");
+      trace->set_status(success ? "ok" : error);
+      trace->set_total_us(0);
+      trace->set_attribution_complete(true);
+      return;
+    }
     const auto started = std::chrono::steady_clock::now();
     ActiveGuard total_guard(&active_total_, &max_active_total_);
     ActiveGuard health_guard(&active_health_, &max_active_health_);
@@ -509,6 +571,7 @@ class RankBurstWrapper final : public pairec::pipeline::DeepFMRankService {
  private:
   RankForwarder* forwarder_;
   RankKvcClient* rank_kvc_;
+  pairec::reverse_burst::Coordinator* reverse_burst_;
   std::string backend_;
   std::atomic<int64_t> active_total_{0};
   std::atomic<int64_t> max_active_total_{0};
@@ -548,8 +611,19 @@ int main(int argc, char** argv) {
     std::cout << "{\"event\":\"rank_wrapper_startup_stage\",\"stage\":\"rank_kvc_ready\"}"
               << std::endl;
 
+    startup_stage = "reverse_burst_init";
+    pairec::reverse_burst::Coordinator reverse_burst;
+    std::string reverse_error;
+    if (!reverse_burst.Init(config.reverse_burst, &reverse_error)) {
+      std::cerr << "Failed to initialize Rank reverse burst: "
+                << reverse_error << std::endl;
+      return 1;
+    }
+    std::cout << "{\"event\":\"rank_wrapper_startup_stage\",\"stage\":\"reverse_burst_ready\"}"
+              << std::endl;
+
     startup_stage = "brpc_server_start";
-    RankBurstWrapper service(&forwarder, &rank_kvc, config.backend);
+    RankBurstWrapper service(&forwarder, &rank_kvc, &reverse_burst, config.backend);
     brpc::Server server;
     if (server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) return 1;
     brpc::ServerOptions options;
