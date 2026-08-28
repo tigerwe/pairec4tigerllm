@@ -1071,7 +1071,7 @@ PY
     kubectl -n "$NAMESPACE" logs "$rank_wrapper" -c rank-burst-wrapper --since=10m >"${round_dir}/rank-reverse-wrapper.log" 2>&1 || true
     kubectl -n "$NAMESPACE" logs "$generation_sink" -c return-pressure-sink --since=10m >"${round_dir}/generation-return-sink.log" 2>&1 || true
     kubectl -n "$NAMESPACE" logs "$rank_sink" -c return-pressure-sink --since=10m >"${round_dir}/rank-return-sink.log" 2>&1 || true
-    if python3 - "$request_id" "$round_dir" <<'PY'
+    if python3 - "$request_id" "$round_dir" 2>"${round_dir}/reverse-burst-validation-error.log" <<'PY'
 import json,pathlib,sys
 request_id,root=sys.argv[1],pathlib.Path(sys.argv[2])
 
@@ -1104,7 +1104,11 @@ PY
       echo "PAIREC_REVERSE_BRPC_DRAINED request_id=$request_id generation=1000/1000 rank=1000/1000"
       return 0
     fi
-    (( SECONDS < deadline )) || { echo "ERROR: reverse burst completion timed out request_id=$request_id" >&2; return 1; }
+    if (( SECONDS >= deadline )); then
+      echo "ERROR: reverse burst completion timed out request_id=$request_id" >&2
+      cat "${round_dir}/reverse-burst-validation-error.log" >&2 || true
+      return 1
+    fi
     sleep 0.2
   done
 }

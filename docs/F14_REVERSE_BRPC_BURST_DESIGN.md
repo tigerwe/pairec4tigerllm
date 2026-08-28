@@ -29,8 +29,9 @@ master PaiRec -> worker1 Generation Wrapper (existing forward c1000)
 ```
 
 Both sinks use host networking, are pinned to master, and have fixed requests
-and limits of 8 CPU and 2 GiB. Worker Wrappers connect directly to
-`141.61.91.189`, bypassing ClusterIP and kube-proxy.
+and limits of 8 CPU and 2 GiB. Worker Wrappers connect directly to the master
+25G address `192.168.100.12`, bypassing ClusterIP, kube-proxy, and the
+management network.
 
 ## Burst Contract
 

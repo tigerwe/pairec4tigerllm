@@ -32,4 +32,4 @@ done
 
 kubectl -n "$NAMESPACE" get pods \
   -l 'app in (generation-return-pressure-sink,rank-return-pressure-sink)' -o wide
-echo "PAIREC_RETURN_PRESSURE_SINKS_READY endpoints=141.61.91.189:18301,141.61.91.189:18302"
+echo "PAIREC_RETURN_PRESSURE_SINKS_READY endpoints=192.168.100.12:18301,192.168.100.12:18302"

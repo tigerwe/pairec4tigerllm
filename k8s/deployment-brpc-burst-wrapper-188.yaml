@@ -34,7 +34,7 @@ spec:
             - --backend=192.168.100.11:18100
             - --backend_timeout_ms=5000
             - --backend_max_retry=0
-            - --reverse_burst_endpoint=141.61.91.189:18301
+            - --reverse_burst_endpoint=192.168.100.12:18301
             - --reverse_burst_stage=generation_return
             - --reverse_burst_concurrency=1000
             - --reverse_burst_payload_bytes=102400

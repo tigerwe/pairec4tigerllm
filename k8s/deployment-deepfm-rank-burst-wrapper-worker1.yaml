@@ -42,7 +42,7 @@ spec:
             - --rank_kvc_ttl_sec=600
             - --rank_kvc_business_timeout_ms=1000
             - --rank_kvc_pressure_timeout_ms=2000
-            - --reverse_burst_endpoint=141.61.91.189:18302
+            - --reverse_burst_endpoint=192.168.100.12:18302
             - --reverse_burst_stage=rank_return
             - --reverse_burst_concurrency=1000
             - --reverse_burst_payload_bytes=102400

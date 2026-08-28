@@ -80,6 +80,28 @@ class ReverseBrpcBurstTest(unittest.TestCase):
             self.assertEqual("8", container["resources"]["limits"]["cpu"])
             self.assertEqual("2Gi", container["resources"]["limits"]["memory"])
 
+    def test_reverse_wrappers_use_master_25g_endpoint(self):
+        generation = yaml.safe_load((
+            ROOT / "k8s/deployment-brpc-burst-wrapper-188.yaml"
+        ).read_text())
+        rank = next(
+            document for document in yaml.safe_load_all((
+                ROOT / "k8s/deployment-deepfm-rank-burst-wrapper-worker1.yaml"
+            ).read_text())
+            if document.get("kind") == "Deployment"
+        )
+        generation_args = generation["spec"]["template"]["spec"]["containers"][0]["args"]
+        rank_wrapper = next(
+            item for item in rank["spec"]["template"]["spec"]["containers"]
+            if item["name"] == "rank-burst-wrapper"
+        )
+        self.assertIn(
+            "--reverse_burst_endpoint=192.168.100.12:18301", generation_args
+        )
+        self.assertIn(
+            "--reverse_burst_endpoint=192.168.100.12:18302", rank_wrapper["args"]
+        )
+
     def test_generation_control_client_is_shipped_and_host_mounted(self):
         ship = (
             ROOT / "scripts/ship_brpc_burst_wrapper_binary_to_worker.sh"
