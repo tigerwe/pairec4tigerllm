@@ -148,6 +148,10 @@ class ReverseBrpcBurstTest(unittest.TestCase):
         )
         self.assertLess(previous_pool_drain, generation_deploy)
         self.assertLess(
+            benchmark.index("Deploy master return pressure Sinks"),
+            generation_deploy,
+        )
+        self.assertLess(
             generation_deploy,
             benchmark.index("Functional treatment smoke n1"),
         )

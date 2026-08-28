@@ -43,14 +43,14 @@ if kubectl -n "$NAMESPACE" get deployment pairec-brpc-observed-wrapper \
 fi
 echo "PAIREC_PREVIOUS_GENERATION_POOL_DRAINED target_pool_size=$GENERATION_BURST_POOL_SIZE"
 
+echo "== Deploy master return pressure Sinks =="
+NAMESPACE="$NAMESPACE" bash scripts/k8s_apply_brpc_return_pressure_sinks_master.sh \
+  | tee "$OUTPUT_DIR/sinks-deploy.log"
+
 echo "== Redeploy generation Wrapper after host binary update =="
 NAMESPACE="$NAMESPACE" WRAPPER_WORKER="$WRAPPER_WORKER" \
   bash scripts/k8s_apply_brpc_burst_wrapper_188.sh \
   | tee "$OUTPUT_DIR/generation-wrapper-deploy.log"
-
-echo "== Deploy master return pressure Sinks =="
-NAMESPACE="$NAMESPACE" bash scripts/k8s_apply_brpc_return_pressure_sinks_master.sh \
-  | tee "$OUTPUT_DIR/sinks-deploy.log"
 
 echo "== Deploy Rank KVC c32 infrastructure once =="
 NAMESPACE="$NAMESPACE" RANK_KVC_CONCURRENCY=32 RANK_KVC_PRESSURE_KEY_COUNT=4 \
