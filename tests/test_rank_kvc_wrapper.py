@@ -26,6 +26,9 @@ class RankKvcWrapperTest(unittest.TestCase):
             "rank_kvc_preflight_complete",
             "registerInProcessPressureClient",
             "response->mutable_trace()->set_total_us",
+            'startup_stage = "rank_kvc_init"',
+            "Rank burst wrapper startup exception: stage=",
+            "value.size() < prefix.size()",
         ):
             self.assertIn(token, source)
         self.assertIn("expectedBusinessGets() == 1U ? lanes", proxy)

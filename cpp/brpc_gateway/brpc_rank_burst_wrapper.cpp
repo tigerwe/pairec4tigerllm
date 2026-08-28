@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -61,10 +62,14 @@ bool ParseBool(const std::string& value, bool* output) {
 }
 
 bool ConsumeArgValue(const char* arg, const std::string& name, std::string* out) {
+  if (arg == nullptr || out == nullptr) return false;
   const std::string prefix = "--" + name + "=";
   const std::string value(arg);
-  if (value.rfind(prefix, 0) != 0) return false;
-  *out = value.substr(prefix.size());
+  if (value.size() < prefix.size() ||
+      value.compare(0, prefix.size(), prefix) != 0) {
+    return false;
+  }
+  out->assign(value.data() + prefix.size(), value.size() - prefix.size());
   return true;
 }
 
@@ -518,26 +523,49 @@ class RankBurstWrapper final : public pairec::pipeline::DeepFMRankService {
 }  // namespace
 
 int main(int argc, char** argv) {
-  WrapperConfig config;
-  if (!ParseArgs(argc, argv, &config)) return 2;
-  RankForwarder forwarder;
-  if (!forwarder.Init(config)) {
-    std::cerr << "Failed to initialize Rank backend " << config.backend << std::endl;
+  const char* startup_stage = "parse_args";
+  try {
+    WrapperConfig config;
+    if (!ParseArgs(argc, argv, &config)) return 2;
+    std::cout << "{\"event\":\"rank_wrapper_startup_stage\",\"stage\":\"args_parsed\"}"
+              << std::endl;
+
+    startup_stage = "rank_backend_init";
+    RankForwarder forwarder;
+    if (!forwarder.Init(config)) {
+      std::cerr << "Failed to initialize Rank backend " << config.backend << std::endl;
+      return 1;
+    }
+    std::cout << "{\"event\":\"rank_wrapper_startup_stage\",\"stage\":\"rank_backend_ready\"}"
+              << std::endl;
+
+    startup_stage = "rank_kvc_init";
+    RankKvcClient rank_kvc;
+    if (!rank_kvc.Init(config)) {
+      std::cerr << "Failed to initialize Rank KVC integration" << std::endl;
+      return 1;
+    }
+    std::cout << "{\"event\":\"rank_wrapper_startup_stage\",\"stage\":\"rank_kvc_ready\"}"
+              << std::endl;
+
+    startup_stage = "brpc_server_start";
+    RankBurstWrapper service(&forwarder, &rank_kvc, config.backend);
+    brpc::Server server;
+    if (server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) return 1;
+    brpc::ServerOptions options;
+    options.idle_timeout_sec = config.idle_timeout_sec;
+    if (server.Start(config.listen_port, &options) != 0) return 1;
+    std::cout << "brpc Rank burst wrapper listening on 0.0.0.0:" << config.listen_port
+              << " backend=" << config.backend << std::endl;
+    server.RunUntilAskedToQuit();
+    return 0;
+  } catch (const std::exception& error) {
+    std::cerr << "Rank burst wrapper startup exception: stage=" << startup_stage
+              << " error=" << error.what() << std::endl;
+    return 1;
+  } catch (...) {
+    std::cerr << "Rank burst wrapper startup exception: stage=" << startup_stage
+              << " error=unknown" << std::endl;
     return 1;
   }
-  RankKvcClient rank_kvc;
-  if (!rank_kvc.Init(config)) {
-    std::cerr << "Failed to initialize Rank KVC integration" << std::endl;
-    return 1;
-  }
-  RankBurstWrapper service(&forwarder, &rank_kvc, config.backend);
-  brpc::Server server;
-  if (server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) return 1;
-  brpc::ServerOptions options;
-  options.idle_timeout_sec = config.idle_timeout_sec;
-  if (server.Start(config.listen_port, &options) != 0) return 1;
-  std::cout << "brpc Rank burst wrapper listening on 0.0.0.0:" << config.listen_port
-            << " backend=" << config.backend << std::endl;
-  server.RunUntilAskedToQuit();
-  return 0;
 }
