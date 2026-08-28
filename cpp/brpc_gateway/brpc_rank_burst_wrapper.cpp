@@ -121,6 +121,12 @@ bool ParseArgs(int argc, char** argv, WrapperConfig* config) {
       config->reverse_burst.pressure_timeout_ms = std::atoi(value.c_str());
     } else if (ConsumeArgValue(argv[i], "reverse_burst_startup_timeout_ms", &value)) {
       config->reverse_burst.startup_timeout_ms = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_startup_batch_size", &value)) {
+      config->reverse_burst.startup_batch_size = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_startup_max_retries", &value)) {
+      config->reverse_burst.startup_max_retries = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_startup_retry_backoff_ms", &value)) {
+      config->reverse_burst.startup_retry_backoff_ms = std::atoi(value.c_str());
     } else {
       std::cerr << "Unknown argument: " << argv[i] << std::endl;
       return false;
@@ -137,7 +143,10 @@ bool ParseArgs(int argc, char** argv, WrapperConfig* config) {
       (config->reverse_burst.endpoint.empty() ||
        (config->reverse_burst.stage == "rank_return" &&
         config->reverse_burst.concurrency == 1000 &&
-        config->reverse_burst.payload_bytes == 102400));
+        config->reverse_burst.payload_bytes == 102400 &&
+        config->reverse_burst.startup_batch_size > 0 &&
+        config->reverse_burst.startup_max_retries >= 0 &&
+        config->reverse_burst.startup_retry_backoff_ms >= 0));
 }
 
 int64_t SystemNanos() {

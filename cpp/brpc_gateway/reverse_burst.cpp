@@ -7,6 +7,7 @@
 #include <exception>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -143,8 +144,13 @@ class Coordinator::Impl {
     if (config.endpoint.empty()) return true;
     if (config.stage.empty() || config.concurrency != 1000 ||
         config.payload_bytes != 102400 || config.marker_timeout_ms <= 0 ||
-        config.pressure_timeout_ms <= 0 || config.startup_timeout_ms <= 0) {
-      *error = "reverse burst requires stage, concurrency=1000, payload_bytes=102400, and positive timeouts";
+        config.pressure_timeout_ms <= 0 || config.startup_timeout_ms <= 0 ||
+        config.startup_batch_size <= 0 ||
+        config.startup_batch_size > config.concurrency ||
+        config.startup_max_retries < 0 || config.startup_max_retries > 6 ||
+        config.startup_retry_backoff_ms < 0 ||
+        config.startup_retry_backoff_ms > 1000) {
+      *error = "reverse burst requires stage, concurrency=1000, payload_bytes=102400, positive timeouts, and valid startup retry settings";
       return false;
     }
     config_ = config;
@@ -152,13 +158,26 @@ class Coordinator::Impl {
     armed_.store(config.initially_armed, std::memory_order_release);
     workers_.reserve(static_cast<size_t>(config.concurrency));
     for (int lane = 0; lane < config.concurrency; ++lane) {
-      auto worker = std::make_unique<Worker>();
-      worker->channel = std::make_unique<brpc::Channel>();
-      workers_.push_back(std::move(worker));
+      workers_.push_back(std::make_unique<Worker>());
     }
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(config.startup_timeout_ms);
+    bool startup_timed_out = false;
     try {
-      for (int lane = 0; lane < config.concurrency; ++lane) {
-        workers_[lane]->thread = std::thread([this, lane] { WorkerMain(lane); });
+      for (int begin = 0; begin < config.concurrency;
+           begin += config.startup_batch_size) {
+        const int end = std::min(
+            config.concurrency, begin + config.startup_batch_size);
+        for (int lane = begin; lane < end; ++lane) {
+          workers_[lane]->thread = std::thread([this, lane] { WorkerMain(lane); });
+        }
+        std::unique_lock<std::mutex> lock(state_mutex_);
+        if (!startup_cv_.wait_until(lock, deadline, [this, end] {
+              return startup_finished_ >= end;
+            })) {
+          startup_timed_out = true;
+          break;
+        }
       }
     } catch (const std::exception& exception) {
       *error = "reverse burst worker creation failed: " +
@@ -166,17 +185,22 @@ class Coordinator::Impl {
       Shutdown();
       return false;
     }
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(config.startup_timeout_ms);
-    std::unique_lock<std::mutex> lock(state_mutex_);
-    startup_cv_.wait_until(lock, deadline, [this] {
-      return startup_finished_ == config_.concurrency;
-    });
-    if (connected_sessions_ != config_.concurrency) {
-      *error = "reverse burst preconnect failed: connected=" +
-          std::to_string(connected_sessions_) + "/" +
-          std::to_string(config_.concurrency);
-      lock.unlock();
+    LogStartupSummary();
+    int startup_finished;
+    int connected_sessions;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      startup_finished = startup_finished_;
+      connected_sessions = connected_sessions_;
+    }
+    if (startup_timed_out || startup_finished != config_.concurrency ||
+        connected_sessions != config_.concurrency) {
+      *error = "reverse burst preconnect failed: finished=" +
+          std::to_string(startup_finished) + "/" +
+          std::to_string(config_.concurrency) + " connected=" +
+          std::to_string(connected_sessions) + "/" +
+          std::to_string(config_.concurrency) +
+          (startup_timed_out ? " timeout=true" : " timeout=false");
       Shutdown();
       return false;
     }
@@ -185,6 +209,8 @@ class Coordinator::Impl {
               << JsonEscape(config_.endpoint) << "\",\"connected_sessions\":"
               << connected_sessions_ << ",\"armed_workers\":" << config_.concurrency
               << ",\"connection_groups\":" << config_.concurrency
+              << ",\"startup_batch_size\":" << config_.startup_batch_size
+              << ",\"startup_max_retries\":" << config_.startup_max_retries
               << ",\"payload_bytes\":" << config_.payload_bytes
               << ",\"initially_armed\":"
               << (config_.initially_armed ? "true" : "false") << "}" << std::endl;
@@ -308,20 +334,54 @@ class Coordinator::Impl {
     options.connection_group = config_.stage + "_lane_" + std::to_string(lane);
     options.timeout_ms = config_.pressure_timeout_ms;
     options.max_retry = 0;
-    bool connected = worker.channel->Init(config_.endpoint.c_str(), "", &options) == 0;
-    if (connected) {
-      worker.stub = std::make_unique<pairec::inference::RecommendService_Stub>(
-          worker.channel.get());
-      pairec::inference::HealthRequest request;
-      pairec::inference::HealthResponse response;
-      brpc::Controller controller;
-      worker.stub->Health(&controller, &request, &response, nullptr);
-      connected = !controller.Failed() && response.code() == 200;
+    bool connected = false;
+    for (int retry = 0; retry <= config_.startup_max_retries; ++retry) {
+      if (shutdown_.load(std::memory_order_acquire)) break;
+      auto channel = std::make_unique<brpc::Channel>();
+      int error_code = 0;
+      int response_code = 0;
+      std::string error_text;
+      const int init_result = channel->Init(config_.endpoint.c_str(), "", &options);
+      std::unique_ptr<pairec::inference::RecommendService_Stub> stub;
+      if (init_result != 0) {
+        error_code = init_result;
+        error_text = "channel Init failed";
+      } else {
+        stub = std::make_unique<pairec::inference::RecommendService_Stub>(
+            channel.get());
+        pairec::inference::HealthRequest request;
+        pairec::inference::HealthResponse response;
+        brpc::Controller controller;
+        controller.set_timeout_ms(config_.pressure_timeout_ms);
+        stub->Health(&controller, &request, &response, nullptr);
+        response_code = response.code();
+        connected = !controller.Failed() && response_code == 200;
+        if (controller.Failed()) {
+          error_code = controller.ErrorCode();
+          error_text = controller.ErrorText();
+        } else if (!connected) {
+          error_text = "Health response code=" + std::to_string(response_code);
+        }
+      }
+      RecordStartupAttempt(retry, connected, error_code, response_code, error_text);
+      if (connected) {
+        worker.channel = std::move(channel);
+        worker.stub = std::move(stub);
+        break;
+      }
+      if (retry < config_.startup_max_retries) {
+        const int backoff_ms = config_.startup_retry_backoff_ms * (1 << retry);
+        std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+      }
     }
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       ++startup_finished_;
-      if (connected) ++connected_sessions_;
+      if (connected) {
+        ++connected_sessions_;
+      } else {
+        startup_failed_lanes_.push_back(lane);
+      }
     }
     startup_cv_.notify_all();
     if (!connected) return;
@@ -350,6 +410,59 @@ class Coordinator::Impl {
       if (shutdown_.load(std::memory_order_acquire)) break;
       Execute(lane, worker, round);
     }
+  }
+
+  void RecordStartupAttempt(int retry, bool success, int error_code,
+                            int response_code, const std::string& error_text) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    ++startup_attempts_;
+    if (retry > 0) ++startup_retries_;
+    if (success) return;
+    std::string detail = error_text.empty() ? "unknown" : error_text;
+    if (detail.size() > 200) detail.resize(200);
+    const std::string key = "error_code=" + std::to_string(error_code) +
+        " response_code=" + std::to_string(response_code) + " text=" + detail;
+    ++startup_error_counts_[key];
+  }
+
+  void LogStartupSummary() const {
+    int finished;
+    int connected;
+    int attempts;
+    int retries;
+    std::map<std::string, int> errors;
+    std::vector<int> failed_lanes;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      finished = startup_finished_;
+      connected = connected_sessions_;
+      attempts = startup_attempts_;
+      retries = startup_retries_;
+      errors = startup_error_counts_;
+      failed_lanes = startup_failed_lanes_;
+    }
+    std::cout << "{\"event\":\"pairec_reverse_brpc_preconnect_summary\",\"stage\":\""
+              << JsonEscape(config_.stage) << "\",\"endpoint\":\""
+              << JsonEscape(config_.endpoint) << "\",\"finished\":" << finished
+              << ",\"connected_sessions\":" << connected
+              << ",\"connection_groups\":" << config_.concurrency
+              << ",\"batch_size\":" << config_.startup_batch_size
+              << ",\"max_retries\":" << config_.startup_max_retries
+              << ",\"attempts\":" << attempts << ",\"retries\":" << retries
+              << ",\"failures\":" << config_.concurrency - connected
+              << ",\"failed_lanes\":[";
+    for (size_t index = 0; index < failed_lanes.size(); ++index) {
+      if (index != 0) std::cout << ',';
+      std::cout << failed_lanes[index];
+    }
+    std::cout << "],\"error_counts\":{";
+    bool first = true;
+    for (const auto& [detail, count] : errors) {
+      if (!first) std::cout << ',';
+      first = false;
+      std::cout << '\"' << JsonEscape(detail) << "\":" << count;
+    }
+    std::cout << "}}" << std::endl;
   }
 
   void Execute(int lane, Worker& worker, const std::shared_ptr<Round>& round) {
@@ -520,6 +633,10 @@ class Coordinator::Impl {
   uint64_t sequence_ = 0;
   int startup_finished_ = 0;
   int connected_sessions_ = 0;
+  int startup_attempts_ = 0;
+  int startup_retries_ = 0;
+  std::map<std::string, int> startup_error_counts_;
+  std::vector<int> startup_failed_lanes_;
   std::atomic<bool> enabled_{false};
   std::atomic<bool> armed_{false};
   std::atomic<bool> shutdown_{false};

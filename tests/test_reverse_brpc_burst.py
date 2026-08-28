@@ -19,6 +19,10 @@ class ReverseBrpcBurstTest(unittest.TestCase):
             "int payload_bytes = 102400",
             "int marker_timeout_ms = 1000",
             "int pressure_timeout_ms = 5000",
+            "int startup_timeout_ms = 120000",
+            "int startup_batch_size = 64",
+            "int startup_max_retries = 3",
+            "int startup_retry_backoff_ms = 100",
             "bool initially_armed = false",
         ):
             self.assertIn(token, header)
@@ -35,6 +39,13 @@ class ReverseBrpcBurstTest(unittest.TestCase):
             "result->error = \"reverse burst marker timed out\"",
             "SinkEchoMatches(response.raw_json(), round->marker)",
             "reverse burst worker creation failed",
+            "begin += config.startup_batch_size",
+            "retry <= config_.startup_max_retries",
+            "config_.startup_retry_backoff_ms * (1 << retry)",
+            "controller.ErrorCode()",
+            "pairec_reverse_brpc_preconnect_summary",
+            '"failed_lanes\\":[',
+            '"error_counts\\\":{"',
         ):
             self.assertIn(token, source)
 
@@ -103,6 +114,13 @@ class ReverseBrpcBurstTest(unittest.TestCase):
         self.assertIn(
             "--reverse_burst_endpoint=192.168.100.12:18302", rank_wrapper["args"]
         )
+        for wrapper_args in (generation_args, rank_wrapper["args"]):
+            self.assertIn("--reverse_burst_startup_timeout_ms=120000", wrapper_args)
+            self.assertIn("--reverse_burst_startup_batch_size=64", wrapper_args)
+            self.assertIn("--reverse_burst_startup_max_retries=3", wrapper_args)
+            self.assertIn(
+                "--reverse_burst_startup_retry_backoff_ms=100", wrapper_args
+            )
 
     def test_generation_control_client_is_shipped_and_host_mounted(self):
         ship = (

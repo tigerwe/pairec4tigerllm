@@ -40,7 +40,10 @@ spec:
             - --reverse_burst_payload_bytes=102400
             - --reverse_burst_marker_timeout_ms=1000
             - --reverse_burst_pressure_timeout_ms=5000
-            - --reverse_burst_startup_timeout_ms=30000
+            - --reverse_burst_startup_timeout_ms=120000
+            - --reverse_burst_startup_batch_size=64
+            - --reverse_burst_startup_max_retries=3
+            - --reverse_burst_startup_retry_backoff_ms=100
             - --idle_timeout_sec=-1
           ports:
             - containerPort: 18103
@@ -64,7 +67,7 @@ spec:
             tcpSocket:
               port: 18103
             periodSeconds: 2
-            failureThreshold: 60
+            failureThreshold: 90
           readinessProbe:
             exec:
               command:

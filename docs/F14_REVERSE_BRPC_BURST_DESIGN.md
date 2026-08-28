@@ -63,6 +63,14 @@ with the 2000-session pool after the reverse Wrapper is Ready.
 Set `SMOKE_ONLY=1` to stop after the single functional treatment request instead
 of continuing into the 20-request interleaved ABBA measurement.
 
+Reverse preconnection is staged independently from the measured burst. The
+Wrapper opens at most 64 lanes per startup batch. A lane that fails its Health
+preflight is retried up to three times with 100, 200, and 400 ms backoff. The
+global startup budget is 120 seconds, while the final readiness contract remains
+strictly 1000 connected sessions and 1000 connection groups. The measured round
+still releases all 1000 lanes through one barrier. Startup summaries report the
+total attempts, retries, final failed lanes, and aggregated bRPC error details.
+
 The Wrapper waits for the marker and fails closed on marker error or its 1000 ms
 timeout. It does not wait for the 999 Health requests. Health calls have a
 5000 ms timeout and finish asynchronously. Their errors invalidate the measured

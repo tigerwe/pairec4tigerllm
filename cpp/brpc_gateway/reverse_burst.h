@@ -15,7 +15,10 @@ struct Config {
   int payload_bytes = 102400;
   int marker_timeout_ms = 1000;
   int pressure_timeout_ms = 5000;
-  int startup_timeout_ms = 30000;
+  int startup_timeout_ms = 120000;
+  int startup_batch_size = 64;
+  int startup_max_retries = 3;
+  int startup_retry_backoff_ms = 100;
   bool initially_armed = false;
 };
 

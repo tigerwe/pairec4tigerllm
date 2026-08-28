@@ -49,7 +49,10 @@ void PrintUsage(const char* argv0) {
       << "  --reverse_burst_payload_bytes=102400\n"
       << "  --reverse_burst_marker_timeout_ms=1000\n"
       << "  --reverse_burst_pressure_timeout_ms=5000\n"
-      << "  --reverse_burst_startup_timeout_ms=30000\n"
+      << "  --reverse_burst_startup_timeout_ms=120000\n"
+      << "  --reverse_burst_startup_batch_size=64\n"
+      << "  --reverse_burst_startup_max_retries=3\n"
+      << "  --reverse_burst_startup_retry_backoff_ms=100\n"
       << "  --idle_timeout_sec=-1\n";
 }
 
@@ -79,6 +82,12 @@ bool ParseArgs(int argc, char** argv, WrapperConfig* config) {
       config->reverse_burst.pressure_timeout_ms = std::atoi(value.c_str());
     } else if (ConsumeArgValue(argv[i], "reverse_burst_startup_timeout_ms", &value)) {
       config->reverse_burst.startup_timeout_ms = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_startup_batch_size", &value)) {
+      config->reverse_burst.startup_batch_size = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_startup_max_retries", &value)) {
+      config->reverse_burst.startup_max_retries = std::atoi(value.c_str());
+    } else if (ConsumeArgValue(argv[i], "reverse_burst_startup_retry_backoff_ms", &value)) {
+      config->reverse_burst.startup_retry_backoff_ms = std::atoi(value.c_str());
     } else if (ConsumeArgValue(argv[i], "idle_timeout_sec", &value)) {
       config->idle_timeout_sec = std::atoi(value.c_str());
     } else if (std::string(argv[i]) == "--help") {
@@ -99,7 +108,10 @@ bool ParseArgs(int argc, char** argv, WrapperConfig* config) {
   if (!config->reverse_burst.endpoint.empty() &&
       (config->reverse_burst.stage != "generation_return" ||
        config->reverse_burst.concurrency != 1000 ||
-       config->reverse_burst.payload_bytes != 102400)) {
+       config->reverse_burst.payload_bytes != 102400 ||
+       config->reverse_burst.startup_batch_size <= 0 ||
+       config->reverse_burst.startup_max_retries < 0 ||
+       config->reverse_burst.startup_retry_backoff_ms < 0)) {
     std::cerr << "Invalid generation reverse burst configuration\n";
     return false;
   }
