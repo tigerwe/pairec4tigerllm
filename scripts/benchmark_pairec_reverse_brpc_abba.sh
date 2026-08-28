@@ -20,6 +20,11 @@ for binary in brpc_recommend_client brpc_pipeline_client; do
     }
 done
 
+echo "== Redeploy generation Wrapper after host binary update =="
+NAMESPACE="$NAMESPACE" WRAPPER_WORKER="$WRAPPER_WORKER" \
+  bash scripts/k8s_apply_brpc_burst_wrapper_188.sh \
+  | tee "$OUTPUT_DIR/generation-wrapper-deploy.log"
+
 echo "== Deploy master return pressure Sinks =="
 NAMESPACE="$NAMESPACE" bash scripts/k8s_apply_brpc_return_pressure_sinks_master.sh \
   | tee "$OUTPUT_DIR/sinks-deploy.log"

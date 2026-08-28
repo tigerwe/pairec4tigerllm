@@ -112,6 +112,17 @@ class ReverseBrpcBurstTest(unittest.TestCase):
             benchmark.index("Deploy master return pressure Sinks"),
         )
         self.assertIn("brpc_recommend_client brpc_pipeline_client", benchmark)
+        generation_deploy = benchmark.index(
+            "bash scripts/k8s_apply_brpc_burst_wrapper_188.sh"
+        )
+        self.assertLess(
+            benchmark.index("Preflight reverse BRPC control clients"),
+            generation_deploy,
+        )
+        self.assertLess(
+            generation_deploy,
+            benchmark.index("Functional treatment smoke n1"),
+        )
 
     def test_abba_summary_splits_ten_and_ten(self):
         path = ROOT / "scripts/summarize_pairec_reverse_brpc_ab.py"
