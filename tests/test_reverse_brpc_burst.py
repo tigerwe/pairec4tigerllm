@@ -171,6 +171,11 @@ class ReverseBrpcBurstTest(unittest.TestCase):
         self.assertIn(
             "-l app=pairec-brpc-observed-wrapper --timeout=120s", benchmark
         )
+        self.assertIn('SMOKE_ONLY="${SMOKE_ONLY:-0}"', benchmark)
+        self.assertLess(
+            benchmark.index("PAIREC_REVERSE_BRPC_FUNCTIONAL_SMOKE_OK"),
+            benchmark.index("Interleaved reverse BRPC A/B"),
+        )
 
     def test_abba_summary_splits_ten_and_ten(self):
         path = ROOT / "scripts/summarize_pairec_reverse_brpc_ab.py"

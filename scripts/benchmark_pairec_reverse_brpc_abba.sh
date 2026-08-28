@@ -7,6 +7,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-reverse-brpc-abba/$(date +%Y%m%d-%H%M%S)}"
 PATTERN="A,B,B,A,A,B,B,A,A,B,B,A,A,B,B,A,A,B,B,A"
 WRAPPER_WORKER="${WRAPPER_WORKER:-root@192.168.100.11}"
 GENERATION_BURST_POOL_SIZE="${GENERATION_BURST_POOL_SIZE:-2000}"
+SMOKE_ONLY="${SMOKE_ONLY:-0}"
 
 [[ "$GENERATION_BURST_POOL_SIZE" =~ ^[1-9][0-9]*$ ]] && \
   (( GENERATION_BURST_POOL_SIZE >= 1000 && GENERATION_BURST_POOL_SIZE <= 10000 )) \
@@ -14,6 +15,10 @@ GENERATION_BURST_POOL_SIZE="${GENERATION_BURST_POOL_SIZE:-2000}"
     echo "ERROR: GENERATION_BURST_POOL_SIZE must be in [1000,10000]" >&2
     exit 1
   }
+[[ "$SMOKE_ONLY" = 0 || "$SMOKE_ONLY" = 1 ]] || {
+  echo "ERROR: SMOKE_ONLY must be 0 or 1" >&2
+  exit 1
+}
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -78,6 +83,12 @@ echo "== Functional treatment smoke n1 =="
 env "${common_env[@]}" REQUESTS=1 OUTPUT_DIR="$OUTPUT_DIR/smoke" \
   bash scripts/validate_pairec_brpc_wrapper_kvc_combined.sh \
   | tee "$OUTPUT_DIR/smoke.console.log"
+
+if [[ "$SMOKE_ONLY" = 1 ]]; then
+  echo "PAIREC_REVERSE_BRPC_FUNCTIONAL_SMOKE_OK"
+  echo "output_dir=$OUTPUT_DIR/smoke"
+  exit 0
+fi
 
 echo "== Interleaved reverse BRPC A/B: five ABBA blocks =="
 env "${common_env[@]}" REQUESTS=20 REVERSE_BURST_PATTERN="$PATTERN" \

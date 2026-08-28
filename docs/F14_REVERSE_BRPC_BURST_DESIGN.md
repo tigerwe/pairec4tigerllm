@@ -60,6 +60,8 @@ while preserving the measured c1000 burst. Before restarting the generation
 Wrapper, the ABBA runner scales the previous PaiRec instance to zero and waits
 for its old pool to disconnect. The full-chain validator then recreates PaiRec
 with the 2000-session pool after the reverse Wrapper is Ready.
+Set `SMOKE_ONLY=1` to stop after the single functional treatment request instead
+of continuing into the 20-request interleaved ABBA measurement.
 
 The Wrapper waits for the marker and fails closed on marker error or its 1000 ms
 timeout. It does not wait for the 999 Health requests. Health calls have a
