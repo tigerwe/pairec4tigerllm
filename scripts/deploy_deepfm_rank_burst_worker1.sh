@@ -96,6 +96,10 @@ INFERENCE_POD="$(ready_pod "$INFERENCE_DEPLOYMENT")"
 INFERENCE_RUNTIME_ENV="$OUTPUT_DIR/inference-runtime.env"
 kubectl -n "$NAMESPACE" exec "$INFERENCE_POD" -c "$INFERENCE_CONTAINER" -- env \
   >"$INFERENCE_RUNTIME_ENV"
+INFERENCE_HOST_IP="$(kubectl -n "$NAMESPACE" get pod "$INFERENCE_POD" \
+  -o jsonpath='{.status.hostIP}')"
+[[ -n "$INFERENCE_HOST_IP" ]] || die "inference Pod has no status.hostIP: $INFERENCE_POD"
+printf 'HOST_IP=%s\n' "$INFERENCE_HOST_IP" >>"$INFERENCE_RUNTIME_ENV"
 python3 - "$WRAPPER_MANIFEST" "$OUTPUT_DIR/wrapper.yaml" "${RANK_IP}:18211" \
   "$RANK_KVC_CONCURRENCY" "$RANK_KVC_PRESSURE_KEY_COUNT" \
   "$INFERENCE_RUNTIME_ENV" <<'PY'

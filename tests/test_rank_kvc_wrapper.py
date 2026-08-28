@@ -66,6 +66,8 @@ class RankKvcWrapperTest(unittest.TestCase):
         for token in (
             'INFERENCE_CONTAINER="${INFERENCE_CONTAINER:-brpc-inference}"',
             'INFERENCE_RUNTIME_ENV="$OUTPUT_DIR/inference-runtime.env"',
+            "-o jsonpath='{.status.hostIP}'",
+            "printf 'HOST_IP=%s\\n'",
             'name.startswith("DATASYSTEM_")',
             '"block_ds_consumer.so", "stub_gpu.so", "libabseil_dll.so"',
             '"libnvidia-ml.so" not in token',
