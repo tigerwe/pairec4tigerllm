@@ -56,6 +56,9 @@ spec:
               readOnly: true
             - name: rank-kvc-control
               mountPath: /run/pairec-rank-kvc-burst
+            - name: rank-kvc-runtime
+              mountPath: __RANK_KVC_RUNTIME_POD_DIR__
+              readOnly: true
           startupProbe:
             tcpSocket: {port: 18213}
             periodSeconds: 2
@@ -107,6 +110,9 @@ spec:
               readOnly: true
             - name: rank-kvc-control
               mountPath: /run/pairec-rank-kvc-burst
+            - name: rank-kvc-runtime
+              mountPath: __RANK_KVC_RUNTIME_POD_DIR__
+              readOnly: true
           readinessProbe:
             exec:
               command: [/bin/sh, -c, test -s /run/pairec-rank-kvc-burst/ready]
@@ -122,6 +128,8 @@ spec:
           hostPath: {path: /home/zcx/bin/kvc_burst_wrapper, type: File}
         - name: rank-kvc-control
           emptyDir: {}
+        - name: rank-kvc-runtime
+          hostPath: {path: __RANK_KVC_RUNTIME_HOST_DIR__, type: Directory}
 ---
 apiVersion: v1
 kind: Service

@@ -17,6 +17,8 @@ WRAPPER_HOST_BIN="${WRAPPER_HOST_BIN:-/home/zcx/bin/brpc_rank_burst_wrapper}"
 RANK_ADAPTER_HOST_BIN="${RANK_ADAPTER_HOST_BIN:-/home/zcx/bin/brpc_deepfm_rank_adapter}"
 PIPELINE_CLIENT_HOST_BIN="${PIPELINE_CLIENT_HOST_BIN:-/home/zcx/bin/brpc_pipeline_client}"
 RANK_KVC_BURST_HOST_BIN="${RANK_KVC_BURST_HOST_BIN:-/home/zcx/bin/kvc_burst_wrapper}"
+RANK_KVC_RUNTIME_HOST_DIR="${RANK_KVC_RUNTIME_HOST_DIR:-/home/zcx/rank-kvc-runtime}"
+RANK_KVC_RUNTIME_POD_DIR="${RANK_KVC_RUNTIME_POD_DIR:-/opt/pairec-rank-runtime}"
 RANK_KVC_CONCURRENCY="${RANK_KVC_CONCURRENCY:-32}"
 RANK_KVC_PRESSURE_KEY_COUNT="${RANK_KVC_PRESSURE_KEY_COUNT:-4}"
 WORKER_SSH="${WORKER_SSH:-root@192.168.100.11}"
@@ -37,7 +39,7 @@ print(max(ready)[1])
 ' "$1"
 }
 
-for command in kubectl python3 ssh sha256sum; do
+for command in kubectl python3 scp ssh sha256sum; do
   command -v "$command" >/dev/null 2>&1 || die "missing command: $command"
 done
 [[ "$DEEPFM_MODEL_ROLE" = engineering || "$DEEPFM_MODEL_ROLE" = production_candidate ]] \
@@ -100,22 +102,46 @@ INFERENCE_HOST_IP="$(kubectl -n "$NAMESPACE" get pod "$INFERENCE_POD" \
   -o jsonpath='{.status.hostIP}')"
 [[ -n "$INFERENCE_HOST_IP" ]] || die "inference Pod has no status.hostIP: $INFERENCE_POD"
 printf 'HOST_IP=%s\n' "$INFERENCE_HOST_IP" >>"$INFERENCE_RUNTIME_ENV"
+ssh "$WORKER_SSH" "mkdir -p '$RANK_KVC_RUNTIME_HOST_DIR'"
+for library in block_ds_consumer.so stub_gpu.so; do
+  local_library="$OUTPUT_DIR/$library"
+  remote_library="$RANK_KVC_RUNTIME_HOST_DIR/$library"
+  kubectl -n "$NAMESPACE" exec "$INFERENCE_POD" -c "$INFERENCE_CONTAINER" -- \
+    cat "/opt/pairec/lib/$library" >"$local_library"
+  [[ -s "$local_library" ]] || die "empty inference runtime library: $library"
+  local_sha="$(sha256sum "$local_library" | awk '{print $1}')"
+  scp "$local_library" "${WORKER_SSH}:${remote_library}.part"
+  remote_sha="$(ssh "$WORKER_SSH" "sha256sum '${remote_library}.part'" | awk '{print $1}')"
+  [[ "$local_sha" = "$remote_sha" ]] \
+    || die "Rank KVC runtime library checksum mismatch: $library"
+  ssh "$WORKER_SSH" \
+    "chmod 0755 '${remote_library}.part' && mv -f '${remote_library}.part' '$remote_library'"
+  echo "rank_kvc_runtime_library=$remote_library sha256=$local_sha"
+done
 python3 - "$WRAPPER_MANIFEST" "$OUTPUT_DIR/wrapper.yaml" "${RANK_IP}:18211" \
   "$RANK_KVC_CONCURRENCY" "$RANK_KVC_PRESSURE_KEY_COUNT" \
-  "$INFERENCE_RUNTIME_ENV" <<'PY'
+  "$INFERENCE_RUNTIME_ENV" "$RANK_KVC_RUNTIME_POD_DIR" \
+  "$RANK_KVC_RUNTIME_HOST_DIR" <<'PY'
 import json,pathlib,re,sys
 text=pathlib.Path(sys.argv[1]).read_text()
 for old,new in {
     "__RANK_BACKEND_ENDPOINT__":sys.argv[3],
     "__RANK_KVC_CONCURRENCY__":sys.argv[4],
     "__RANK_KVC_PRESSURE_KEY_COUNT__":sys.argv[5],
+    "__RANK_KVC_RUNTIME_POD_DIR__":sys.argv[7],
+    "__RANK_KVC_RUNTIME_HOST_DIR__":sys.argv[8],
 }.items(): text=text.replace(old,new)
 runtime={}
 for line in pathlib.Path(sys.argv[6]).read_text().splitlines():
     name,separator,value=line.partition("=")
     if separator: runtime[name]=value
-preload_tokens=[token for token in re.split(r"[\s:]+", runtime.get("LD_PRELOAD", ""))
-                if token and "libnvidia-ml.so" not in token]
+preload_tokens=[]
+for token in re.split(r"[\s:]+", runtime.get("LD_PRELOAD", "")):
+    if not token or "libnvidia-ml.so" in token: continue
+    name=pathlib.PurePosixPath(token).name
+    if name in ("block_ds_consumer.so", "stub_gpu.so"):
+        token=str(pathlib.PurePosixPath(sys.argv[7]) / name)
+    preload_tokens.append(token)
 runtime["LD_PRELOAD"]=" ".join(preload_tokens)
 required_preloads=("block_ds_consumer.so", "stub_gpu.so", "libabseil_dll.so")
 missing=[name for name in required_preloads if name not in runtime["LD_PRELOAD"]]

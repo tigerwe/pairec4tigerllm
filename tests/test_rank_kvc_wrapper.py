@@ -58,6 +58,11 @@ class RankKvcWrapperTest(unittest.TestCase):
             "--inprocess_pressure=true",
         ):
             self.assertIn(expected, args)
+        for container in (wrapper, sidecar):
+            mounts = {item["name"]: item for item in container["volumeMounts"]}
+            self.assertEqual(
+                "__RANK_KVC_RUNTIME_POD_DIR__", mounts["rank-kvc-runtime"]["mountPath"]
+            )
 
     def test_rank_deploy_inherits_datasystem_arm_runtime(self):
         deploy = (
@@ -70,8 +75,10 @@ class RankKvcWrapperTest(unittest.TestCase):
             "printf 'HOST_IP=%s\\n'",
             'name.startswith("DATASYSTEM_")',
             '"block_ds_consumer.so", "stub_gpu.so", "libabseil_dll.so"',
-            '"libnvidia-ml.so" not in token',
+            '"libnvidia-ml.so" in token',
             'text.count(marker) != 2',
+            'cat "/opt/pairec/lib/$library"',
+            'rank_kvc_runtime_library=',
         ):
             self.assertIn(token, deploy)
 
@@ -93,7 +100,8 @@ class RankKvcWrapperTest(unittest.TestCase):
             subprocess.run(
                 [sys.executable, "-c", renderer,
                  str(ROOT / "k8s/deployment-deepfm-rank-burst-wrapper-worker1.yaml"),
-                 str(output), "10.0.0.1:18211", "1", "0", str(runtime)],
+                 str(output), "10.0.0.1:18211", "1", "0", str(runtime),
+                 "/opt/pairec-rank-runtime", "/home/zcx/rank-kvc-runtime"],
                 check=True, capture_output=True, text=True,
             )
             documents = list(yaml.safe_load_all(output.read_text()))
@@ -104,7 +112,9 @@ class RankKvcWrapperTest(unittest.TestCase):
             self.assertEqual("141.61.91.188", env["HOST_IP"])
             self.assertEqual("pairec", env["DATASYSTEM_CLUSTER_NAME"])
             self.assertNotIn("libnvidia-ml.so", env["LD_PRELOAD"])
-            self.assertIn("block_ds_consumer.so", env["LD_PRELOAD"])
+            self.assertIn(
+                "/opt/pairec-rank-runtime/block_ds_consumer.so", env["LD_PRELOAD"]
+            )
 
     def test_full_combination_ab_wiring(self):
         benchmark = (
