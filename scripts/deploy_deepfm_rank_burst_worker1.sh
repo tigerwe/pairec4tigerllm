@@ -88,6 +88,9 @@ assert "__" not in text
 pathlib.Path(target).write_text(text)
 PY
 kubectl apply -f "$OUTPUT_DIR/rank.yaml"
+# The adapter and pipeline client are hostPath File mounts. Binary shipping uses
+# atomic rename, so existing pods keep the old inode until they are recreated.
+kubectl -n "$NAMESPACE" rollout restart "deployment/$RANK_DEPLOYMENT"
 kubectl -n "$NAMESPACE" rollout status "deployment/$RANK_DEPLOYMENT" --timeout="$ROLLOUT_TIMEOUT"
 RANK_POD="$(ready_pod "$RANK_DEPLOYMENT")"
 RANK_IP="$(kubectl -n "$NAMESPACE" get service "$RANK_DEPLOYMENT" -o jsonpath='{.spec.clusterIP}')"

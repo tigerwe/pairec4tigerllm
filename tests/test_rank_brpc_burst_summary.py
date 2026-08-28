@@ -136,6 +136,14 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
             script,
         )
         apply_position = script.index('kubectl apply -f "$OUTPUT_DIR/rank.yaml"')
+        restart_position = script.index(
+            'kubectl -n "$NAMESPACE" rollout restart "deployment/$RANK_DEPLOYMENT"'
+        )
+        status_position = script.index(
+            'kubectl -n "$NAMESPACE" rollout status "deployment/$RANK_DEPLOYMENT"'
+        )
+        self.assertLess(apply_position, restart_position)
+        self.assertLess(restart_position, status_position)
         for artifact in (
             "deepfm_best.pt",
             "feature_vocab.json",
