@@ -69,7 +69,7 @@ class RankKvcWrapperTest(unittest.TestCase):
             'name.startswith("DATASYSTEM_")',
             '"block_ds_consumer.so", "stub_gpu.so", "libabseil_dll.so"',
             '"libnvidia-ml.so" not in token',
-            'for container_name in ("rank-burst-wrapper", "rank-kvc-burst-wrapper")',
+            'text.count(marker) != 2',
         ):
             self.assertIn(token, deploy)
 

@@ -21,7 +21,7 @@ spec:
           image: docker.io/library/pairec-brpc-inference:k8s-arm64-v1
           imagePullPolicy: IfNotPresent
           env:
-            - {name: LD_PRELOAD, value: ""}
+            # __RANK_KVC_RUNTIME_ENV__
             - {name: KVC_BURST_ENABLED, value: "1"}
             - {name: KVC_BURST_CONTROL_PATH, value: /run/pairec-rank-kvc-burst/control}
             - {name: KVC_BURST_EXPECTED_BUSINESS_GETS, value: "1"}
@@ -75,7 +75,7 @@ spec:
           image: docker.io/library/pairec-brpc-inference:k8s-arm64-v1
           imagePullPolicy: IfNotPresent
           env:
-            - {name: LD_PRELOAD, value: ""}
+            # __RANK_KVC_RUNTIME_ENV__
           command: [/opt/pairec-brpc/bin/kvc_burst_wrapper]
           args:
             - --host=192.168.100.12

@@ -99,14 +99,13 @@ kubectl -n "$NAMESPACE" exec "$INFERENCE_POD" -c "$INFERENCE_CONTAINER" -- env \
 python3 - "$WRAPPER_MANIFEST" "$OUTPUT_DIR/wrapper.yaml" "${RANK_IP}:18211" \
   "$RANK_KVC_CONCURRENCY" "$RANK_KVC_PRESSURE_KEY_COUNT" \
   "$INFERENCE_RUNTIME_ENV" <<'PY'
-import pathlib,re,sys,yaml
+import json,pathlib,re,sys
 text=pathlib.Path(sys.argv[1]).read_text()
 for old,new in {
     "__RANK_BACKEND_ENDPOINT__":sys.argv[3],
     "__RANK_KVC_CONCURRENCY__":sys.argv[4],
     "__RANK_KVC_PRESSURE_KEY_COUNT__":sys.argv[5],
 }.items(): text=text.replace(old,new)
-assert "__" not in text
 runtime={}
 for line in pathlib.Path(sys.argv[6]).read_text().splitlines():
     name,separator,value=line.partition("=")
@@ -125,18 +124,18 @@ if missing_env:
     raise RuntimeError("inference runtime environment is empty: " + ",".join(missing_env))
 runtime_names={"HOST_IP", "LD_LIBRARY_PATH", "LD_PRELOAD", "NVIDIA_DRIVER_CAPABILITIES"}
 runtime_names.update(name for name in runtime if name.startswith("DATASYSTEM_"))
-inherited=[{"name":name, "value":runtime[name]} for name in sorted(runtime_names)
-           if runtime.get(name)]
-documents=list(yaml.safe_load_all(text))
-deployment=documents[0]
-containers=deployment["spec"]["template"]["spec"]["containers"]
-for container_name in ("rank-burst-wrapper", "rank-kvc-burst-wrapper"):
-    container=next(item for item in containers if item["name"] == container_name)
-    existing=[entry for entry in container.get("env", [])
-              if entry.get("name") not in runtime_names]
-    container["env"]=inherited + existing
-pathlib.Path(sys.argv[2]).write_text(
-    yaml.safe_dump_all(documents, sort_keys=False), encoding="utf-8")
+inherited=[(name,runtime[name]) for name in sorted(runtime_names) if runtime.get(name)]
+indent="            "
+rendered=[]
+for name,value in inherited:
+    rendered.append(indent + "- name: " + json.dumps(name))
+    rendered.append(indent + "  value: " + json.dumps(value))
+marker=indent + "# __RANK_KVC_RUNTIME_ENV__"
+if text.count(marker) != 2:
+    raise RuntimeError("expected two Rank KVC runtime environment markers")
+text=text.replace(marker, "\n".join(rendered))
+assert "__" not in text
+pathlib.Path(sys.argv[2]).write_text(text, encoding="utf-8")
 print("Rank KVC runtime environment inherited from inference Pod; LD_PRELOAD="
       + runtime["LD_PRELOAD"])
 PY
