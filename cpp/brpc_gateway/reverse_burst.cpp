@@ -184,6 +184,7 @@ class Coordinator::Impl {
               << JsonEscape(config_.stage) << "\",\"endpoint\":\""
               << JsonEscape(config_.endpoint) << "\",\"connected_sessions\":"
               << connected_sessions_ << ",\"armed_workers\":" << config_.concurrency
+              << ",\"connection_groups\":" << config_.concurrency
               << ",\"payload_bytes\":" << config_.payload_bytes
               << ",\"initially_armed\":"
               << (config_.initially_armed ? "true" : "false") << "}" << std::endl;
@@ -301,6 +302,10 @@ class Coordinator::Impl {
     brpc::ChannelOptions options;
     options.protocol = "baidu_std";
     options.connection_type = "single";
+    // Single-server Channels share a Socket when connection_group is equal.
+    // A group per lane makes the 1000 advertised sessions real and keeps the
+    // marker off the pressure lanes' unwritten-byte buffers.
+    options.connection_group = config_.stage + "_lane_" + std::to_string(lane);
     options.timeout_ms = config_.pressure_timeout_ms;
     options.max_retry = 0;
     bool connected = worker.channel->Init(config_.endpoint.c_str(), "", &options) == 0;

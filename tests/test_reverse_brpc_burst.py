@@ -24,6 +24,8 @@ class ReverseBrpcBurstTest(unittest.TestCase):
             self.assertIn(token, header)
         for token in (
             'options.connection_type = "single"',
+            'options.connection_group = config_.stage + "_lane_" + std::to_string(lane)',
+            '"connection_groups\\\":" << config_.concurrency',
             'config.concurrency != 1000',
             'config.payload_bytes != 102400',
             '"marker" : "health"',

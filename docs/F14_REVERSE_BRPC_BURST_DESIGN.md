@@ -47,6 +47,12 @@ The marker contains the request ID, stage, backend response code, result item
 count, and a SHA256 identity for the backend response. The master Sink validates
 the payload and echoes its identity.
 
+Every lane uses a distinct bRPC `connection_group`. Single-server Channels
+with the same group share one Socket, so creating 1000 Channels alone does not
+create 1000 sessions. Unique groups also isolate the marker Socket from the 999
+pressure Sockets and keep each 100 KiB write below the per-Socket unwritten-byte
+limit.
+
 The Wrapper waits for the marker and fails closed on marker error or its 1000 ms
 timeout. It does not wait for the 999 Health requests. Health calls have a
 5000 ms timeout and finish asynchronously. Their errors invalidate the measured
@@ -68,7 +74,8 @@ behavior.
 
 Every enabled stage must report:
 
-- `connected_sessions=1000` and `armed_workers=1000`;
+- `connected_sessions=1000`, `connection_groups=1000`, and
+  `armed_workers=1000`;
 - marker success, wall time, Sink service time, and front BRPC time;
 - 999 pressure requests, 999 successes, and zero errors;
 - exactly 102400000 accepted request bytes;
