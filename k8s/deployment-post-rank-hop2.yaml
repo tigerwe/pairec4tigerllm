@@ -45,14 +45,13 @@ spec:
             failureThreshold: 3
           volumeMounts:
             - name: post-rank-hop-binary
-              mountPath: /opt/pairec-brpc-mounted/brpc_post_rank_hop
-              subPath: brpc_post_rank_hop
+              mountPath: /opt/pairec-brpc-mounted
               readOnly: true
       volumes:
         - name: post-rank-hop-binary
           hostPath:
-            path: /home/zcx/bin/brpc_post_rank_hop
-            type: File
+            path: /home/zcx/bin
+            type: Directory
 ---
 apiVersion: v1
 kind: Service
