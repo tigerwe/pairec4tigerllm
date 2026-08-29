@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>PaiRec 当前真实 n3 平均时延时序图</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 100%; min-height: 100%; background: #f4f7fb; }
+  body { font-family: Inter, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", system-ui, sans-serif; }
+  svg { display: block; width: 1920px; height: 1220px; }
+  .title { font-size: 31px; font-weight: 760; fill: #152033; }
+  .subtitle { font-size: 14px; fill: #52647a; }
+  .section { font-size: 17px; font-weight: 740; fill: #1d2a3d; }
+  .body { font-size: 13px; fill: #34465d; }
+  .small { font-size: 12px; fill: #5a6d84; }
+  .tiny { font-size: 11px; fill: #66788e; }
+  .mono { font-family: "SFMono-Regular", Consolas, monospace; }
+  .axis { stroke: #9aabbd; stroke-width: 1.4; }
+  .grid { stroke: #dce4ed; stroke-width: 1; }
+  .divider { stroke: #d6e0ea; stroke-width: 1.2; }
+  .bar-label { font-size: 14px; font-weight: 700; fill: #ffffff; }
+  .bar-value { font-size: 12px; font-weight: 650; fill: #ffffff; }
+  .dark-label { font-size: 13px; font-weight: 700; fill: #25364c; }
+  .dark-value { font-size: 12px; fill: #40546c; }
+  .metric { font-size: 20px; font-weight: 760; fill: #17243a; }
+  .metric-label { font-size: 12px; fill: #60738a; }
+  .callout-title { font-size: 13px; font-weight: 740; fill: #23344b; }
+  .callout-copy { font-size: 12px; fill: #50637a; }
+  .leader { stroke: #8b9caf; stroke-width: 1.2; fill: none; }
+  .nested { fill: none; stroke-width: 2; }
+  .arrow { stroke: #5e7188; stroke-width: 1.6; fill: none; }
+</style>
+</head>
+<body>
+<svg viewBox="0 0 1920 1220" role="img" aria-labelledby="diagramTitle diagramDesc" xmlns="http://www.w3.org/2000/svg">
+  <title id="diagramTitle">PaiRec 当前真实 n3 平均时延时序图</title>
+  <desc id="diagramDesc">基于三次有效请求均值，按零到五百毫秒比例展示生成式召回、向量召回、DeepFM Rank、post-rank 两跳和客户端边界开销，并拆分 BRPC、KVC 与 marker 时延。</desc>
+  <defs>
+    <marker id="arrowHead" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <path d="M0,0 L9,3.5 L0,7 Z" fill="#5e7188"/>
+    </marker>
+  </defs>
+
+  <rect width="1920" height="1220" fill="#f4f7fb"/>
+
+  <!-- Header -->
+  <text x="56" y="50" class="small mono">MEASURED · 2026-08-29 · REAL N3 · NO SYNTHETIC HOLD</text>
+  <text x="56" y="88" class="title">PaiRec 端到端推荐时序：当前真实平均时延</text>
+  <text x="56" y="116" class="subtitle">数据源：/tmp/pairec-post-rank-real-n3-20260829-155127/result.json · 3/3 有效 · 50 candidates · 两跳 999 + 999 成功</text>
+
+  <g transform="translate(1280,38)">
+    <text x="0" y="15" class="metric">495.591 ms</text><text x="0" y="38" class="metric-label">客户端 E2E 平均</text>
+    <text x="190" y="15" class="metric">488.420 ms</text><text x="190" y="38" class="metric-label">PaiRec 平均</text>
+    <text x="390" y="15" class="metric">29.073 ms</text><text x="390" y="38" class="metric-label">Post-rank 两跳</text>
+  </g>
+  <line x1="56" y1="142" x2="1864" y2="142" class="divider"/>
+
+  <!-- Critical path -->
+  <text x="56" y="180" class="section">关键路径闭环</text>
+  <text x="222" y="180" class="small">长度按 0–500 ms 统一比例绘制；向量召回与生成式并行，不重复累计</text>
+
+  <!-- time grid x=180 + ms*3.2 -->
+  <g>
+    <line x1="180" y1="206" x2="180" y2="346" class="grid"/>
+    <line x1="340" y1="206" x2="340" y2="346" class="grid"/>
+    <line x1="500" y1="206" x2="500" y2="346" class="grid"/>
+    <line x1="660" y1="206" x2="660" y2="346" class="grid"/>
+    <line x1="820" y1="206" x2="820" y2="346" class="grid"/>
+    <line x1="980" y1="206" x2="980" y2="346" class="grid"/>
+    <line x1="1140" y1="206" x2="1140" y2="346" class="grid"/>
+    <line x1="1300" y1="206" x2="1300" y2="346" class="grid"/>
+    <line x1="1460" y1="206" x2="1460" y2="346" class="grid"/>
+    <line x1="1620" y1="206" x2="1620" y2="346" class="grid"/>
+    <line x1="1780" y1="206" x2="1780" y2="346" class="grid"/>
+    <line x1="180" y1="206" x2="1780" y2="206" class="axis"/>
+    <g class="small mono" text-anchor="middle">
+      <text x="180" y="198">0</text><text x="340" y="198">50</text><text x="500" y="198">100</text>
+      <text x="660" y="198">150</text><text x="820" y="198">200</text><text x="980" y="198">250</text>
+      <text x="1140" y="198">300</text><text x="1300" y="198">350</text><text x="1460" y="198">400</text>
+      <text x="1620" y="198">450</text><text x="1780" y="198">500 ms</text>
+    </g>
+  </g>
+
+  <text x="56" y="245" class="dark-label">串行主链</text>
+  <rect x="180" y="220" width="922.509" height="48" rx="5" fill="#2573d9"/>
+  <text x="201" y="241" class="bar-label">生成式召回</text><text x="201" y="259" class="bar-value">288.284 ms</text>
+  <rect x="1102.509" y="220" width="545.031" height="48" fill="#d56b1f"/>
+  <text x="1123" y="241" class="bar-label">DeepFM Rank</text><text x="1123" y="259" class="bar-value">170.322 ms</text>
+  <rect x="1647.540" y="220" width="93.034" height="48" fill="#7651c8"/>
+  <text x="1661" y="241" class="bar-label">两跳</text><text x="1661" y="259" class="bar-value">29.073</text>
+  <rect x="1740.574" y="220" width="2.371" height="48" fill="#64748b"/>
+  <rect x="1742.945" y="220" width="22.947" height="48" rx="0" fill="#a6b2c0"/>
+
+  <path d="M1741.8 271 V292 H1600" class="leader"/><text x="1592" y="288" text-anchor="end" class="small">PaiRec 其他 0.741 ms</text>
+  <path d="M1754.4 271 V315 H1600" class="leader"/><text x="1592" y="311" text-anchor="end" class="small">HTTP / 客户端边界合计 7.171 ms，未拆分入口与出口</text>
+  <path d="M1765.9 215 V186" class="leader"/><text x="1765.9" y="176" text-anchor="middle" class="dark-label mono">E2E 495.591 ms</text>
+
+  <text x="56" y="331" class="dark-label">并行支路</text>
+  <rect x="180" y="306" width="22.682" height="28" rx="4" fill="#0b8f78"/>
+  <path d="M202.7 320 H282" class="leader"/><text x="292" y="324" class="small">Vector Recall 7.088 ms，先返回后等待生成式 join</text>
+
+  <line x1="56" y1="370" x2="1864" y2="370" class="divider"/>
+
+  <!-- Detail panels, not nested cards: three open columns -->
+  <text x="56" y="410" class="section">阶段内部归因</text>
+  <text x="205" y="410" class="small">同一行的实心段可以加总；第二层分解包含于父级，不可再次加入 E2E</text>
+
+  <!-- Generation -->
+  <g transform="translate(56,440)">
+    <text x="0" y="0" class="section" fill="#1f5fae">生成式召回</text>
+    <text x="0" y="24" class="metric">288.284 ms</text>
+    <line x1="0" y1="44" x2="560" y2="44" class="divider"/>
+    <rect x="0" y="68" width="56.2" height="44" rx="4" fill="#8492a6"/>
+    <rect x="56.2" y="68" width="219.2" height="44" fill="#3f8ce8"/>
+    <rect x="275.4" y="68" width="284.6" height="44" rx="4" fill="#1f63b8"/>
+    <text x="72" y="91" class="bar-label">Front BRPC</text><text x="72" y="106" class="bar-value">28.894 ms</text>
+    <text x="295" y="91" class="bar-label">生成服务端</text><text x="295" y="106" class="bar-value">252.000 ms</text>
+    <path d="M28 116 V137 H66" class="leader"/><text x="74" y="141" class="small">本地/转换 7.390 ms</text>
+    <text x="275.4" y="166" class="callout-title">生成服务端内部并发窗口</text>
+    <rect x="275.4" y="178" width="185.9" height="28" rx="3" fill="#0b8f78"/>
+    <text x="368.4" y="197" text-anchor="middle" class="bar-value">KVC 164.604 ms</text>
+    <path d="M461.3 192 H540" class="leader"/><text x="548" y="196" class="small">包含于 252 ms</text>
+    <text x="0" y="238" class="callout-title">观察</text>
+    <text x="0" y="258" class="callout-copy">服务端是主导项；KVC 为其内部并发窗口，不能再与 252 ms 相加。</text>
+  </g>
+
+  <!-- Rank -->
+  <g transform="translate(680,440)">
+    <text x="0" y="0" class="section" fill="#b45318">DeepFM Rank</text>
+    <text x="0" y="24" class="metric">170.322 ms</text>
+    <line x1="0" y1="44" x2="560" y2="44" class="divider"/>
+    <rect x="0" y="68" width="66.9" height="44" rx="4" fill="#ed9a52"/>
+    <rect x="66.9" y="68" width="493.1" height="44" rx="4" fill="#c85f18"/>
+    <text x="10" y="89" class="bar-value">协调</text><text x="10" y="105" class="bar-value">20.334</text>
+    <text x="88" y="91" class="bar-label">Rank 业务 RPC</text><text x="88" y="106" class="bar-value">149.988 ms</text>
+    <text x="66.9" y="143" class="callout-title">Rank 业务 RPC 内部</text>
+    <rect x="66.9" y="154" width="58.8" height="32" rx="3" fill="#f3b77f"/>
+    <rect x="125.7" y="154" width="434.3" height="32" rx="3" fill="#a94b11"/>
+    <text x="96.3" y="175" text-anchor="middle" class="tiny" style="fill:#4f260f;font-weight:700">17.889</text>
+    <text x="342.8" y="175" text-anchor="middle" class="bar-value">Service 132.099 ms</text>
+    <rect x="125.7" y="194" width="423.6" height="18" rx="3" fill="#0b8f78"/>
+    <text x="337.5" y="207" text-anchor="middle" class="bar-value">其中 Rank KVC Get 128.832 ms</text>
+    <text x="0" y="242" class="callout-title">观察</text>
+    <text x="0" y="262" class="callout-copy">Rank service 几乎由 8 MiB KVC Get 主导；这是三轮 E2E 波动的主要来源。</text>
+  </g>
+
+  <!-- Post-rank -->
+  <g transform="translate(1304,440)">
+    <text x="0" y="0" class="section" fill="#6541b7">Post-rank 两跳</text>
+    <text x="0" y="24" class="metric">29.073 ms</text>
+    <line x1="0" y1="44" x2="560" y2="44" class="divider"/>
+    <rect x="0" y="68" width="209.9" height="44" rx="4" fill="#9b7ada"/>
+    <rect x="209.9" y="68" width="347.3" height="44" rx="4" fill="#6845b3"/>
+    <rect x="557.2" y="68" width="2.8" height="44" rx="1" fill="#8997aa"/>
+    <text x="14" y="91" class="bar-label">Hop-1 marker</text><text x="14" y="106" class="bar-value">10.897 ms</text>
+    <text x="230" y="91" class="bar-label">Hop-1 业务 RPC</text><text x="230" y="106" class="bar-value">18.031 ms</text>
+    <path d="M559 115 V144 H470" class="leader"/><text x="462" y="148" text-anchor="end" class="small">编排 0.145 ms</text>
+
+    <text x="0" y="184" class="callout-title">Hop-1 业务 RPC 内部</text>
+    <rect x="0" y="198" width="19.1" height="30" rx="3" fill="#c8b8ee"/>
+    <rect x="19.1" y="198" width="540.9" height="30" rx="3" fill="#8062c4"/>
+    <path d="M9.5 232 V254 H60" class="leader"/><text x="68" y="258" class="small">Hop-1 front 0.613 ms</text>
+    <text x="290" y="218" text-anchor="middle" class="bar-value">Hop-1 service 17.417 ms</text>
+
+    <text x="0" y="294" class="callout-title">Hop-1 service 内部归因</text>
+    <rect x="0" y="308" width="265.9" height="34" rx="3" fill="#9aa8b9"/>
+    <rect x="265.9" y="308" width="294.1" height="34" rx="3" fill="#4c7dc0"/>
+    <text x="133" y="329" text-anchor="middle" class="bar-value">推断未拆分 8.276 ms</text>
+    <text x="413" y="329" text-anchor="middle" class="bar-value">Hop-2 front BRPC 9.140 ms</text>
+    <text x="0" y="365" class="callout-copy">Hop-2 marker 记录值 0.001 ms，计时从 999 任务分发后开始；8.276 ms 主要疑似分发/启动及服务开销。</text>
+  </g>
+
+  <line x1="56" y1="850" x2="1864" y2="850" class="divider"/>
+
+  <!-- Sequence order -->
+  <text x="56" y="890" class="section">请求顺序与嵌套关系</text>
+  <g transform="translate(70,930)">
+    <g text-anchor="middle">
+      <circle cx="80" cy="54" r="27" fill="#ffffff" stroke="#8091a5" stroke-width="2"/><text x="80" y="59" class="dark-label">Client</text>
+      <circle cx="320" cy="54" r="27" fill="#ffffff" stroke="#2573d9" stroke-width="2"/><text x="320" y="59" class="dark-label">PaiRec</text>
+      <circle cx="570" cy="54" r="27" fill="#ffffff" stroke="#2573d9" stroke-width="2"/><text x="570" y="59" class="dark-label">Gen</text>
+      <circle cx="830" cy="54" r="27" fill="#ffffff" stroke="#d56b1f" stroke-width="2"/><text x="830" y="59" class="dark-label">Rank</text>
+      <circle cx="1080" cy="54" r="27" fill="#ffffff" stroke="#7651c8" stroke-width="2"/><text x="1080" y="59" class="dark-label">Hop-1</text>
+      <circle cx="1330" cy="54" r="27" fill="#ffffff" stroke="#7651c8" stroke-width="2"/><text x="1330" y="59" class="dark-label">Hop-2</text>
+      <circle cx="1580" cy="54" r="27" fill="#ffffff" stroke="#0b8f78" stroke-width="2"/><text x="1580" y="59" class="dark-label">Rerank</text>
+    </g>
+    <g class="arrow" marker-end="url(#arrowHead)">
+      <path d="M108 54 H290"/><path d="M348 54 H540"/><path d="M598 54 H800"/>
+      <path d="M858 54 H1050"/><path d="M1108 54 H1300"/><path d="M1358 54 H1550"/>
+    </g>
+    <g class="small" text-anchor="middle">
+      <text x="200" y="37">HTTP</text><text x="445" y="37">并行召回 288.284</text><text x="700" y="37">精排 170.322</text>
+      <text x="955" y="37">marker 10.897</text><text x="1205" y="37">嵌套调用</text><text x="1455" y="37">返回并重排 0.022</text>
+    </g>
+    <path d="M1080 91 V128 H1330 V91" fill="none" stroke="#9b7ada" stroke-width="2" marker-end="url(#arrowHead)"/>
+    <text x="1205" y="151" text-anchor="middle" class="small">Hop-1 service 内启动 Hop-2 c1000，嵌套时延不可与父级重复相加</text>
+  </g>
+
+  <line x1="56" y1="1140" x2="1864" y2="1140" class="divider"/>
+  <text x="56" y="1174" class="small">口径：均值来自 3 次有效请求；KVC 为服务阶段内部窗口；“推断未拆分”由 Hop-1 service 减去已记录 Hop-2 front/marker 得出，需补充 dispatch 指标后确认。</text>
+  <text x="56" y="1200" class="tiny mono">pairec-brpc-observability · request_sequence_current_latency_20260829 · critical-path accounting, not additive BRPC accounting</text>
+</svg>
+</body>
+</html>
