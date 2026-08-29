@@ -463,6 +463,22 @@ target_link_libraries(
     Threads::Threads
 )
 
+add_executable(
+  brpc_post_rank_hop
+  brpc_post_rank_hop.cpp
+  post_rank_hop_burst.cpp
+)
+target_include_directories(brpc_post_rank_hop PRIVATE ${BRPC_INCLUDE_DIR})
+target_link_libraries(
+  brpc_post_rank_hop
+  PRIVATE
+    pairec_pipeline_proto
+    ${BRPC_LIBRARY}
+    ${ABSL_EXTRA_LIBS}
+    ${BRPC_EXTRA_LIBS}
+    Threads::Threads
+)
+
 if(PAIREC_ENABLE_TRTLLM_CPP)
   get_filename_component(PAIREC_TRTLLM_LIBRARY_DIR "${PAIREC_TRTLLM_LIBRARY}" DIRECTORY)
   get_filename_component(PAIREC_TRTLLM_PLUGIN_LIBRARY_DIR "${PAIREC_TRTLLM_PLUGIN_LIBRARY}" DIRECTORY)
@@ -530,6 +546,7 @@ install(
     brpc_deepfm_rank_adapter
     brpc_rank_burst_wrapper
     brpc_pipeline_client
+    brpc_post_rank_hop
   RUNTIME DESTINATION bin
 )
 

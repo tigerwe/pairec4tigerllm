@@ -20,6 +20,8 @@ type RankBurstConfig struct {
 	BusinessBytes   int
 	BusinessTimeout time.Duration
 	PressureTimeout time.Duration
+	EventPrefix     string
+	TraceComponent  string
 }
 
 type rankBurstSession interface {
@@ -42,6 +44,8 @@ type RankBurstCoordinator struct {
 	sequence        uint64
 	slot            chan struct{}
 	logEvent        func(any)
+	eventPrefix     string
+	traceComponent  string
 }
 
 type rankBurstJob struct {
@@ -159,11 +163,18 @@ func newRankBurstCoordinator(sessions []rankBurstSession, cfg RankBurstConfig, l
 	if logger == nil {
 		logger = writeRankBurstEvent
 	}
+	if cfg.EventPrefix == "" {
+		cfg.EventPrefix = "pairec_rank_brpc_burst"
+	}
+	if cfg.TraceComponent == "" {
+		cfg.TraceComponent = "deepfm_rank_adapter"
+	}
 	c := &RankBurstCoordinator{
 		sessions: sessions, concurrency: cfg.Concurrency, poolSize: cfg.PoolSize,
 		pressureBytes: cfg.PressureBytes, businessBytes: cfg.BusinessBytes,
 		businessTimeout: cfg.BusinessTimeout, pressureTimeout: cfg.PressureTimeout,
 		slot: make(chan struct{}, 1), logEvent: logger,
+		eventPrefix: cfg.EventPrefix, traceComponent: cfg.TraceComponent,
 	}
 	c.workers = make([]chan rankBurstJob, cfg.PoolSize)
 	for index := range sessions {
@@ -178,7 +189,7 @@ func newRankBurstCoordinator(sessions []rankBurstSession, cfg RankBurstConfig, l
 	}
 	c.slot <- struct{}{}
 	c.logEvent(map[string]any{
-		"event": "pairec_rank_brpc_burst_ready", "concurrency": c.concurrency,
+		"event": c.eventPrefix + "_ready", "concurrency": c.concurrency,
 		"connected_sessions": c.poolSize, "pool_size": c.poolSize,
 		"pressure_payload_bytes": c.pressureBytes, "business_payload_bytes": c.businessBytes,
 	})
@@ -206,7 +217,7 @@ func (c *RankBurstCoordinator) Rank(request *pipelinepb.RankRequest, requestID s
 		}
 	}
 	c.logEvent(map[string]any{
-		"event": "pairec_rank_brpc_burst_start", "request_id": requestID,
+		"event": c.eventPrefix + "_start", "request_id": requestID,
 		"concurrency": c.concurrency, "business_lane": businessLane,
 		"armed_workers": c.concurrency, "connected_sessions": c.poolSize,
 		"pressure_payload_bytes": c.pressureBytes, "business_payload_bytes": c.businessBytes,
@@ -214,13 +225,15 @@ func (c *RankBurstCoordinator) Rank(request *pipelinepb.RankRequest, requestID s
 	releasedAt = time.Now()
 	close(gate)
 	business := <-businessResult
-	businessEvent := makeRankBurstBusinessEvent(requestID, c.concurrency, businessLane, c.businessBytes, business)
+	businessEvent := makeRankBurstBusinessEvent(
+		c.eventPrefix, c.traceComponent, requestID, c.concurrency,
+		businessLane, c.businessBytes, business)
 	c.logEvent(businessEvent)
 	go func() {
 		complete.Wait()
 		close(results)
 		c.logEvent(makeRankBurstCompleteEvent(
-			requestID, c.concurrency, businessLane, releasedAt,
+			c.eventPrefix, requestID, c.concurrency, businessLane, releasedAt,
 			atomic.LoadInt64(&maxActive), businessEvent, results, c.poolSize,
 		))
 		c.slot <- struct{}{}
@@ -309,9 +322,10 @@ func (c *RankBurstCoordinator) Close() {
 	}
 }
 
-func makeRankBurstBusinessEvent(requestID string, concurrency, businessLane, payloadBytes int, result rankBurstLaneResult) rankBurstBusinessEvent {
+func makeRankBurstBusinessEvent(eventPrefix, traceComponent, requestID string,
+	concurrency, businessLane, payloadBytes int, result rankBurstLaneResult) rankBurstBusinessEvent {
 	event := rankBurstBusinessEvent{
-		Event: "pairec_rank_brpc_burst_business_complete", RequestID: requestID,
+		Event: eventPrefix + "_business_complete", RequestID: requestID,
 		Concurrency: concurrency, BusinessLane: businessLane, BusinessPayloadBytes: payloadBytes,
 		Success:      result.err == nil && result.response != nil,
 		ClientWallMS: float64(result.latencyUS) / 1000,
@@ -326,12 +340,15 @@ func makeRankBurstBusinessEvent(requestID string, concurrency, businessLane, pay
 	event.ServiceTotalMS = float64(pipelinepb.Int64(result.response.Trace.TotalUS)) / 1000
 	event.FrontBRPCEstimateMS = event.ClientWallMS - event.ServiceTotalMS
 	event.TraceValid = pipelinepb.Int32(result.response.Code) == 200 &&
-		pipelinepb.String(result.response.Trace.Component) == "deepfm_rank_adapter" &&
+		pipelinepb.String(result.response.Trace.Component) == traceComponent &&
 		pipelinepb.Int64(result.response.Trace.TotalUS) > 0
 	return event
 }
 
-func makeRankBurstCompleteEvent(requestID string, concurrency, businessLane int, releasedAt time.Time, maxActive int64, business rankBurstBusinessEvent, results <-chan rankBurstLaneResult, poolSize int) rankBurstCompleteEvent {
+func makeRankBurstCompleteEvent(eventPrefix, requestID string,
+	concurrency, businessLane int, releasedAt time.Time, maxActive int64,
+	business rankBurstBusinessEvent, results <-chan rankBurstLaneResult,
+	poolSize int) rankBurstCompleteEvent {
 	latencies := make([]int64, 0, concurrency-1)
 	starts := make([]int64, 0, concurrency)
 	pressureSuccess, overlap := 0, 0
@@ -369,7 +386,7 @@ func makeRankBurstCompleteEvent(requestID string, concurrency, businessLane int,
 		tailMS = 0
 	}
 	return rankBurstCompleteEvent{
-		Event: "pairec_rank_brpc_burst_complete", RequestID: requestID,
+		Event: eventPrefix + "_complete", RequestID: requestID,
 		Concurrency: concurrency, BusinessLane: businessLane, ArmedWorkers: concurrency,
 		ConnectedSessions: poolSize, MaxActiveWorkers: maxActive,
 		StartSkewUS: rankBurstSpread(starts), BurstTotalMS: float64(time.Since(releasedAt).Microseconds()) / 1000,

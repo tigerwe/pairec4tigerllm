@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: post-rank-hop2
+  namespace: pairec
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: post-rank-hop2
+  template:
+    metadata:
+      labels:
+        app: post-rank-hop2
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: master
+      containers:
+        - name: post-rank-hop2
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["/opt/pairec-brpc-mounted/brpc_post_rank_hop"]
+          args:
+            - --role=hop2
+            - --listen_port=18312
+            - --idle_timeout_sec=-1
+          resources:
+            requests:
+              cpu: "8"
+              memory: 2Gi
+            limits:
+              cpu: "8"
+              memory: 2Gi
+          startupProbe:
+            tcpSocket:
+              port: 18312
+            periodSeconds: 2
+            failureThreshold: 90
+          readinessProbe:
+            tcpSocket:
+              port: 18312
+            periodSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: post-rank-hop-binary
+              mountPath: /opt/pairec-brpc-mounted/brpc_post_rank_hop
+              subPath: brpc_post_rank_hop
+              readOnly: true
+      volumes:
+        - name: post-rank-hop-binary
+          hostPath:
+            path: /home/zcx/bin/brpc_post_rank_hop
+            type: File
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: post-rank-hop2
+  namespace: pairec
+spec:
+  clusterIP: None
+  selector:
+    app: post-rank-hop2
+  ports:
+    - name: brpc
+      port: 18312
+      targetPort: 18312

@@ -69,6 +69,7 @@ if [ "$ENABLE_TRTLLM_CPP" = "ON" ] || [ "$ENABLE_TRTLLM_CPP" = "1" ]; then
     for bin in \
         /opt/pairec-brpc/bin/brpc_burst_wrapper \
         /opt/pairec-brpc/bin/brpc_return_pressure_sink \
+        /opt/pairec-brpc/bin/brpc_post_rank_hop \
         /opt/pairec-brpc/bin/brpc_rank_burst_wrapper \
         /opt/pairec-brpc/bin/brpc_recommend_client; do
       echo "== ldd $bin =="
@@ -94,6 +95,7 @@ else
     for bin in \
         /opt/pairec-brpc/bin/brpc_burst_wrapper \
         /opt/pairec-brpc/bin/brpc_return_pressure_sink \
+        /opt/pairec-brpc/bin/brpc_post_rank_hop \
         /opt/pairec-brpc/bin/brpc_rank_burst_wrapper \
         /opt/pairec-brpc/bin/brpc_inference_server \
         /opt/pairec-brpc/bin/brpc_recommend_client; do

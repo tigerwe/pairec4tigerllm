@@ -57,6 +57,14 @@
         "brpc_burst_payload_bytes": __RANK_BURST_PAYLOAD_BYTES__,
         "brpc_burst_preconnect": __RANK_BURST_PRECONNECT__,
         "brpc_burst_pressure_timeout_ms": __RANK_BURST_PRESSURE_TIMEOUT_MS__,
+        "post_rank_hops_enabled": __POST_RANK_HOPS_ENABLED__,
+        "post_rank_hop1_endpoint": "__POST_RANK_HOP1_ENDPOINT__",
+        "post_rank_service_name": "pairec.pipeline.DeepFMRankService",
+        "post_rank_timeout_ms": __POST_RANK_TIMEOUT_MS__,
+        "post_rank_burst_concurrency": __POST_RANK_BURST_CONCURRENCY__,
+        "post_rank_burst_pool_size": __POST_RANK_BURST_POOL_SIZE__,
+        "post_rank_payload_bytes": __POST_RANK_PAYLOAD_BYTES__,
+        "post_rank_pressure_timeout_ms": __POST_RANK_PRESSURE_TIMEOUT_MS__,
         "expected_candidates": 50,
         "required_model_role": "__DEEPFM_MODEL_ROLE__"
       }

@@ -3,6 +3,8 @@ package ranksort
 import (
 	"bytes"
 	stdcontext "context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +46,14 @@ type Config struct {
 	BRPCBurstPayloadBytes      int    `json:"brpc_burst_payload_bytes"`
 	BRPCBurstPreconnect        bool   `json:"brpc_burst_preconnect"`
 	BRPCBurstPressureTimeoutMS int    `json:"brpc_burst_pressure_timeout_ms"`
+	PostRankHopsEnabled        bool   `json:"post_rank_hops_enabled"`
+	PostRankHop1Endpoint       string `json:"post_rank_hop1_endpoint"`
+	PostRankServiceName        string `json:"post_rank_service_name"`
+	PostRankTimeoutMS          int    `json:"post_rank_timeout_ms"`
+	PostRankBurstConcurrency   int    `json:"post_rank_burst_concurrency"`
+	PostRankBurstPoolSize      int    `json:"post_rank_burst_pool_size"`
+	PostRankPayloadBytes       int    `json:"post_rank_payload_bytes"`
+	PostRankPressureTimeoutMS  int    `json:"post_rank_pressure_timeout_ms"`
 }
 
 type userDefineConfig struct {
@@ -106,6 +116,7 @@ type DeepFMRankSort struct {
 	client     *http.Client
 	brpcClient *pipelineclient.RankClient
 	brpcBurst  *RankBurstCoordinator
+	postRank   *RankBurstCoordinator
 }
 
 func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
@@ -153,6 +164,26 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 			return nil, errors.New("DeepFM rank burst pressure timeout must be positive")
 		}
 	}
+	if config.PostRankHopsEnabled {
+		if config.Protocol != "brpc" {
+			return nil, errors.New("post-rank hops require BRPC rank protocol")
+		}
+		if config.PostRankHop1Endpoint == "" {
+			return nil, errors.New("post-rank hop1 endpoint is required")
+		}
+		if config.PostRankTimeoutMS <= 0 || config.PostRankTimeoutMS > 1500 {
+			return nil, errors.New("post-rank timeout must be in [1,1500] ms")
+		}
+		if config.PostRankBurstConcurrency != 1000 || config.PostRankBurstPoolSize != 1000 {
+			return nil, errors.New("post-rank burst requires concurrency=1000 and pool_size=1000")
+		}
+		if config.PostRankPayloadBytes != 102400 {
+			return nil, errors.New("post-rank payload must be exactly 102400 bytes")
+		}
+		if config.PostRankPressureTimeoutMS != 5000 {
+			return nil, errors.New("post-rank pressure timeout must be exactly 5000 ms")
+		}
+	}
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: (&net.Dialer{
@@ -198,6 +229,27 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 				return nil, fmt.Errorf("initialize DeepFM rank burst: %w", err)
 			}
 			ranker.brpcBurst = burst
+		}
+		if config.PostRankHopsEnabled {
+			postTimeout := time.Duration(config.PostRankTimeoutMS) * time.Millisecond
+			pressureTimeout := time.Duration(config.PostRankPressureTimeoutMS) * time.Millisecond
+			postClient, err := pipelineclient.NewRankClient(
+				config.PostRankHop1Endpoint, config.PostRankServiceName,
+				rankBurstTransportTimeout(postTimeout, pressureTimeout))
+			if err != nil {
+				return nil, fmt.Errorf("create post-rank hop1 client: %w", err)
+			}
+			postRank, err := NewRankBurstCoordinator(postClient, RankBurstConfig{
+				Concurrency: config.PostRankBurstConcurrency, PoolSize: config.PostRankBurstPoolSize,
+				PressureBytes: config.PostRankPayloadBytes, BusinessBytes: config.PostRankPayloadBytes,
+				BusinessTimeout: postTimeout, PressureTimeout: pressureTimeout,
+				EventPrefix:    "pairec_post_rank_hop1_brpc_burst",
+				TraceComponent: "post_rank_hop1",
+			})
+			if err != nil {
+				return nil, fmt.Errorf("initialize post-rank hop1 burst: %w", err)
+			}
+			ranker.postRank = postRank
 		}
 	}
 	return ranker, nil
@@ -314,6 +366,17 @@ func (s *DeepFMRankSort) Sort(sortData *pairecsort.SortData) error {
 			"service_total_us": ranked.Trace.TotalUS, "feature_us": ranked.Trace.FeatureUS,
 			"compute_us": ranked.Trace.ComputeUS, "backend_rpc_us": ranked.Trace.BackendRPCUS,
 		})
+	if s.postRank != nil {
+		postStarted := time.Now()
+		postTrace, err := s.callPostRankHops(sortData, items)
+		if err != nil {
+			observability.RecordDuration(sortData.Context, "post_rank_two_hop", "post_rank_hops", "brpc",
+				"sort", false, postStarted, "error", map[string]interface{}{"error": err.Error()})
+			return s.fail(sortData, err)
+		}
+		observability.RecordDuration(sortData.Context, "post_rank_two_hop", "post_rank_hops", "brpc",
+			"sort", false, postStarted, "ok", postTrace)
+	}
 	trace := map[string]interface{}{
 		"protocol":               s.config.Protocol,
 		"model_version":          ranked.ModelVersion,
@@ -374,6 +437,79 @@ func (s *DeepFMRankSort) Sort(sortData *pairecsort.SortData) error {
 		fmt.Println(string(encoded))
 	}
 	return nil
+}
+
+func (s *DeepFMRankSort) callPostRankHops(sortData *pairecsort.SortData,
+	items []*module.Item) (map[string]interface{}, error) {
+	requestID := sortData.Context.RecommendId
+	timeout := time.Duration(s.config.PostRankTimeoutMS) * time.Millisecond
+	request := &pipelinepb.RankRequest{
+		Context: pipelineclient.NewTraceContext(requestID, "post-rank-hop1", "sort", timeout),
+		UserID:  proto.String(string(sortData.User.Id)), Items: make([]*pipelinepb.RankCandidate, 0, len(items)),
+		PayloadPadding: make([]byte, s.config.PostRankPayloadBytes),
+	}
+	orderedIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		itemID := string(item.Id)
+		orderedIDs = append(orderedIDs, itemID)
+		request.Items = append(request.Items, &pipelinepb.RankCandidate{ItemID: proto.String(itemID)})
+	}
+	inputHash := orderedCandidateSHA256(orderedIDs)
+	started := time.Now()
+	response, err := s.postRank.Rank(request, requestID)
+	ended := time.Now()
+	if err != nil {
+		return nil, fmt.Errorf("post-rank two-hop BRPC failed: %w", err)
+	}
+	if pipelinepb.Int32(response.Code) != http.StatusOK {
+		return nil, fmt.Errorf("post-rank two-hop code=%d msg=%s",
+			pipelinepb.Int32(response.Code), pipelinepb.String(response.Message))
+	}
+	if len(response.Items) != len(orderedIDs) {
+		return nil, fmt.Errorf("post-rank item count mismatch: got %d want %d",
+			len(response.Items), len(orderedIDs))
+	}
+	outputIDs := make([]string, 0, len(response.Items))
+	for index, rankedItem := range response.Items {
+		itemID := pipelinepb.String(rankedItem.ItemID)
+		if itemID != orderedIDs[index] {
+			return nil, fmt.Errorf("post-rank order mismatch at index=%d got=%q want=%q",
+				index, itemID, orderedIDs[index])
+		}
+		outputIDs = append(outputIDs, itemID)
+	}
+	outputHash := orderedCandidateSHA256(outputIDs)
+	if outputHash != inputHash {
+		return nil, fmt.Errorf("post-rank candidate sha mismatch: got=%s want=%s", outputHash, inputHash)
+	}
+	serviceUS := int64(0)
+	if response.Trace != nil {
+		serviceUS = pipelinepb.Int64(response.Trace.TotalUS)
+	}
+	event := map[string]interface{}{
+		"event": "post_rank_two_hop_complete", "request_id": requestID,
+		"candidate_count": len(orderedIDs), "candidate_sha256": inputHash,
+		"client_total_ms":  float64(ended.Sub(started).Microseconds()) / 1000,
+		"service_total_ms": float64(serviceUS) / 1000,
+		"front_brpc_ms":    float64(ended.Sub(started).Microseconds()-serviceUS) / 1000,
+		"payload_bytes":    len(request.PayloadPadding), "strict_order_valid": true,
+	}
+	if os.Getenv("PAIREC_TRACE_STDOUT") == "1" {
+		encoded, _ := json.Marshal(event)
+		fmt.Println(string(encoded))
+	}
+	return event, nil
+}
+
+func orderedCandidateSHA256(itemIDs []string) string {
+	hash := sha256.New()
+	var length [4]byte
+	for _, itemID := range itemIDs {
+		binary.BigEndian.PutUint32(length[:], uint32(len(itemID)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(itemID))
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil))
 }
 
 func (s *DeepFMRankSort) call(payload rankRequest) (rankResponse, error) {

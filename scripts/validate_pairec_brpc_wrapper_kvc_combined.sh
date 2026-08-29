@@ -57,6 +57,13 @@ LOG_SINCE_LOOKBACK_SECONDS=${LOG_SINCE_LOOKBACK_SECONDS:-60}
 REVERSE_BURST_ENABLED=${REVERSE_BURST_ENABLED:-0}
 REVERSE_BURST_COMPLETION_TIMEOUT_SECONDS=${REVERSE_BURST_COMPLETION_TIMEOUT_SECONDS:-15}
 REVERSE_BURST_PATTERN=${REVERSE_BURST_PATTERN:-}
+POST_RANK_HOPS_ENABLED=${POST_RANK_HOPS_ENABLED:-0}
+POST_RANK_HOP1_ENDPOINT=${POST_RANK_HOP1_ENDPOINT:-192.168.100.12:18311}
+POST_RANK_TIMEOUT_MS=${POST_RANK_TIMEOUT_MS:-1500}
+POST_RANK_BURST_CONCURRENCY=${POST_RANK_BURST_CONCURRENCY:-1000}
+POST_RANK_BURST_POOL_SIZE=${POST_RANK_BURST_POOL_SIZE:-1000}
+POST_RANK_PAYLOAD_BYTES=${POST_RANK_PAYLOAD_BYTES:-102400}
+POST_RANK_PRESSURE_TIMEOUT_MS=${POST_RANK_PRESSURE_TIMEOUT_MS:-5000}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 mkdir -p "$OUTPUT_DIR"
@@ -106,6 +113,8 @@ for flag in "$BUILD_PAIREC_IMAGE" "$IMPORT_PAIREC_IMAGE" "$RANK_BURST_ENABLED" "
 done
 [[ "$REVERSE_BURST_ENABLED" = 0 || "$REVERSE_BURST_ENABLED" = 1 ]] \
   || die "REVERSE_BURST_ENABLED must be 0 or 1"
+[[ "$POST_RANK_HOPS_ENABLED" = 0 || "$POST_RANK_HOPS_ENABLED" = 1 ]] \
+  || die "POST_RANK_HOPS_ENABLED must be 0 or 1"
 if [[ "$REVERSE_BURST_ENABLED" = 1 ]]; then
   [[ "$WRAPPER_CONCURRENCY" = 1000 && "$RANK_BURST_CONCURRENCY" = 1000 ]] \
     || die "reverse burst requires generation and Rank forward concurrency=1000"
@@ -220,6 +229,13 @@ NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
   RANK_BUSINESS_PAYLOAD_BYTES="$RANK_BUSINESS_PAYLOAD_BYTES" \
   RANK_BURST_PRESSURE_TIMEOUT_MS="$RANK_BURST_PRESSURE_TIMEOUT_MS" \
   RANK_TIMEOUT_MS="$RANK_TIMEOUT_MS" \
+  POST_RANK_HOPS_ENABLED="$POST_RANK_HOPS_ENABLED" \
+  POST_RANK_HOP1_ENDPOINT="$POST_RANK_HOP1_ENDPOINT" \
+  POST_RANK_TIMEOUT_MS="$POST_RANK_TIMEOUT_MS" \
+  POST_RANK_BURST_CONCURRENCY="$POST_RANK_BURST_CONCURRENCY" \
+  POST_RANK_BURST_POOL_SIZE="$POST_RANK_BURST_POOL_SIZE" \
+  POST_RANK_PAYLOAD_BYTES="$POST_RANK_PAYLOAD_BYTES" \
+  POST_RANK_PRESSURE_TIMEOUT_MS="$POST_RANK_PRESSURE_TIMEOUT_MS" \
   LOG_SINCE_LOOKBACK_SECONDS="$LOG_SINCE_LOOKBACK_SECONDS" \
   OUTPUT_DIR="$WRAPPER_OUTPUT_DIR" \
   bash scripts/deploy_and_validate_pairec_brpc_wrapper_full.sh \
@@ -248,6 +264,20 @@ else
   if [[ "$REVERSE_BURST_ENABLED" = 1 ]]; then
     capture_reverse_sink_cpu before
   fi
+fi
+
+capture_post_rank_cpu() {
+  local phase=$1 app pod
+  for app in post-rank-hop1 post-rank-hop2; do
+    pod="$(kubectl -n "$NAMESPACE" get pod -l "app=$app" -o jsonpath='{.items[0].metadata.name}')"
+    [[ -n "$pod" ]] || die "missing post-rank Pod: $app"
+    kubectl -n "$NAMESPACE" exec "$pod" -c "$app" -- /bin/sh -ec \
+      'if test -f /sys/fs/cgroup/cpu.stat; then cat /sys/fs/cgroup/cpu.stat; else cat /sys/fs/cgroup/cpu/cpu.stat; fi' \
+      >"$OUTPUT_DIR/${app}.cpu-stat.${phase}"
+  done
+}
+if [[ "$POST_RANK_HOPS_ENABLED" = 1 ]]; then
+  capture_post_rank_cpu before
 fi
 
 echo "== Run KVC contention through the deployed BRPC Wrapper =="
@@ -367,6 +397,55 @@ PY
   kubectl -n "$NAMESPACE" logs "$RANK_POD" -c rank-burst-wrapper \
     --since-time="$LOG_SINCE_AT" --timestamps >"$RANK_WRAPPER_MEASURED_LOG"
   echo "PAIREC_COMBINED_RANK_BURST_DRAINED requests=${#RANK_REQUEST_IDS[@]} concurrency=$RANK_BURST_CONCURRENCY"
+fi
+
+if [[ "$POST_RANK_HOPS_ENABLED" = 1 ]]; then
+  echo "== Wait for measured post-rank Hop-1 and Hop-2 bursts =="
+  [[ "${#RANK_REQUEST_IDS[@]}" -eq "$REQUESTS" ]] \
+    || die "post-rank validation requires measured request ids"
+  POST_HOP1_POD="$(kubectl -n "$NAMESPACE" get pod -l app=post-rank-hop1 -o jsonpath='{.items[0].metadata.name}')"
+  POST_HOP2_POD="$(kubectl -n "$NAMESPACE" get pod -l app=post-rank-hop2 -o jsonpath='{.items[0].metadata.name}')"
+  post_deadline=$((SECONDS + RANK_COMPLETION_TIMEOUT_SECONDS))
+  while true; do
+    kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec --since-time="$LOG_SINCE_AT" \
+      >"$OUTPUT_DIR/post-rank-pairec.log"
+    kubectl -n "$NAMESPACE" logs "$POST_HOP1_POD" -c post-rank-hop1 --since-time="$LOG_SINCE_AT" \
+      >"$OUTPUT_DIR/post-rank-hop1.log"
+    if python3 - "$OUTPUT_DIR/post-rank-pairec.log" "$OUTPUT_DIR/post-rank-hop1.log" \
+      "${RANK_REQUEST_IDS[@]}" <<'PY'
+import json,pathlib,sys
+expected=set(sys.argv[3:]); found=[set(),set()]
+names=("pairec_post_rank_hop1_brpc_burst_complete","pairec_post_rank_hop2_brpc_burst_complete")
+for index,path in enumerate(sys.argv[1:3]):
+    for line in pathlib.Path(path).read_text(errors="replace").splitlines():
+        pos=line.find("{")
+        if pos<0: continue
+        try: event=json.loads(line[pos:])
+        except json.JSONDecodeError: continue
+        if event.get("event")==names[index] and event.get("burst_valid") is True:
+            if event.get("pressure_success")==999 and event.get("pressure_errors")==0:
+                found[index].add(event.get("request_id"))
+raise SystemExit(0 if all(expected <= item for item in found) else 1)
+PY
+    then break; fi
+    (( SECONDS < post_deadline )) || die "timed out waiting for post-rank two-hop completion"
+    sleep 0.2
+  done
+  kubectl -n "$NAMESPACE" logs "$POST_HOP2_POD" -c post-rank-hop2 --since-time="$LOG_SINCE_AT" \
+    >"$OUTPUT_DIR/post-rank-hop2.log"
+  capture_post_rank_cpu after
+  python3 - "$OUTPUT_DIR" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1])
+for app in ("post-rank-hop1","post-rank-hop2"):
+    def read(phase):
+        return {parts[0]:int(parts[1]) for line in (root/f"{app}.cpu-stat.{phase}").read_text().splitlines()
+                if len(parts:=line.split())==2}
+    before,after=read("before"),read("after")
+    assert "nr_throttled" in before and "nr_throttled" in after,(app,before,after)
+    assert after["nr_throttled"]-before["nr_throttled"]==0,(app,before,after)
+print("PAIREC_POST_RANK_TWO_HOP_DRAINED pressure_success=999+999 cpu_throttling_delta=0")
+PY
 fi
 
 if [[ "$RANK_KVC_ENABLED" = 1 ]]; then

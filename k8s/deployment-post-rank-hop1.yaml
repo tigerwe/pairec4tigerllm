@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: post-rank-hop1
+  namespace: pairec
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: post-rank-hop1
+  template:
+    metadata:
+      labels:
+        app: post-rank-hop1
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: master
+      containers:
+        - name: post-rank-hop1
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["/opt/pairec-brpc-mounted/brpc_post_rank_hop"]
+          args:
+            - --role=hop1
+            - --listen_port=18311
+            - --backend=192.168.100.12:18312
+            - --concurrency=1000
+            - --payload_bytes=102400
+            - --business_timeout_ms=1000
+            - --pressure_timeout_ms=5000
+            - --startup_timeout_ms=120000
+            - --startup_batch_size=64
+            - --startup_max_retries=3
+            - --startup_retry_backoff_ms=100
+            - --idle_timeout_sec=-1
+          resources:
+            requests:
+              cpu: "8"
+              memory: 2Gi
+            limits:
+              cpu: "8"
+              memory: 2Gi
+          startupProbe:
+            tcpSocket:
+              port: 18311
+            periodSeconds: 2
+            failureThreshold: 90
+          readinessProbe:
+            tcpSocket:
+              port: 18311
+            periodSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: post-rank-hop-binary
+              mountPath: /opt/pairec-brpc-mounted/brpc_post_rank_hop
+              subPath: brpc_post_rank_hop
+              readOnly: true
+      volumes:
+        - name: post-rank-hop-binary
+          hostPath:
+            path: /home/zcx/bin/brpc_post_rank_hop
+            type: File
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: post-rank-hop1
+  namespace: pairec
+spec:
+  clusterIP: None
+  selector:
+    app: post-rank-hop1
+  ports:
+    - name: brpc
+      port: 18311
+      targetPort: 18311

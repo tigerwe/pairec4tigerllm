@@ -31,6 +31,33 @@ func TestRankBurstTransportTimeoutDoesNotClipEitherLane(t *testing.T) {
 	}
 }
 
+func TestOrderedCandidateSHA256CoversOrderAndBoundaries(t *testing.T) {
+	base := orderedCandidateSHA256([]string{"ab", "c"})
+	if base == orderedCandidateSHA256([]string{"a", "bc"}) {
+		t.Fatal("candidate hash must preserve item boundaries")
+	}
+	if base == orderedCandidateSHA256([]string{"c", "ab"}) {
+		t.Fatal("candidate hash must preserve rank order")
+	}
+	if base != orderedCandidateSHA256([]string{"ab", "c"}) {
+		t.Fatal("candidate hash must be deterministic")
+	}
+}
+
+func TestPostRankHopConfigIsStrict(t *testing.T) {
+	_, err := NewDeepFMRankSort(Config{
+		Name: "test", Protocol: "brpc", BRPCEndpoint: "127.0.0.1:18211",
+		TimeoutMS: 1000, ExpectedCandidates: 50, RequiredModelRole: "engineering",
+		PostRankHopsEnabled: true, PostRankHop1Endpoint: "127.0.0.1:18311",
+		PostRankTimeoutMS: 1500, PostRankBurstConcurrency: 999,
+		PostRankBurstPoolSize: 1000, PostRankPayloadBytes: 102400,
+		PostRankPressureTimeoutMS: 5000,
+	})
+	if err == nil {
+		t.Fatal("post-rank hops must reject non-c1000 configuration")
+	}
+}
+
 func testSortData() *pairecsort.SortData {
 	ctx := paireccontext.NewRecommendContext()
 	ctx.RecommendId = "rank-request-1"

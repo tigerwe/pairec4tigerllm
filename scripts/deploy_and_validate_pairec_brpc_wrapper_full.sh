@@ -26,6 +26,13 @@ RANK_BURST_POOL_SIZE="${RANK_BURST_POOL_SIZE:-$RANK_BURST_CONCURRENCY}"
 RANK_BURST_PAYLOAD_BYTES="${RANK_BURST_PAYLOAD_BYTES:-102400}"
 RANK_BURST_PRECONNECT="${RANK_BURST_PRECONNECT:-1}"
 RANK_BURST_PRESSURE_TIMEOUT_MS="${RANK_BURST_PRESSURE_TIMEOUT_MS:-5000}"
+POST_RANK_HOPS_ENABLED="${POST_RANK_HOPS_ENABLED:-0}"
+POST_RANK_HOP1_ENDPOINT="${POST_RANK_HOP1_ENDPOINT:-192.168.100.12:18311}"
+POST_RANK_TIMEOUT_MS="${POST_RANK_TIMEOUT_MS:-1500}"
+POST_RANK_BURST_CONCURRENCY="${POST_RANK_BURST_CONCURRENCY:-1000}"
+POST_RANK_BURST_POOL_SIZE="${POST_RANK_BURST_POOL_SIZE:-1000}"
+POST_RANK_PAYLOAD_BYTES="${POST_RANK_PAYLOAD_BYTES:-102400}"
+POST_RANK_PRESSURE_TIMEOUT_MS="${POST_RANK_PRESSURE_TIMEOUT_MS:-5000}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
 QUALIFICATION_REQUESTS="${QUALIFICATION_REQUESTS:-0}"
 REQUESTS="${REQUESTS:-3}"
@@ -78,6 +85,16 @@ die() { echo "ERROR: $*" >&2; exit 1; }
   || die "RANK_BURST_PRECONNECT must be 0 or 1"
 [[ "$RANK_BURST_PRESSURE_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] \
   || die "RANK_BURST_PRESSURE_TIMEOUT_MS must be positive"
+[[ "$POST_RANK_HOPS_ENABLED" = 0 || "$POST_RANK_HOPS_ENABLED" = 1 ]] \
+  || die "POST_RANK_HOPS_ENABLED must be 0 or 1"
+if [[ "$POST_RANK_HOPS_ENABLED" = 1 ]]; then
+  [[ "$POST_RANK_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] && (( POST_RANK_TIMEOUT_MS <= 1500 )) \
+    || die "POST_RANK_TIMEOUT_MS must be in [1,1500]"
+  [[ "$POST_RANK_BURST_CONCURRENCY" = 1000 && "$POST_RANK_BURST_POOL_SIZE" = 1000 ]] \
+    || die "post-rank burst requires concurrency=pool_size=1000"
+  [[ "$POST_RANK_PAYLOAD_BYTES" = 102400 ]] || die "post-rank payload must be 102400"
+  [[ "$POST_RANK_PRESSURE_TIMEOUT_MS" = 5000 ]] || die "post-rank pressure timeout must be 5000"
+fi
 python3 -c 'import json,sys; value=json.loads(sys.argv[1]); assert isinstance(value,list); assert all(isinstance(x,int) and x>=0 for x in value); assert len(value)==len(set(value))' \
   "$BURST_CPU_SHARDS" || die "BURST_CPU_SHARDS must be a JSON array of unique non-negative CPU IDs"
 [[ "$WARMUP_REQUESTS" =~ ^[0-9]+$ ]] || die "WARMUP_REQUESTS must be non-negative"
@@ -251,9 +268,12 @@ python3 - "$CONFIG_TEMPLATE" "$OUTPUT_DIR/pairec_config.json" \
   "$BUSINESS_PAYLOAD_BYTES" "$RANK_TIMEOUT_MS" "$RANK_BUSINESS_PAYLOAD_BYTES" \
   "$RANK_BURST_ENABLED" "$RANK_BURST_CONCURRENCY" "$RANK_BURST_POOL_SIZE" \
   "$RANK_BURST_PAYLOAD_BYTES" "$RANK_BURST_PRECONNECT" \
-  "$RANK_BURST_PRESSURE_TIMEOUT_MS" <<'PY'
+  "$RANK_BURST_PRESSURE_TIMEOUT_MS" "$POST_RANK_HOPS_ENABLED" \
+  "$POST_RANK_HOP1_ENDPOINT" "$POST_RANK_TIMEOUT_MS" \
+  "$POST_RANK_BURST_CONCURRENCY" "$POST_RANK_BURST_POOL_SIZE" \
+  "$POST_RANK_PAYLOAD_BYTES" "$POST_RANK_PRESSURE_TIMEOUT_MS" <<'PY'
 import json, pathlib, sys
-source,target,wrapper,concurrency,vector,rank,role,pool,active,cpu_shards,payload_bytes,business_payload_bytes,rank_timeout,rank_business_bytes,rank_burst_enabled,rank_burst_concurrency,rank_burst_pool,rank_burst_bytes,rank_preconnect,rank_pressure_timeout=sys.argv[1:]
+source,target,wrapper,concurrency,vector,rank,role,pool,active,cpu_shards,payload_bytes,business_payload_bytes,rank_timeout,rank_business_bytes,rank_burst_enabled,rank_burst_concurrency,rank_burst_pool,rank_burst_bytes,rank_preconnect,rank_pressure_timeout,post_enabled,post_endpoint,post_timeout,post_concurrency,post_pool,post_bytes,post_pressure_timeout=sys.argv[1:]
 text=pathlib.Path(source).read_text()
 for old,new in {
     "__WRAPPER_ENDPOINT__": wrapper,
@@ -274,6 +294,13 @@ for old,new in {
     "__RANK_BURST_PAYLOAD_BYTES__": rank_burst_bytes,
     "__RANK_BURST_PRECONNECT__": "true" if rank_preconnect == "1" else "false",
     "__RANK_BURST_PRESSURE_TIMEOUT_MS__": rank_pressure_timeout,
+    "__POST_RANK_HOPS_ENABLED__": "true" if post_enabled == "1" else "false",
+    "__POST_RANK_HOP1_ENDPOINT__": post_endpoint,
+    "__POST_RANK_TIMEOUT_MS__": post_timeout,
+    "__POST_RANK_BURST_CONCURRENCY__": post_concurrency,
+    "__POST_RANK_BURST_POOL_SIZE__": post_pool,
+    "__POST_RANK_PAYLOAD_BYTES__": post_bytes,
+    "__POST_RANK_PRESSURE_TIMEOUT_MS__": post_pressure_timeout,
 }.items():
     text=text.replace(old,new)
 assert "__" not in text
@@ -302,6 +329,13 @@ assert ranker["brpc_burst_pool_size"]==int(rank_burst_pool)
 assert ranker["brpc_burst_payload_bytes"]==int(rank_burst_bytes)
 assert ranker["brpc_burst_preconnect"] is (rank_preconnect == "1")
 assert ranker["brpc_burst_pressure_timeout_ms"]==int(rank_pressure_timeout)
+assert ranker["post_rank_hops_enabled"] is (post_enabled == "1")
+assert ranker["post_rank_hop1_endpoint"]==post_endpoint
+assert ranker["post_rank_timeout_ms"]==int(post_timeout)
+assert ranker["post_rank_burst_concurrency"]==int(post_concurrency)
+assert ranker["post_rank_burst_pool_size"]==int(post_pool)
+assert ranker["post_rank_payload_bytes"]==int(post_bytes)
+assert ranker["post_rank_pressure_timeout_ms"]==int(post_pressure_timeout)
 rerank=config["UserDefineConfs"]["RerankConfs"][0]
 assert rerank["fail_closed"] is True and rerank["minimum_generative"]==1
 pathlib.Path(target).write_text(json.dumps(config, indent=2)+"\n")
@@ -492,8 +526,41 @@ assert event["trace_valid"] is True and event["burst_valid"] is True,event
 assert event["connected_sessions"]==int(pool),event
 PY
     fi
+    if [[ "$POST_RANK_HOPS_ENABLED" = 1 ]]; then
+      post_hop1_complete=""
+      while [[ -z "$post_hop1_complete" ]]; do
+        post_hop1_complete="$(kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec 2>/dev/null \
+          | grep -F '"event":"pairec_post_rank_hop1_brpc_burst_complete"' \
+          | grep -F "\"request_id\":\"${warmup_request_id}\"" | tail -1 || true)"
+        (( SECONDS < warmup_deadline )) \
+          || die "warmup post-rank Hop-1 burst completion timed out request_id=$warmup_request_id"
+        [[ -n "$post_hop1_complete" ]] || sleep 0.1
+      done
+      post_hop1_pod="$(kubectl -n "$NAMESPACE" get pod -l app=post-rank-hop1 \
+        -o jsonpath='{.items[0].metadata.name}')"
+      post_hop2_complete=""
+      while [[ -z "$post_hop2_complete" ]]; do
+        post_hop2_complete="$(kubectl -n "$NAMESPACE" logs "$post_hop1_pod" -c post-rank-hop1 2>/dev/null \
+          | grep -F '"event":"pairec_post_rank_hop2_brpc_burst_complete"' \
+          | grep -F "\"request_id\":\"${warmup_request_id}\"" | tail -1 || true)"
+        (( SECONDS < warmup_deadline )) \
+          || die "warmup post-rank Hop-2 burst completion timed out request_id=$warmup_request_id"
+        [[ -n "$post_hop2_complete" ]] || sleep 0.1
+      done
+      python3 - "$post_hop1_complete" "$post_hop2_complete" <<'PY'
+import json,sys
+for line in sys.argv[1:]:
+    event=json.loads(line[line.index("{"):])
+    assert event["concurrency"]==1000,event
+    assert event["pressure_requests"]==999,event
+    assert event["pressure_success"]==999,event
+    assert event["pressure_errors"]==0,event
+    assert event["business_success"] is True,event
+    assert event["burst_valid"] is True,event
+PY
+    fi
   done
-  echo "PAIREC_BRPC_WRAPPER_FULL_WARMUP_OK requests=$WARMUP_REQUESTS generation_and_rank_drained=true"
+  echo "PAIREC_BRPC_WRAPPER_FULL_WARMUP_OK requests=$WARMUP_REQUESTS all_enabled_bursts_drained=true"
 fi
 
 for app in "$PAIREC_DEPLOYMENT" "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT" \
