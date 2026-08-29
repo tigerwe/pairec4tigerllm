@@ -66,6 +66,7 @@ POST_RANK_PAYLOAD_BYTES=${POST_RANK_PAYLOAD_BYTES:-102400}
 POST_RANK_PRESSURE_TIMEOUT_MS=${POST_RANK_PRESSURE_TIMEOUT_MS:-5000}
 POST_RANK_PRESSURE_START_QUORUM=${POST_RANK_PRESSURE_START_QUORUM:-950}
 POST_RANK_PRESSURE_START_TIMEOUT_MS=${POST_RANK_PRESSURE_START_TIMEOUT_MS:-250}
+POST_RANK_COMPLETION_TIMEOUT_SECONDS=${POST_RANK_COMPLETION_TIMEOUT_SECONDS:-20}
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 mkdir -p "$OUTPUT_DIR"
@@ -143,6 +144,8 @@ fi
   || die "RANK_BURST_PRESSURE_TIMEOUT_MS must be positive"
 [[ "$RANK_COMPLETION_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
   || die "RANK_COMPLETION_TIMEOUT_SECONDS must be positive"
+[[ "$POST_RANK_COMPLETION_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+  || die "POST_RANK_COMPLETION_TIMEOUT_SECONDS must be positive"
 [[ "$LOG_SINCE_LOOKBACK_SECONDS" =~ ^[0-9]+$ ]] \
   && (( LOG_SINCE_LOOKBACK_SECONDS <= 3600 )) \
   || die "LOG_SINCE_LOOKBACK_SECONDS must be in [0,3600]"
@@ -270,17 +273,44 @@ else
   fi
 fi
 
+latest_ready_post_rank_pod() {
+  local app=$1 pod
+  pod="$(kubectl -n "$NAMESPACE" get pod -l "app=$app" -o json | python3 -c '
+import json,sys
+app=sys.argv[1]
+items=json.load(sys.stdin).get("items",[])
+def ready(item):
+    if item.get("metadata",{}).get("deletionTimestamp"):
+        return False
+    if item.get("status",{}).get("phase") != "Running":
+        return False
+    return any(status.get("name")==app and status.get("ready") is True
+               for status in item.get("status",{}).get("containerStatuses",[]))
+candidates=[item for item in items if ready(item)]
+candidates.sort(key=lambda item:item.get("metadata",{}).get("creationTimestamp", ""))
+if candidates:
+    print(candidates[-1]["metadata"]["name"])
+' "$app")"
+  [[ -n "$pod" ]] || {
+    kubectl -n "$NAMESPACE" get pods -l "app=$app" -o wide >&2 || true
+    die "missing Ready post-rank Pod: $app"
+  }
+  printf '%s\n' "$pod"
+}
+
 capture_post_rank_cpu() {
   local phase=$1 app pod
   for app in post-rank-hop1 post-rank-hop2; do
-    pod="$(kubectl -n "$NAMESPACE" get pod -l "app=$app" -o jsonpath='{.items[0].metadata.name}')"
-    [[ -n "$pod" ]] || die "missing post-rank Pod: $app"
+    if [[ "$app" = post-rank-hop1 ]]; then pod="$POST_HOP1_POD"; else pod="$POST_HOP2_POD"; fi
     kubectl -n "$NAMESPACE" exec "$pod" -c "$app" -- /bin/sh -ec \
       'if test -f /sys/fs/cgroup/cpu.stat; then cat /sys/fs/cgroup/cpu.stat; else cat /sys/fs/cgroup/cpu/cpu.stat; fi' \
       >"$OUTPUT_DIR/${app}.cpu-stat.${phase}"
   done
 }
 if [[ "$POST_RANK_HOPS_ENABLED" = 1 ]]; then
+  POST_HOP1_POD="$(latest_ready_post_rank_pod post-rank-hop1)"
+  POST_HOP2_POD="$(latest_ready_post_rank_pod post-rank-hop2)"
+  echo "post_rank_hop1_pod=$POST_HOP1_POD post_rank_hop2_pod=$POST_HOP2_POD"
   capture_post_rank_cpu before
 fi
 
@@ -407,32 +437,48 @@ if [[ "$POST_RANK_HOPS_ENABLED" = 1 ]]; then
   echo "== Wait for measured post-rank Hop-1 and Hop-2 bursts =="
   [[ "${#RANK_REQUEST_IDS[@]}" -eq "$REQUESTS" ]] \
     || die "post-rank validation requires measured request ids"
-  POST_HOP1_POD="$(kubectl -n "$NAMESPACE" get pod -l app=post-rank-hop1 -o jsonpath='{.items[0].metadata.name}')"
-  POST_HOP2_POD="$(kubectl -n "$NAMESPACE" get pod -l app=post-rank-hop2 -o jsonpath='{.items[0].metadata.name}')"
-  post_deadline=$((SECONDS + RANK_COMPLETION_TIMEOUT_SECONDS))
+  POST_RANK_EXPECTED_PRESSURE=$((POST_RANK_BURST_CONCURRENCY - 1))
+  post_deadline=$((SECONDS + POST_RANK_COMPLETION_TIMEOUT_SECONDS))
   while true; do
     kubectl -n "$NAMESPACE" logs "$PAIREC_POD" -c pairec --since-time="$LOG_SINCE_AT" \
       >"$OUTPUT_DIR/post-rank-pairec.log"
     kubectl -n "$NAMESPACE" logs "$POST_HOP1_POD" -c post-rank-hop1 --since-time="$LOG_SINCE_AT" \
       >"$OUTPUT_DIR/post-rank-hop1.log"
-    if python3 - "$OUTPUT_DIR/post-rank-pairec.log" "$OUTPUT_DIR/post-rank-hop1.log" \
-      "${RANK_REQUEST_IDS[@]}" <<'PY'
-import json,pathlib,sys
-expected=set(sys.argv[3:]); found=[set(),set()]
-names=("pairec_post_rank_hop1_brpc_burst_complete","pairec_post_rank_hop2_brpc_burst_complete")
-for index,path in enumerate(sys.argv[1:3]):
-    for line in pathlib.Path(path).read_text(errors="replace").splitlines():
-        pos=line.find("{")
-        if pos<0: continue
-        try: event=json.loads(line[pos:])
-        except json.JSONDecodeError: continue
-        if event.get("event")==names[index] and event.get("burst_valid") is True:
-            if event.get("pressure_success")==999 and event.get("pressure_errors")==0:
-                found[index].add(event.get("request_id"))
-raise SystemExit(0 if all(expected <= item for item in found) else 1)
-PY
-    then break; fi
-    (( SECONDS < post_deadline )) || die "timed out waiting for post-rank two-hop completion"
+    completion_args=()
+    for request_id in "${RANK_REQUEST_IDS[@]}"; do
+      completion_args+=(--request-id "$request_id")
+    done
+    if python3 scripts/check_post_rank_two_hop_completion.py \
+      --pairec-log "$OUTPUT_DIR/post-rank-pairec.log" \
+      --hop1-log "$OUTPUT_DIR/post-rank-hop1.log" \
+      --expected-pressure "$POST_RANK_EXPECTED_PRESSURE" \
+      "${completion_args[@]}" --quiet
+    then
+      break
+    else
+      completion_status=$?
+    fi
+    if [[ "$completion_status" -eq 2 ]]; then
+      python3 scripts/check_post_rank_two_hop_completion.py \
+        --pairec-log "$OUTPUT_DIR/post-rank-pairec.log" \
+        --hop1-log "$OUTPUT_DIR/post-rank-hop1.log" \
+        --expected-pressure "$POST_RANK_EXPECTED_PRESSURE" \
+        "${completion_args[@]}" || true
+      die "post-rank two-hop pressure completed with an invalid terminal event"
+    fi
+    if (( SECONDS >= post_deadline )); then
+      python3 scripts/check_post_rank_two_hop_completion.py \
+        --pairec-log "$OUTPUT_DIR/post-rank-pairec.log" \
+        --hop1-log "$OUTPUT_DIR/post-rank-hop1.log" \
+        --expected-pressure "$POST_RANK_EXPECTED_PRESSURE" \
+        "${completion_args[@]}" || true
+      kubectl -n "$NAMESPACE" get pod "$POST_HOP1_POD" "$POST_HOP2_POD" -o wide >&2 || true
+      kubectl -n "$NAMESPACE" get pod "$POST_HOP1_POD" -o json \
+        >"$OUTPUT_DIR/post-rank-hop1.pod.json" 2>/dev/null || true
+      kubectl -n "$NAMESPACE" get pod "$POST_HOP2_POD" -o json \
+        >"$OUTPUT_DIR/post-rank-hop2.pod.json" 2>/dev/null || true
+      die "timed out after ${POST_RANK_COMPLETION_TIMEOUT_SECONDS}s waiting for post-rank two-hop completion"
+    fi
     sleep 0.2
   done
   kubectl -n "$NAMESPACE" logs "$POST_HOP2_POD" -c post-rank-hop2 --since-time="$LOG_SINCE_AT" \
