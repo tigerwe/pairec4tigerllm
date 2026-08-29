@@ -56,6 +56,7 @@ ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-10m}"
 COMPLETION_TIMEOUT_SECONDS="${COMPLETION_TIMEOUT_SECONDS:-30}"
 LOG_SINCE_LOOKBACK_SECONDS="${LOG_SINCE_LOOKBACK_SECONDS:-60}"
 SERVICE_READY_TIMEOUT_SECONDS="${SERVICE_READY_TIMEOUT_SECONDS:-60}"
+POST_RUN_READY_TIMEOUT_SECONDS="${POST_RUN_READY_TIMEOUT_SECONDS:-15}"
 CPU_THROTTLED_PERIOD_LIMIT_PCT="${CPU_THROTTLED_PERIOD_LIMIT_PCT:-5}"
 CPU_THROTTLED_GATE_MIN_PERIODS="${CPU_THROTTLED_GATE_MIN_PERIODS:-100}"
 
@@ -107,6 +108,8 @@ python3 -c 'import json,sys; value=json.loads(sys.argv[1]); assert isinstance(va
 [[ "$SIZE" =~ ^[1-9][0-9]*$ ]] || die "SIZE must be positive"
 [[ "$SERVICE_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
   || die "SERVICE_READY_TIMEOUT_SECONDS must be positive"
+[[ "$POST_RUN_READY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+  || die "POST_RUN_READY_TIMEOUT_SECONDS must be positive"
 [[ "$LOG_SINCE_LOOKBACK_SECONDS" =~ ^[0-9]+$ ]] \
   && (( LOG_SINCE_LOOKBACK_SECONDS <= 3600 )) \
   || die "LOG_SINCE_LOOKBACK_SECONDS must be in [0,3600]"
@@ -203,6 +206,23 @@ if not pods:
     raise SystemExit(f"no ready pod for app={sys.argv[1]}")
 print(max(pods)[1])
 ' "$app"
+}
+
+wait_ready_pod() {
+  local app="$1" timeout_seconds="$2" deadline pod
+  deadline=$((SECONDS + timeout_seconds))
+  while true; do
+    if pod="$(ready_pod "$app" 2>/dev/null)"; then
+      printf '%s\n' "$pod"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "ERROR: timed out waiting for app=$app to recover Ready after measured pressure" >&2
+      kubectl -n "$NAMESPACE" get pods -l "app=$app" -o wide >&2 || true
+      return 1
+    fi
+    sleep 0.2
+  done
 }
 
 pod_state() {
@@ -788,6 +808,8 @@ if grep -Eqi 'fallback to HTTP|fallback_to_http[^a-zA-Z0-9]+true|brpc request fa
 fi
 for app in "$PAIREC_DEPLOYMENT" "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT" \
   "$VECTOR_DEPLOYMENT" "$RANK_DEPLOYMENT"; do
+  wait_ready_pod "$app" "$POST_RUN_READY_TIMEOUT_SECONDS" >/dev/null \
+    || die "dependency did not recover Ready after measured pressure: $app"
   pod_state "$app" >"$OUTPUT_DIR/${app}.after"
   cmp -s "$OUTPUT_DIR/${app}.before" "$OUTPUT_DIR/${app}.after" \
     || die "pod identity or restart count changed: $app"

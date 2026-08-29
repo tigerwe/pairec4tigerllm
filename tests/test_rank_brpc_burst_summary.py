@@ -201,6 +201,24 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
         )
         self.assertIn("warmup Rank burst completion timed out", full_chain)
         self.assertIn("all_enabled_bursts_drained=true", full_chain)
+        self.assertIn(
+            'POST_RUN_READY_TIMEOUT_SECONDS="${POST_RUN_READY_TIMEOUT_SECONDS:-15}"',
+            full_chain,
+        )
+        self.assertIn(
+            'wait_ready_pod "$app" "$POST_RUN_READY_TIMEOUT_SECONDS"',
+            full_chain,
+        )
+        self.assertIn(
+            "dependency did not recover Ready after measured pressure",
+            full_chain,
+        )
+        self.assertLess(
+            full_chain.rindex(
+                'wait_ready_pod "$app" "$POST_RUN_READY_TIMEOUT_SECONDS"'
+            ),
+            full_chain.rindex('pod_state "$app" >"$OUTPUT_DIR/${app}.after"'),
+        )
         self.assertIn('WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"', benchmark)
         self.assertIn("requires exactly one excluded warmup request", benchmark)
         self.assertIn(
