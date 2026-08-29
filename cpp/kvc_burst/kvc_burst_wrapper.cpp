@@ -1349,7 +1349,11 @@ int Run(int argc, char** argv)
                 continue;
             }
 
-            ++pressureKeyGeneration;
+            // The in-process pressure workers derive key names from the shared
+            // prepared generation. Reusing a process-local refresh counter can
+            // make an extra refresh publish g(N+1) while workers still read gN.
+            pressureKeyGeneration
+                = pairec::kvc_burst::Load(&control.prepared_generation);
             auto refreshed = pressureKeyCount == 0;
             std::vector<std::string> refreshedKeys;
             if (pressureKeyCount > 0)

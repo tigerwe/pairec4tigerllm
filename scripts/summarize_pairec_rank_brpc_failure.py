@@ -103,6 +103,8 @@ def classify(
     wrapper_line, wrapper = parse_wrapper_line(
         "\n".join((wrapper_text, artifact_text)), request_id
     )
+    rank_kvc_events = json_events("\n".join((rank_kvc_text, artifact_text)), request_id)
+    rank_kvc_complete = last_event(rank_kvc_events, "kvc_burst_complete")
 
     request_text = "\n".join(
         part for part in (
@@ -133,10 +135,30 @@ def classify(
         reason = "no live or artifact log contains the request"
         next_action = "rerun immediately with a longer LOG_SINCE before the Pods are replaced"
     elif re.search(r"rank KVC business Get failed", rank_error_text + " " + wrapper_error, re.I):
-        classification = "RANK_KVC_BUSINESS_GET_FAILURE"
+        pressure_lanes = int((rank_kvc_complete or {}).get("pressure_lanes", 0) or 0)
+        pressure_errors = int((rank_kvc_complete or {}).get("pressure_errors", 0) or 0)
+        key_missing = bool(re.search(
+            r"Key not found|Cannot get objects from worker",
+            " ".join((rank_error_text, wrapper_error, rank_kvc_text)), re.I,
+        ))
+        if key_missing and pressure_lanes > 0 and pressure_errors == pressure_lanes:
+            classification = "RANK_KVC_KEYSET_MISSING"
+            reason = (
+                f"Rank business key and all {pressure_lanes} pressure lanes returned "
+                "missing-key errors"
+            )
+            next_action = (
+                "refresh and verify the Rank business key and pressure generation before "
+                "warmup; do not change BRPC timeouts"
+            )
+        else:
+            classification = "RANK_KVC_BUSINESS_GET_FAILURE"
+            reason = rank_error_text or wrapper_error
+            next_action = (
+                "inspect rank-kvc-request.log and rank-wrapper-request.log; "
+                "do not change BRPC timeouts"
+            )
         confidence = "high"
-        reason = rank_error_text or wrapper_error
-        next_action = "inspect rank-kvc-request.log and rank-wrapper-request.log; do not change BRPC timeouts"
     elif rank_error_text and re.search(r"post-rank", rank_error_text, re.I):
         if re.search(r"pressure start marker timed out", rank_error_text, re.I):
             classification = "POST_RANK_PRESSURE_MARKER_FAILURE"
@@ -239,6 +261,7 @@ def classify(
             "adapter_request_found": request_id in adapter_text,
             "backend_request_found": request_id in backend_text,
             "rank_kvc_request_found": request_id in rank_kvc_text,
+            "rank_kvc_complete_event": rank_kvc_complete,
             "post_hop1_business_event": post_hop1_business,
             "post_hop1_complete_event": post_hop1_complete,
             "post_hop2_business_event": post_hop2_business,

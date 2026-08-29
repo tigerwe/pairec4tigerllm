@@ -42,9 +42,11 @@ bool ParseArgs(int argc, char** argv, Config* config) {
     }
   }
   const bool control_valid = config->control.empty() || config->control == "arm" ||
-      config->control == "disarm" || config->control == "status";
+      config->control == "disarm" || config->control == "status" ||
+      config->control == "rank-kvc-refresh";
   return !config->server.empty() && control_valid &&
          (config->service == "vector" || config->service == "rank") &&
+         (config->control != "rank-kvc-refresh" || config->service == "rank") &&
          config->timeout_ms > 0;
 }
 
@@ -55,7 +57,7 @@ int main(int argc, char** argv) {
   if (!ParseArgs(argc, argv, &config)) {
     std::cerr << "Usage: " << argv[0]
               << " --server=host:port --service=vector|rank [--timeout_ms=1000]"
-              << " [--control=arm|disarm|status]"
+              << " [--control=arm|disarm|status|rank-kvc-refresh]"
               << std::endl;
     return 2;
   }
@@ -86,8 +88,9 @@ int main(int argc, char** argv) {
     stub.Health(&controller, &request, &response, nullptr);
   }
   const std::string expected_status = config.control.empty() ? "healthy" :
+      (config.control == "rank-kvc-refresh" ? "rank-kvc-ready" :
       (config.control == "disarm" ? "disarmed" :
-       (config.control == "arm" ? "armed" : response.status()));
+       (config.control == "arm" ? "armed" : response.status())));
   if (controller.Failed() || response.code() != 200 ||
       response.status() != expected_status ||
       !response.has_trace() || response.trace().context().request_id() != "pipeline-health") {

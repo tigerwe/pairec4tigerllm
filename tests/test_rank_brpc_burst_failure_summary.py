@@ -109,6 +109,26 @@ class RankBurstFailureSummaryTest(unittest.TestCase):
         result = self.summarize(events, wrapper=wrapper, rank_kvc="rid-1 timeout")
         self.assertEqual(result["classification"], "RANK_KVC_BUSINESS_GET_FAILURE")
 
+    def test_classifies_missing_rank_kvc_business_and_pressure_keyset(self):
+        events = [{
+            "event": "deepfm_rank_error", "request_id": "rid-1",
+            "error": "rank KVC business Get failed: Key not found",
+        }]
+        wrapper = (
+            "[brpc-rank-burst-wrapper] method=Rank request_id=rid-1 code=500 "
+            "wrapper_total_ms=905 backend_rpc_ms=0 rank_kvc_success=false "
+            "error=Key not found"
+        )
+        rank_kvc = json.dumps({
+            "event": "kvc_burst_complete", "request_id": "rid-1",
+            "pressure_lanes": 31, "pressure_errors": 31,
+            "business_success": False,
+        })
+        result = self.summarize(events, wrapper=wrapper, rank_kvc=rank_kvc)
+        self.assertEqual(result["classification"], "RANK_KVC_KEYSET_MISSING")
+        self.assertIn("all 31 pressure lanes", result["reason"])
+        self.assertIn("refresh and verify", result["next_action"])
+
     def test_classifies_post_rank_marker_failure_after_rank(self):
         events = [
             {

@@ -27,6 +27,9 @@ class RankKvcWrapperTest(unittest.TestCase):
             "rank KVC business Get failed",
             "rank_kvc_business_get_complete",
             "rank_kvc_preflight_complete",
+            "rank_kvc_business_refresh_complete",
+            "RankKvcGetResult RefreshBusinessKey()",
+            "std::lock_guard<std::mutex> lock(business_mutex_)",
             "registerInProcessPressureClient",
             "response->mutable_trace()->set_total_us",
             'startup_stage = "rank_kvc_init"',
@@ -37,6 +40,23 @@ class RankKvcWrapperTest(unittest.TestCase):
         self.assertIn("expectedBusinessGets() == 1U ? lanes", proxy)
         self.assertIn("expectedBusinessGets() == 2U && started == 1U", proxy)
         self.assertIn("expectedGets == 2U", proxy)
+
+    def test_rank_kvc_refresh_uses_shared_prepared_generation(self):
+        sidecar = (ROOT / "cpp/kvc_burst/kvc_burst_wrapper.cpp").read_text()
+        client = (ROOT / "cpp/brpc_gateway/pipeline_service_client.cpp").read_text()
+        contention = (ROOT / "scripts/benchmark_brpc_kvc_contention.sh").read_text()
+        combined = (
+            ROOT / "scripts/validate_pairec_brpc_wrapper_kvc_combined.sh"
+        ).read_text()
+        self.assertIn("Load(&control.prepared_generation)", sidecar)
+        self.assertNotIn("++pressureKeyGeneration;", sidecar)
+        self.assertIn('config->control == "rank-kvc-refresh"', client)
+        self.assertIn("--control=rank-kvc-refresh", contention)
+        self.assertIn("rank-kvc-business-refresh-before-warmup.txt", combined)
+        self.assertLess(
+            contention.index("--control=rank-kvc-refresh"),
+            contention.index("--control_action=refresh-and-arm"),
+        )
 
     def test_rank_kvc_sidecar_is_independent_and_exact_shape(self):
         path = ROOT / "k8s/deployment-deepfm-rank-burst-wrapper-worker1.yaml"

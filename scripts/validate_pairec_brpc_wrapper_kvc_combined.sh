@@ -217,6 +217,17 @@ NAMESPACE="$NAMESPACE" DEPLOYMENT=inference-brpc-trtllm \
   | tee "$OUTPUT_DIR/kvc-overlay.log"
 
 echo "== Deploy preconnected BRPC Wrapper full chain =="
+if [[ "$RANK_KVC_ENABLED" = 1 ]]; then
+  RANK_KVC_POD="$(kubectl -n "$NAMESPACE" get pod -l "app=$RANK_DEPLOYMENT" \
+    --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
+  [[ -n "$RANK_KVC_POD" ]] || die "Rank KVC Wrapper Pod not found"
+  echo "== Refresh and verify Rank KVC business key before full-chain warmup =="
+  kubectl -n "$NAMESPACE" exec "$RANK_KVC_POD" -c rank-burst-wrapper -- \
+    /opt/pairec-brpc/bin/brpc_pipeline_client \
+      --server=127.0.0.1:18213 --service=rank --timeout_ms=3000 \
+      --control=rank-kvc-refresh \
+    | tee "$OUTPUT_DIR/rank-kvc-business-refresh-before-warmup.txt"
+fi
 set +e
 NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
   WRAPPER_ENDPOINT="$WRAPPER_ENDPOINT" \

@@ -282,6 +282,10 @@ kubectl -n "$NAMESPACE" logs "$WRAPPER_POD" -c rank-burst-wrapper --tail=200 \
   | tail -1 | tee "$OUTPUT_DIR/rank-kvc-preflight.json"
 kubectl -n "$NAMESPACE" exec "$WRAPPER_POD" -c rank-burst-wrapper -- \
   /opt/pairec-brpc/bin/brpc_pipeline_client --server=127.0.0.1:18213 --service=rank --timeout_ms=1000
+kubectl -n "$NAMESPACE" exec "$WRAPPER_POD" -c rank-burst-wrapper -- \
+  /opt/pairec-brpc/bin/brpc_pipeline_client --server=127.0.0.1:18213 --service=rank \
+    --timeout_ms=3000 --control=rank-kvc-refresh \
+  | tee "$OUTPUT_DIR/rank-kvc-business-refresh.txt"
 
 echo "DEEPFM_RANK_BURST_WORKER1_DEPLOYMENT_OK"
 echo "RANK_KVC_WRAPPER_READY concurrency=$RANK_KVC_CONCURRENCY object_size_bytes=8388608 shared_client=true"

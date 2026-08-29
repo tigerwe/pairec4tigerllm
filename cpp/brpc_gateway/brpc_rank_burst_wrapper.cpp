@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
@@ -288,7 +289,39 @@ class RankKvcClient {
 
   bool enabled() const { return enabled_; }
 
+  RankKvcGetResult RefreshBusinessKey() {
+    RankKvcGetResult result;
+    if (!enabled_) {
+      result.error = "Rank KVC is disabled";
+      return result;
+    }
+#ifdef PAIREC_ENABLE_DATASYSTEM_KV_PROBE
+    std::lock_guard<std::mutex> lock(business_mutex_);
+    butil::Timer timer;
+    timer.start();
+    datasystem::SetParam param;
+    param.writeMode = datasystem::WriteMode::NONE_L2_CACHE_EVICT;
+    param.ttlSecond = static_cast<uint32_t>(config_.rank_kvc_ttl_sec);
+    auto status = client_->Set(
+        config_.rank_kvc_business_key, datasystem::StringView(value_), param);
+    if (status.IsError()) {
+      timer.stop();
+      result.elapsed_ms = timer.m_elapsed();
+      result.error = status.ToString();
+      return result;
+    }
+    result = Get(config_.rank_kvc_business_key,
+                 config_.rank_kvc_business_timeout_ms, true);
+    timer.stop();
+    result.elapsed_ms = timer.m_elapsed();
+#else
+    result.error = "DataSystem support is not compiled";
+#endif
+    return result;
+  }
+
   RankKvcGetResult BusinessGet(const std::string& request_id) {
+    std::lock_guard<std::mutex> lock(business_mutex_);
     auto token = pairec::kvc_burst::beginBusinessGet(
         request_id, pairec::kvc_burst::BusinessApi::kGet, 1U);
     auto result = Get(config_.rank_kvc_business_key,
@@ -349,6 +382,7 @@ class RankKvcClient {
   WrapperConfig config_;
   std::string value_;
   std::string value_sha256_;
+  std::mutex business_mutex_;
 #ifdef PAIREC_ENABLE_DATASYSTEM_KV_PROBE
   std::unique_ptr<datasystem::KVClient> client_;
 #endif
@@ -534,6 +568,29 @@ class RankBurstWrapper final : public pairec::pipeline::DeepFMRankService {
               pairec::pipeline::HealthResponse* response,
               google::protobuf::Closure* done) override {
     brpc::ClosureGuard guard(done);
+    constexpr char kRankKvcRefresh[]
+        = "PAIREC_RETURN_CONTROL_V1:rank-kvc-refresh";
+    if (request->payload_padding() == kRankKvcRefresh) {
+      auto refreshed = rank_kvc_->RefreshBusinessKey();
+      response->set_code(refreshed.ok ? 200 : 500);
+      response->set_status(refreshed.ok ? "rank-kvc-ready" : refreshed.error);
+      response->set_backend("brpc_rank_burst_wrapper");
+      auto* trace = response->mutable_trace();
+      if (request->has_context()) trace->mutable_context()->CopyFrom(request->context());
+      trace->set_component("brpc_rank_burst_wrapper");
+      trace->set_protocol("brpc");
+      trace->set_status(refreshed.ok ? "ok" : "error");
+      trace->set_total_us(static_cast<int64_t>(refreshed.elapsed_ms * 1000.0));
+      trace->set_attribution_complete(true);
+      std::cout << "{\"event\":\"rank_kvc_business_refresh_complete\""
+                << ",\"success\":" << (refreshed.ok ? "true" : "false")
+                << ",\"elapsed_ms\":" << refreshed.elapsed_ms
+                << ",\"bytes\":" << refreshed.bytes
+                << ",\"error\":\""
+                << (refreshed.error.empty() ? "none" : refreshed.error)
+                << "\"}" << std::endl;
+      return;
+    }
     std::string action;
     if (pairec::reverse_burst::ParseControl(request->payload_padding(), &action)) {
       std::string error;

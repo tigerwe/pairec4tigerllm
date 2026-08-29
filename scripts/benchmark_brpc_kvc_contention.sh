@@ -1005,6 +1005,13 @@ arm_rank_kvc_burst() {
   local pod
   pod="$(rank_kvc_pod)"
   [ -n "$pod" ] || { echo "Rank KVC Pod not found" >&2; return 1; }
+  kubectl -n "$NAMESPACE" exec "$pod" -c rank-burst-wrapper -- \
+    /opt/pairec-brpc/bin/brpc_pipeline_client \
+      --server=127.0.0.1:18213 \
+      --service=rank \
+      --timeout_ms=3000 \
+      --control=rank-kvc-refresh \
+    >>"${round_dir}/rank-kvc-burst-control.log" 2>&1
   kubectl -n "$NAMESPACE" exec "$pod" -c "$RANK_KVC_CONTAINER" -- \
     /opt/pairec-brpc/bin/kvc_burst_wrapper \
       --control_action=refresh-and-arm \
