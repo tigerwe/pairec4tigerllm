@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1920, initial-scale=1">
+<title>PaiRec4TigerLLM 当前架构图 2026-08-29</title>
+<style>
+  html, body { margin: 0; width: 1920px; height: 1285px; overflow: hidden; background: #f3f6fa; }
+  body, text { font-family: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif; }
+  svg { display: block; width: 1920px; height: 1285px; }
+  text { letter-spacing: 0; }
+  .zone { stroke-width: 2; stroke-dasharray: 9 7; }
+  .zone-title { font-size: 18px; font-weight: 700; fill: #263548; }
+  .node { fill: #fff; stroke-width: 2; filter: url(#shadow); }
+  .title { font-size: 17px; font-weight: 700; fill: #172435; }
+  .sub { font-size: 13px; fill: #526579; }
+  .tiny { font-size: 11.5px; fill: #6c7d90; }
+  .label { font-size: 12px; font-weight: 700; }
+  .chip { fill: #f6f9fd; stroke: #b7c6d8; stroke-width: 1.4; }
+  .metric-head { font-size: 13px; font-weight: 700; fill: #253447; }
+  .metric { font-size: 13px; fill: #405166; }
+  .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+</style>
+</head>
+<body>
+<svg viewBox="0 0 1920 1285" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="diagramTitle diagramDesc">
+<title id="diagramTitle">PaiRec4TigerLLM 当前端到端架构</title>
+<desc id="diagramDesc">展示 master 与 worker1 上的生成式召回、向量召回、DeepFM Rank、DataSystem KVC、post-rank 两跳 BRPC 并发和最终重排。</desc>
+<defs>
+  <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+    <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#73869c" flood-opacity="0.22"/>
+  </filter>
+  <marker id="businessArrow" markerWidth="11" markerHeight="9" refX="10" refY="4.5" orient="auto"><path d="M0,0 L11,4.5 L0,9 z" fill="#2563eb"/></marker>
+  <marker id="pressureArrow" markerWidth="11" markerHeight="9" refX="10" refY="4.5" orient="auto"><path d="M0,0 L11,4.5 L0,9 z" fill="#e8590c"/></marker>
+  <marker id="kvArrow" markerWidth="11" markerHeight="9" refX="10" refY="4.5" orient="auto"><path d="M0,0 L11,4.5 L0,9 z" fill="#079669"/></marker>
+  <marker id="controlArrow" markerWidth="11" markerHeight="9" refX="10" refY="4.5" orient="auto"><path d="M0,0 L11,4.5 L0,9 z" fill="#7c3aed"/></marker>
+</defs>
+
+<!-- Header -->
+<text x="42" y="48" style="font-size:30px;font-weight:800;fill:#172435;">PaiRec4TigerLLM 当前端到端架构</text>
+<text x="42" y="76" style="font-size:14px;fill:#526579;">pairec-brpc-observability · 2026-08-29 · 生成式 c1000 + KVC c32 + Rank c1000/KVC c32 + master 本地 post-rank 两跳 c1000</text>
+<g transform="translate(42,103)">
+  <line x1="0" y1="0" x2="34" y2="0" stroke="#2563eb" stroke-width="3"/><text x="43" y="4" class="tiny">业务路径</text>
+  <line x1="132" y1="0" x2="166" y2="0" stroke="#e8590c" stroke-width="3" stroke-dasharray="8 5"/><text x="175" y="4" class="tiny">并发压力</text>
+  <line x1="270" y1="0" x2="304" y2="0" stroke="#079669" stroke-width="3"/><text x="313" y="4" class="tiny">KVC 数据面</text>
+  <line x1="430" y1="0" x2="464" y2="0" stroke="#7c3aed" stroke-width="3" stroke-dasharray="3 5"/><text x="473" y="4" class="tiny">控制与观测</text>
+</g>
+<rect x="1390" y="34" width="488" height="70" rx="8" fill="#ffffff" stroke="#c8d4e2" stroke-width="1.5"/>
+<text x="1410" y="58" class="metric-head">本轮组合压力 n1</text>
+<text x="1410" y="80" class="metric">E2E <tspan font-weight="700" fill="#172435">425.027 ms</tspan>　生成式 <tspan font-weight="700">284.351 ms</tspan>　Rank <tspan font-weight="700">118.874 ms</tspan></text>
+<text x="1410" y="98" class="tiny">post-rank 两跳 13.328 ms · 两层 999/999 · CPU throttling 0</text>
+
+<!-- Physical zones -->
+<rect x="175" y="132" width="990" height="930" rx="12" class="zone" fill="#eaf2fc" fill-opacity="0.72" stroke="#84afe5"/>
+<text x="198" y="162" class="zone-title">K8s master · 141.61.91.189</text>
+<rect x="1195" y="132" width="683" height="930" rx="12" class="zone" fill="#fff3e8" fill-opacity="0.72" stroke="#e6a86b"/>
+<text x="1218" y="162" class="zone-title">worker1 · 141.61.91.188 · L40S</text>
+
+<!-- Client -->
+<g>
+  <rect x="28" y="245" width="122" height="94" rx="8" class="node" stroke="#65758a"/>
+  <text x="89" y="277" text-anchor="middle" class="title">客户端</text>
+  <text x="89" y="298" text-anchor="middle" class="sub">组合压力 replay</text>
+  <text x="89" y="319" text-anchor="middle" class="tiny">HTTP :18080</text>
+</g>
+
+<!-- PaiRec -->
+<g>
+  <rect x="215" y="190" width="900" height="210" rx="9" class="node" stroke="#2563eb"/>
+  <text x="238" y="219" class="title">PaiRec Go 推荐服务</text>
+  <text x="238" y="240" class="tiny">pairec-brpc-observed-wrapper · request_id 全链路归因 · 失败关闭 · 无 HTTP fallback</text>
+
+  <rect x="238" y="262" width="174" height="72" rx="7" class="chip"/>
+  <text x="325" y="287" text-anchor="middle" class="label" fill="#1d4ed8">并行召回</text>
+  <text x="325" y="307" text-anchor="middle" class="tiny">向量 ∥ 生成式</text>
+  <text x="325" y="324" text-anchor="middle" class="tiny">merge 50 candidates</text>
+
+  <line x1="412" y1="298" x2="445" y2="298" stroke="#2563eb" stroke-width="2.4" marker-end="url(#businessArrow)"/>
+  <rect x="450" y="262" width="174" height="72" rx="7" class="chip"/>
+  <text x="537" y="287" text-anchor="middle" class="label" fill="#1d4ed8">DeepFM Rank</text>
+  <text x="537" y="307" text-anchor="middle" class="tiny">BRPC c1000</text>
+  <text x="537" y="324" text-anchor="middle" class="tiny">KVC c32 · 8 MiB</text>
+
+  <line x1="624" y1="298" x2="657" y2="298" stroke="#2563eb" stroke-width="2.4" marker-end="url(#businessArrow)"/>
+  <rect x="662" y="262" width="210" height="72" rx="7" fill="#f5f0ff" stroke="#9d79e8" stroke-width="1.5"/>
+  <text x="767" y="287" text-anchor="middle" class="label" fill="#6d28d9">Post-rank 两跳</text>
+  <text x="767" y="307" text-anchor="middle" class="tiny">master 本地 · 两层 c1000</text>
+  <text x="767" y="324" text-anchor="middle" class="tiny">顺序与 SHA256 不变</text>
+
+  <line x1="872" y1="298" x2="905" y2="298" stroke="#2563eb" stroke-width="2.4" marker-end="url(#businessArrow)"/>
+  <rect x="910" y="262" width="174" height="72" rx="7" class="chip"/>
+  <text x="997" y="287" text-anchor="middle" class="label" fill="#1d4ed8">来源配额重排</text>
+  <text x="997" y="307" text-anchor="middle" class="tiny">source_quota_tail</text>
+  <text x="997" y="324" text-anchor="middle" class="tiny">最终返回</text>
+
+  <rect x="238" y="350" width="846" height="32" rx="6" fill="#fff4e8" stroke="#eda25d" stroke-width="1.3"/>
+  <text x="661" y="371" text-anchor="middle" class="tiny" fill="#9a4511">三个独立 BurstCoordinator：生成式 c1000 · Rank c1000 · Post-rank Hop-1 c1000</text>
+</g>
+
+<!-- Client arrow -->
+<line x1="150" y1="292" x2="211" y2="292" stroke="#2563eb" stroke-width="3" marker-end="url(#businessArrow)"/>
+
+<!-- Master vector and DataSystem -->
+<g>
+  <rect x="235" y="455" width="300" height="120" rx="8" class="node" stroke="#2563eb"/>
+  <text x="257" y="484" class="title">向量召回</text>
+  <text x="257" y="507" class="sub">vector-recall-brpc → Milvus</text>
+  <text x="257" y="529" class="tiny">BRPC 业务调用 · 与生成式并行</text>
+  <text x="257" y="550" class="tiny">本轮 6.860 ms</text>
+</g>
+<g>
+  <path d="M680,470 a170,22 0 0 1 340,0 v104 a170,22 0 0 1 -340,0 z" fill="#e7f7ef" stroke="#079669" stroke-width="2.2"/>
+  <ellipse cx="850" cy="470" rx="170" ry="22" fill="#d3f0e1" stroke="#079669" stroke-width="2.2"/>
+  <text x="850" y="512" text-anchor="middle" class="title">DataSystem 25G worker</text>
+  <text x="850" y="535" text-anchor="middle" class="sub">master hostNetwork :18482</text>
+  <text x="850" y="557" text-anchor="middle" class="tiny">生成式 KVC：3 Set + 2 Get · Rank KVC：1 business + 31 pressure Get</text>
+</g>
+
+<!-- Recall to vector -->
+<path d="M325,334 L325,420 L385,420 L385,451" fill="none" stroke="#2563eb" stroke-width="2.5" marker-end="url(#businessArrow)"/>
+<text x="338" y="414" class="tiny" fill="#1d4ed8">Vector BRPC</text>
+
+<!-- Worker generation plane -->
+<g>
+  <rect x="1230" y="190" width="610" height="260" rx="9" class="node" stroke="#2563eb"/>
+  <text x="1254" y="219" class="title">生成式召回数据面</text>
+  <text x="1254" y="240" class="tiny">worker1 hostNetwork · 1 路业务与 999 路压力同步起跑</text>
+
+  <rect x="1255" y="270" width="245" height="126" rx="7" fill="#fff4e8" stroke="#e8590c" stroke-width="1.7"/>
+  <text x="1274" y="296" class="label" fill="#9a4511">brpc_burst_wrapper :18103</text>
+  <text x="1274" y="319" class="tiny">1× Recommend → :18100</text>
+  <text x="1274" y="340" class="tiny" fill="#c2410c">999× Health 本地终结</text>
+  <text x="1274" y="361" class="tiny">100 KiB · 预连接 2000</text>
+  <text x="1274" y="382" class="tiny">业务不等待压力尾部</text>
+
+  <rect x="1550" y="270" width="265" height="126" rx="7" fill="#eaf8f2" stroke="#079669" stroke-width="1.7"/>
+  <text x="1569" y="296" class="label" fill="#047857">TRT-LLM C++ inference :18100</text>
+  <text x="1569" y="319" class="tiny">Qwen3-0.6B · 32 output tokens</text>
+  <text x="1569" y="340" class="tiny">runner 269.469 ms</text>
+  <text x="1569" y="361" class="tiny">KVC c32 · shared KVClient</text>
+  <text x="1569" y="382" class="tiny">31 路压力在业务开始时在途</text>
+
+  <line x1="1500" y1="333" x2="1546" y2="333" stroke="#2563eb" stroke-width="2.8" marker-end="url(#businessArrow)"/>
+</g>
+
+<!-- Generation cross-node arrows -->
+<path d="M325,262 L325,180 L1205,180 L1205,305 L1251,305" fill="none" stroke="#2563eb" stroke-width="3" marker-end="url(#businessArrow)"/>
+<text x="880" y="172" class="label" fill="#1d4ed8">1× Recommend</text>
+<path d="M350,262 L350,165 L1182,165 L1182,355 L1251,355" fill="none" stroke="#e8590c" stroke-width="2.8" stroke-dasharray="8 5" marker-end="url(#pressureArrow)"/>
+<text x="720" y="157" class="label" fill="#b54708">999× Health · 100 KiB</text>
+
+<!-- Generation KVC -->
+<path d="M1682,396 L1682,470 L1025,470" fill="none" stroke="#079669" stroke-width="3" marker-end="url(#kvArrow)"/>
+<text x="1285" y="462" class="label" fill="#047857">生成式 KVC c32 · 3.5 MiB</text>
+
+<!-- Worker rank plane -->
+<g>
+  <rect x="1230" y="515" width="610" height="285" rx="9" class="node" stroke="#2563eb"/>
+  <text x="1254" y="544" class="title">DeepFM Rank 数据面</text>
+  <text x="1254" y="565" class="tiny">worker1 · Rank BRPC c1000 与 Rank KVC c32 同轮组合压力</text>
+
+  <rect x="1255" y="592" width="265" height="156" rx="7" fill="#fff4e8" stroke="#e8590c" stroke-width="1.7"/>
+  <text x="1274" y="618" class="label" fill="#9a4511">rank-burst-wrapper :18213</text>
+  <text x="1274" y="641" class="tiny">1× Rank + 999× Health</text>
+  <text x="1274" y="662" class="tiny">Health 本地终结 · 999/999</text>
+  <text x="1274" y="683" class="tiny">业务前置 KVC Get：8 MiB</text>
+  <text x="1274" y="704" class="tiny">KVC：1 business + 31 pressure</text>
+  <text x="1274" y="725" class="tiny">rank service 110.499 ms</text>
+
+  <rect x="1570" y="612" width="245" height="112" rx="7" fill="#f6f9fd" stroke="#65758a" stroke-width="1.7"/>
+  <text x="1590" y="640" class="label">DeepFM backend :18211</text>
+  <text x="1590" y="663" class="tiny">50 candidates · engineering model</text>
+  <text x="1590" y="684" class="tiny">顺序更新后返回 PaiRec</text>
+  <text x="1590" y="705" class="tiny">backend RPC 8 ms</text>
+  <line x1="1520" y1="668" x2="1566" y2="668" stroke="#2563eb" stroke-width="2.8" marker-end="url(#businessArrow)"/>
+</g>
+
+<!-- Rank cross-node arrows -->
+<path d="M537,334 L537,610 L1200,610 L1200,635 L1251,635" fill="none" stroke="#2563eb" stroke-width="3" marker-end="url(#businessArrow)"/>
+<text x="930" y="600" class="label" fill="#1d4ed8">1× Rank</text>
+<path d="M565,334 L565,630 L1180,630 L1180,690 L1251,690" fill="none" stroke="#e8590c" stroke-width="2.8" stroke-dasharray="8 5" marker-end="url(#pressureArrow)"/>
+<text x="890" y="650" class="label" fill="#b54708">999× Health · 100 KiB</text>
+
+<!-- Rank KVC -->
+<path d="M1255,730 L1150,730 L1150,590 L1020,590" fill="none" stroke="#079669" stroke-width="3" marker-end="url(#kvArrow)"/>
+<text x="1025" y="620" class="label" fill="#047857">Rank KVC c32 · 8 MiB</text>
+
+<!-- Post-rank two-hop master local -->
+<g>
+  <rect x="215" y="705" width="900" height="300" rx="9" class="node" stroke="#7c3aed"/>
+  <text x="238" y="736" class="title">Post-rank master 本地两跳 BRPC</text>
+  <text x="238" y="758" class="tiny">Rank 返回后执行，候选数量、顺序与 SHA256 严格保持；完成后进入来源配额重排</text>
+
+  <rect x="245" y="795" width="245" height="150" rx="7" fill="#f5f0ff" stroke="#7c3aed" stroke-width="1.7"/>
+  <text x="264" y="821" class="label" fill="#6d28d9">PaiRec Go 外层 coordinator</text>
+  <text x="264" y="844" class="tiny">固定 session 0：business</text>
+  <text x="264" y="865" class="tiny">session 1..999：pressure</text>
+  <text x="264" y="886" class="tiny">只等待 business-start marker</text>
+  <text x="264" y="907" class="tiny">不等待压力尾部排空</text>
+  <text x="264" y="928" class="tiny">本轮业务 13.219 ms</text>
+
+  <rect x="550" y="795" width="235" height="150" rx="7" fill="#fff4e8" stroke="#e8590c" stroke-width="1.7"/>
+  <text x="569" y="821" class="label" fill="#9a4511">Hop-1 :18311</text>
+  <text x="569" y="844" class="tiny">brpc_post_rank_hop</text>
+  <text x="569" y="865" class="tiny" fill="#c2410c">外层 999× Health 本地终结</text>
+  <text x="569" y="886" class="tiny">业务触发 C++ 内层 coordinator</text>
+  <text x="569" y="907" class="tiny">独立业务 channel + 999 队列</text>
+  <text x="569" y="928" class="tiny">front BRPC 8.514 ms</text>
+
+  <rect x="845" y="795" width="240" height="150" rx="7" fill="#eaf8f2" stroke="#079669" stroke-width="1.7"/>
+  <text x="864" y="821" class="label" fill="#047857">Hop-2 :18312 / :18313</text>
+  <text x="864" y="844" class="tiny">:18312 business Rank</text>
+  <text x="864" y="865" class="tiny" fill="#c2410c">:18313 pressure Health</text>
+  <text x="864" y="886" class="tiny">候选原样返回</text>
+  <text x="864" y="907" class="tiny">front BRPC 0.448 ms</text>
+  <text x="864" y="928" class="tiny">service 0.033 ms</text>
+
+  <line x1="490" y1="840" x2="546" y2="840" stroke="#2563eb" stroke-width="3" marker-end="url(#businessArrow)"/>
+  <line x1="490" y1="895" x2="546" y2="895" stroke="#e8590c" stroke-width="2.7" stroke-dasharray="8 5" marker-end="url(#pressureArrow)"/>
+  <line x1="785" y1="840" x2="841" y2="840" stroke="#2563eb" stroke-width="3" marker-end="url(#businessArrow)"/>
+  <line x1="785" y1="895" x2="841" y2="895" stroke="#e8590c" stroke-width="2.7" stroke-dasharray="8 5" marker-end="url(#pressureArrow)"/>
+  <text x="518" y="829" text-anchor="middle" class="tiny" fill="#1d4ed8">1 business</text>
+  <text x="518" y="918" text-anchor="middle" class="tiny" fill="#b54708">999 pressure</text>
+  <text x="813" y="829" text-anchor="middle" class="tiny" fill="#1d4ed8">1 business</text>
+  <text x="813" y="918" text-anchor="middle" class="tiny" fill="#b54708">999 pressure</text>
+
+  <rect x="245" y="965" width="840" height="24" rx="5" fill="#edf8f3"/>
+  <text x="665" y="982" text-anchor="middle" class="tiny" fill="#047857">实测：两跳总计 13.328 ms · Hop-1 999/999 · Hop-2 999/999 · 两 Pod CPU throttling 0</text>
+</g>
+
+<!-- Post-rank stage links -->
+<path d="M767,334 L767,420 L640,420 L640,680 L665,680 L665,701" fill="none" stroke="#2563eb" stroke-width="2.8" marker-end="url(#businessArrow)"/>
+<path d="M1085,855 L1135,855 L1135,420 L997,420 L997,338" fill="none" stroke="#2563eb" stroke-width="2.8" marker-end="url(#businessArrow)"/>
+<text x="1024" y="842" class="tiny" fill="#1d4ed8">return candidates</text>
+
+<!-- Control/observation -->
+<path d="M1090,1005 L1168,1005 L1168,835 L1535,835 L1535,804" fill="none" stroke="#7c3aed" stroke-width="2.2" stroke-dasharray="3 5" marker-end="url(#controlArrow)"/>
+<text x="1210" y="828" class="tiny" fill="#6d28d9">request_id 事件、pressure complete、CPU/KVC runtime 门禁</text>
+
+<!-- Footer timeline -->
+<rect x="28" y="1090" width="1850" height="80" rx="8" fill="#ffffff" stroke="#c8d4e2" stroke-width="1.5"/>
+<text x="50" y="1118" class="metric-head">同步业务时间线</text>
+<text x="50" y="1143" class="metric mono">HTTP → [vector ∥ generation 284.351] → DeepFM Rank 118.874 → post-rank Hop-1 → Hop-2 13.328 → rerank 0.025 → response</text>
+<text x="50" y="1163" class="tiny">橙色压力与对应业务重叠，但业务返回不等待 999 条 Health 尾部；脚本在请求后按 request_id 验证两层 999/999、零错误、零重启和零 OOM。</text>
+</svg>
+</body>
+</html>
