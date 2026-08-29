@@ -29,6 +29,10 @@ if [[ "$BUILD_HOP_IMAGE" = 1 ]]; then
     bash scripts/build_brpc_inference_image.sh "$HOP_BUILD_IMAGE" \
       "$OUTPUT_DIR/post-rank-two-hop.tar" "$BASE_IMAGE" \
     | tee "$OUTPUT_DIR/hop-build.log"
+else
+  command -v docker >/dev/null 2>&1 || die "missing command: docker"
+  docker image inspect "$HOP_BUILD_IMAGE" >/dev/null 2>&1 || die \
+    "BUILD_HOP_IMAGE=0 requires the exact local image $HOP_BUILD_IMAGE; either set BUILD_HOP_IMAGE=1 or set both HOP_BUILD_IMAGE and SOURCE_COMMIT to an existing matching build"
 fi
 
 echo "== Deploy fixed master-local Hop-2 then Hop-1 =="

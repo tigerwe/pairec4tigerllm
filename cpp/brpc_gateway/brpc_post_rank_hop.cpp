@@ -195,15 +195,31 @@ int main(int argc, char** argv) {
   PostRankHopService service(config.role, config.role == "hop1" ? &burst : nullptr);
   std::unique_ptr<PostRankHopService> pressure_service;
   brpc::Server server;
-  if (server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) return 1;
+  if (server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
+    std::cerr << "Failed to register post-rank " << config.role
+              << " business service" << std::endl;
+    return 1;
+  }
   brpc::ServerOptions options;
   options.idle_timeout_sec = config.idle_timeout_sec;
-  if (server.Start(config.listen_port, &options) != 0) return 1;
+  if (server.Start(config.listen_port, &options) != 0) {
+    std::cerr << "Failed to start post-rank " << config.role
+              << " business listener on port " << config.listen_port << std::endl;
+    return 1;
+  }
   brpc::Server pressure_server;
   if (config.role == "hop2") {
     pressure_service = std::make_unique<PostRankHopService>(config.role, nullptr);
-    if (pressure_server.AddService(pressure_service.get(), brpc::SERVER_DOESNT_OWN_SERVICE) != 0) return 1;
-    if (pressure_server.Start(config.pressure_listen_port, &options) != 0) return 1;
+    if (pressure_server.AddService(
+            pressure_service.get(), brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
+      std::cerr << "Failed to register post-rank hop2 pressure service" << std::endl;
+      return 1;
+    }
+    if (pressure_server.Start(config.pressure_listen_port, &options) != 0) {
+      std::cerr << "Failed to start post-rank hop2 pressure listener on port "
+                << config.pressure_listen_port << std::endl;
+      return 1;
+    }
     std::cout << "post-rank hop2 pressure listening on 0.0.0.0:"
               << config.pressure_listen_port << std::endl;
   }

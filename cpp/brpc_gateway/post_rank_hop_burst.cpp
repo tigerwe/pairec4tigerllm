@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -110,8 +111,10 @@ class BurstCoordinator::Impl {
     for (int lane = 0; lane < config.concurrency; ++lane) {
       workers_.push_back(std::make_unique<Worker>());
     }
-    if (!ConnectWorker(*workers_[0], 0)) {
-      *error = "post-rank business channel preconnect failed";
+    std::string business_connect_error;
+    if (!ConnectWorker(*workers_[0], 0, &business_connect_error)) {
+      *error = "post-rank business channel preconnect failed: " +
+          business_connect_error;
       Shutdown();
       return false;
     }
@@ -121,7 +124,14 @@ class BurstCoordinator::Impl {
     for (int begin = 1; begin < config.concurrency; begin += config.startup_batch_size) {
       const int end = std::min(config.concurrency, begin + config.startup_batch_size);
       for (int lane = begin; lane < end; ++lane) {
-        workers_[lane]->thread = std::thread([this, lane] { WorkerMain(lane); });
+        try {
+          workers_[lane]->thread = std::thread([this, lane] { WorkerMain(lane); });
+        } catch (const std::system_error& exception) {
+          *error = "post-rank pressure worker thread creation failed: lane=" +
+              std::to_string(lane) + " detail=" + exception.what();
+          Shutdown();
+          return false;
+        }
       }
       std::unique_lock<std::mutex> lock(state_mutex_);
       if (!startup_cv_.wait_until(lock, deadline, [this, end] {
@@ -135,7 +145,11 @@ class BurstCoordinator::Impl {
     }
     if (connected_sessions_ != config.concurrency) {
       *error = "post-rank hop preconnect failed: connected=" +
-          std::to_string(connected_sessions_) + "/" + std::to_string(config.concurrency);
+          std::to_string(connected_sessions_) + "/" + std::to_string(config.concurrency) +
+          " failed_lanes=" + std::to_string(startup_failures_.size());
+      if (!startup_failures_.empty()) {
+        *error += " first_failure=" + startup_failures_.front();
+      }
       Shutdown();
       return false;
     }
@@ -273,7 +287,8 @@ class BurstCoordinator::Impl {
     return connected_sessions_;
   }
 
-  bool ConnectWorker(Worker& worker, int lane) {
+  bool ConnectWorker(Worker& worker, int lane, std::string* error) {
+    std::string last_error = "unknown connection failure";
     for (int retry = 0; retry <= config_.startup_max_retries; ++retry) {
       brpc::ChannelOptions options;
       options.protocol = "baidu_std";
@@ -295,22 +310,37 @@ class BurstCoordinator::Impl {
           worker.stub = std::move(stub);
           return true;
         }
+        if (controller.Failed()) {
+          last_error = "health_rpc code=" + std::to_string(controller.ErrorCode()) +
+              " text=" + controller.ErrorText();
+        } else {
+          last_error = "health_response code=" + std::to_string(response.code()) +
+              " status=" + response.status();
+        }
+      } else {
+        last_error = "channel_init endpoint=" + endpoint;
       }
       if (retry < config_.startup_max_retries) {
         std::this_thread::sleep_for(std::chrono::milliseconds(
             config_.startup_retry_backoff_ms * (1 << retry)));
       }
     }
+    if (error != nullptr) *error = last_error;
     return false;
   }
 
   void WorkerMain(int lane) {
     Worker& worker = *workers_[lane];
-    const bool connected = ConnectWorker(worker, lane);
+    std::string connect_error;
+    const bool connected = ConnectWorker(worker, lane, &connect_error);
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       ++startup_finished_;
-      if (connected) ++connected_sessions_;
+      if (connected) {
+        ++connected_sessions_;
+      } else {
+        startup_failures_.push_back("lane=" + std::to_string(lane) + " " + connect_error);
+      }
     }
     startup_cv_.notify_all();
     if (!connected) return;
@@ -419,6 +449,7 @@ class BurstCoordinator::Impl {
   std::mutex pressure_dispatch_mutex_;
   int startup_finished_ = 0;
   int connected_sessions_ = 0;
+  std::vector<std::string> startup_failures_;
   int active_rounds_ = 0;
   uint64_t sequence_ = 0;
 };

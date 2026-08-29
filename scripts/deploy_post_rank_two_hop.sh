@@ -10,10 +10,12 @@ HOP1_MANIFEST="${HOP1_MANIFEST:-k8s/deployment-post-rank-hop1.yaml}"
 HOP2_MANIFEST="${HOP2_MANIFEST:-k8s/deployment-post-rank-hop2.yaml}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/post-rank-two-hop-deploy-$(date +%Y%m%d-%H%M%S)}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-5m}"
+DIAGNOSE_SCRIPT="${DIAGNOSE_SCRIPT:-scripts/diagnose_post_rank_hop_startup_failure.sh}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-for command in kubectl docker; do command -v "$command" >/dev/null || die "missing command: $command"; done
+for command in kubectl docker python3; do command -v "$command" >/dev/null || die "missing command: $command"; done
 docker image inspect "$BUILD_IMAGE" >/dev/null || die "missing build image: $BUILD_IMAGE"
+[[ -x "$DIAGNOSE_SCRIPT" ]] || die "missing executable diagnostic: $DIAGNOSE_SCRIPT"
 mkdir -p "$OUTPUT_DIR"
 
 echo "== Extract post-rank Hop binary from build image =="
@@ -52,22 +54,66 @@ wait_pods_gone() {
   done
 }
 
+listening_ports() {
+  python3 - "$@" <<'PY'
+import pathlib,sys
+wanted={int(value) for value in sys.argv[1:]}
+found=set()
+for name in ("/proc/net/tcp","/proc/net/tcp6"):
+    path=pathlib.Path(name)
+    if not path.exists():
+        continue
+    for line in path.read_text().splitlines()[1:]:
+        columns=line.split()
+        if len(columns)>=4 and columns[3]=="0A":
+            port=int(columns[1].rsplit(":",1)[1],16)
+            if port in wanted:
+                found.add(port)
+print(" ".join(str(port) for port in sorted(found)))
+PY
+}
+
+wait_ports_free() {
+  local role="$1"
+  shift
+  local occupied
+  local deadline=$((SECONDS + 120))
+  while true; do
+    occupied="$(listening_ports "$@")"
+    [[ -z "$occupied" ]] && return
+    if (( SECONDS >= deadline )); then
+      command -v ss >/dev/null 2>&1 && ss -ltnp || true
+      die "timed out waiting for $role hostNetwork ports to be released: $occupied"
+    fi
+    sleep 1
+  done
+}
+
 deploy_host_network() {
-  local deployment="$1" app="$2" manifest="$3"
+  local deployment="$1" app="$2" manifest="$3" role="$4"
+  shift 4
   if kubectl -n "$NAMESPACE" get deployment "$deployment" >/dev/null 2>&1; then
     echo "== Stop old $deployment before reusing hostNetwork ports =="
     kubectl -n "$NAMESPACE" scale deployment/"$deployment" --replicas=0
     wait_pods_gone "$app"
   fi
+  wait_ports_free "$role" "$@"
   kubectl apply -f "$manifest"
-  kubectl -n "$NAMESPACE" rollout status deployment/"$deployment" --timeout="$ROLLOUT_TIMEOUT"
+  if ! kubectl -n "$NAMESPACE" rollout status deployment/"$deployment" \
+      --timeout="$ROLLOUT_TIMEOUT"; then
+    local diagnostic_dir="$OUTPUT_DIR/diagnostic-$role"
+    echo "== Diagnose failed $role rollout ==" >&2
+    NAMESPACE="$NAMESPACE" TARGET_ROLE="$role" OUTPUT_DIR="$diagnostic_dir" \
+      bash "$DIAGNOSE_SCRIPT" | tee "$OUTPUT_DIR/diagnostic-$role.console.log" >&2 || true
+    die "$role rollout failed; diagnostic=$diagnostic_dir/summary.json"
+  fi
 }
 
 echo "== Deploy post-rank Hop-2 first =="
-deploy_host_network post-rank-hop2 post-rank-hop2 "$OUTPUT_DIR/hop2.yaml"
+deploy_host_network post-rank-hop2 post-rank-hop2 "$OUTPUT_DIR/hop2.yaml" hop2 18312 18313
 
 echo "== Deploy post-rank Hop-1 and preconnect c1000 to Hop-2 =="
-deploy_host_network post-rank-hop1 post-rank-hop1 "$OUTPUT_DIR/hop1.yaml"
+deploy_host_network post-rank-hop1 post-rank-hop1 "$OUTPUT_DIR/hop1.yaml" hop1 18311
 
 HOP1_POD="$(kubectl -n "$NAMESPACE" get pod -l app=post-rank-hop1 -o jsonpath='{.items[0].metadata.name}')"
 HOP2_POD="$(kubectl -n "$NAMESPACE" get pod -l app=post-rank-hop2 -o jsonpath='{.items[0].metadata.name}')"
