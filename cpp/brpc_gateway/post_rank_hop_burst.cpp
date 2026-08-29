@@ -77,7 +77,6 @@ class BurstCoordinator::Impl {
     pairec::pipeline::RankResponse business_response;
     std::string business_error;
     double marker_wait_ms = 0;
-    double business_hold_ms = 0;
     std::vector<int64_t> pressure_us;
   };
 
@@ -100,10 +99,8 @@ class BurstCoordinator::Impl {
         config.startup_batch_size > config.concurrency ||
         config.pressure_start_quorum < 1 ||
         config.pressure_start_quorum >= config.concurrency ||
-        config.pressure_start_timeout_ms < 1 ||
-        config.minimum_local_window_ms < 1 ||
-        config.minimum_local_window_ms > 100) {
-      *error = "post-rank hop requires c1000, payload=102400, marker quorum, and a 1..100ms local window";
+        config.pressure_start_timeout_ms < 1) {
+      *error = "post-rank hop requires c1000, payload=102400, and a pressure marker quorum";
       return false;
     }
     config_ = config;
@@ -149,7 +146,6 @@ class BurstCoordinator::Impl {
               << ",\"armed_workers\":" << config.concurrency
               << ",\"pressure_start_quorum\":" << config.pressure_start_quorum
               << ",\"pressure_start_timeout_ms\":" << config.pressure_start_timeout_ms
-              << ",\"minimum_local_window_ms\":" << config.minimum_local_window_ms
               << ",\"payload_bytes\":" << config.payload_bytes << "}" << std::endl;
     return true;
   }
@@ -226,22 +222,12 @@ class BurstCoordinator::Impl {
     }
     const double raw_wall_ms = static_cast<double>(rpc_ended_ns - business_started_ns) / 1e6;
     const double front_brpc_ms = std::max(0.0, raw_wall_ms - service_ms);
-    const double requested_hold_ms = marker_success
-        ? std::max(0.0, static_cast<double>(config_.minimum_local_window_ms) - front_brpc_ms)
-        : 0;
-    if (requested_hold_ms > 0) {
-      const int64_t hold_started_us = SteadyMicros();
-      std::this_thread::sleep_for(std::chrono::microseconds(
-          static_cast<int64_t>(requested_hold_ms * 1000)));
-      result->business_hold_ms = static_cast<double>(SteadyMicros() - hold_started_us) / 1000;
-    }
-    const int64_t business_ended_ns = SystemNanos();
+    const int64_t business_ended_ns = rpc_ended_ns;
     bool finish = false;
     {
       std::lock_guard<std::mutex> lock(round->mutex);
       round->business_end_ns = business_ended_ns;
       round->business_response = business_response;
-      round->business_hold_ms = result->business_hold_ms;
       round->business_success = marker_success && !controller.Failed() && business_response.code() == 200;
       if (!marker_success) {
         round->business_error = "pressure start marker timed out: started=" +
@@ -258,7 +244,6 @@ class BurstCoordinator::Impl {
       result->business_wall_ms = static_cast<double>(business_ended_ns - business_started_ns) / 1e6;
       result->service_ms = service_ms;
       result->front_brpc_ms = front_brpc_ms;
-      result->local_business_window_ms = front_brpc_ms + result->business_hold_ms;
       result->error = round->business_error;
       *response = round->business_response;
     }
@@ -274,9 +259,6 @@ class BurstCoordinator::Impl {
               << ",\"pressure_started_at_business_start\":"
               << result->pressure_started_at_business_start
               << ",\"marker_wait_ms\":" << result->marker_wait_ms
-              << ",\"business_hold_ms\":" << result->business_hold_ms
-              << ",\"minimum_local_window_ms\":" << config_.minimum_local_window_ms
-              << ",\"local_business_window_ms\":" << result->local_business_window_ms
               << "}" << std::endl;
     return result->success;
   }

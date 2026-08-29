@@ -50,7 +50,6 @@ bool Parse(int argc, char** argv, Config* config) {
     else if (Value(argv[i], "pressure_timeout_ms", &value)) config->burst.pressure_timeout_ms = std::atoi(value.c_str());
     else if (Value(argv[i], "pressure_start_quorum", &value)) config->burst.pressure_start_quorum = std::atoi(value.c_str());
     else if (Value(argv[i], "pressure_start_timeout_ms", &value)) config->burst.pressure_start_timeout_ms = std::atoi(value.c_str());
-    else if (Value(argv[i], "minimum_local_window_ms", &value)) config->burst.minimum_local_window_ms = std::atoi(value.c_str());
     else if (Value(argv[i], "startup_timeout_ms", &value)) config->burst.startup_timeout_ms = std::atoi(value.c_str());
     else if (Value(argv[i], "startup_batch_size", &value)) config->burst.startup_batch_size = std::atoi(value.c_str());
     else if (Value(argv[i], "startup_max_retries", &value)) config->burst.startup_max_retries = std::atoi(value.c_str());

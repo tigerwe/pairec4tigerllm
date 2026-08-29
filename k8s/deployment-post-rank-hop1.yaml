@@ -35,7 +35,6 @@ spec:
             - --pressure_timeout_ms=5000
             - --pressure_start_quorum=950
             - --pressure_start_timeout_ms=250
-            - --minimum_local_window_ms=20
             - --startup_timeout_ms=120000
             - --startup_batch_size=64
             - --startup_max_retries=3

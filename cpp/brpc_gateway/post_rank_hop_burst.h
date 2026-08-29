@@ -16,7 +16,6 @@ struct BurstConfig {
   int pressure_timeout_ms = 5000;
   int pressure_start_quorum = 950;
   int pressure_start_timeout_ms = 250;
-  int minimum_local_window_ms = 20;
   int startup_timeout_ms = 120000;
   int startup_batch_size = 64;
   int startup_max_retries = 3;
@@ -29,8 +28,6 @@ struct BurstResult {
   double service_ms = 0;
   double front_brpc_ms = 0;
   double marker_wait_ms = 0;
-  double business_hold_ms = 0;
-  double local_business_window_ms = 0;
   int pressure_started_at_business_start = 0;
   std::string error;
 };

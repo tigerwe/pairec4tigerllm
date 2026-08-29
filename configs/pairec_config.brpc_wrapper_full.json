@@ -67,7 +67,6 @@
         "post_rank_pressure_timeout_ms": __POST_RANK_PRESSURE_TIMEOUT_MS__,
         "post_rank_pressure_start_quorum": __POST_RANK_PRESSURE_START_QUORUM__,
         "post_rank_pressure_start_timeout_ms": __POST_RANK_PRESSURE_START_TIMEOUT_MS__,
-        "post_rank_minimum_local_window_ms": __POST_RANK_MINIMUM_LOCAL_WINDOW_MS__,
         "expected_candidates": 50,
         "required_model_role": "__DEEPFM_MODEL_ROLE__"
       }

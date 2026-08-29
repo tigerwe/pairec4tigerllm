@@ -147,7 +147,7 @@
     <text x="1224" y="674" class="lane-title">Post-rank 两层本地 c1000</text><text x="1224" y="697" class="lane-text">Hop-1：1 + 999　|　Hop-2：1 + 999</text><text x="1224" y="716" class="tiny">marker ≥950 · 不等待排空 · 每层独立 999/999</text></g>
 
   <g><rect x="1200" y="742" width="420" height="64" rx="6" fill="#f7f4ff" stroke="#c4b5fd"/><rect x="1200" y="742" width="5" height="64" rx="2" fill="#7c3aed"/>
-    <text x="1224" y="769" class="lane-title" fill="#5b21b6">受控业务窗口</text><text x="1224" y="792" class="lane-text">每跳 front BRPC + local hold ≥20 ms · 两跳目标 40–60 ms</text></g>
+    <text x="1224" y="769" class="lane-title" fill="#5b21b6">真实时延观测</text><text x="1224" y="792" class="lane-text">仅记录 marker wait + front BRPC + service wall · 无 sleep / 无目标补齐</text></g>
 
   <!-- KVC -->
   <text x="48" y="778" class="lane-title">KVC 数据面</text>
@@ -164,7 +164,7 @@
     <rect x="0" y="0" width="302" height="52" rx="6" fill="#fff" stroke="#dbe3ee"/><text x="16" y="22" class="lane-title">语义完整</text><text x="16" y="41" class="tiny">50 candidates · strict order · SHA 一致</text>
     <rect x="322" y="0" width="302" height="52" rx="6" fill="#fff" stroke="#dbe3ee"/><text x="338" y="22" class="lane-title">并发完整</text><text x="338" y="41" class="tiny">Generation / Rank / Hop-1 / Hop-2 均 999 成功</text>
     <rect x="644" y="0" width="302" height="52" rx="6" fill="#fff" stroke="#dbe3ee"/><text x="660" y="22" class="lane-title">运行稳定</text><text x="660" y="41" class="tiny">0 restart · 0 OOM · CPU throttling 诊断</text>
-    <rect x="966" y="0" width="430" height="52" rx="6" fill="#fff" stroke="#c4b5fd"/><text x="982" y="22" class="lane-title" fill="#5b21b6">短测目标</text><text x="982" y="41" class="tiny">post-rank 40–60 ms · E2E 约 490 ms · 远端 n3 待验</text>
+    <rect x="966" y="0" width="430" height="52" rx="6" fill="#fff" stroke="#c4b5fd"/><text x="982" y="22" class="lane-title" fill="#5b21b6">测量原则</text><text x="982" y="41" class="tiny">只接受真实 RPC / 排队 / 服务时延 · 远端 n3 需重验</text>
   </g>
   <text x="48" y="1010" class="tiny">pairec-brpc-observability · business, pressure and KVC lanes are intentionally separated</text>
   <text x="1872" y="1010" text-anchor="end" class="tiny mono">docs/assets/architecture_overview_current_20260829</text>

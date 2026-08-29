@@ -25,7 +25,6 @@ type RankBurstConfig struct {
 	DedicatedBusinessLane bool
 	PressureStartQuorum   int
 	PressureStartTimeout  time.Duration
-	MinimumLocalWindow    time.Duration
 }
 
 type rankBurstSession interface {
@@ -53,7 +52,6 @@ type RankBurstCoordinator struct {
 	dedicatedBusinessLane bool
 	pressureStartQuorum   int
 	pressureStartTimeout  time.Duration
-	minimumLocalWindow    time.Duration
 	pressureDispatch      sync.Mutex
 	rounds                sync.WaitGroup
 }
@@ -84,10 +82,8 @@ type rankBurstLaneResult struct {
 	response                       *pipelinepb.RankResponse
 	err                            error
 	markerWaitUS                   int64
-	businessHoldUS                 int64
 	pressureStartedAtBusinessStart int64
 	pressureStartQuorum            int
-	minimumLocalWindowUS           int64
 }
 
 type rankBurstBusinessEvent struct {
@@ -107,9 +103,6 @@ type rankBurstBusinessEvent struct {
 	PressureStartQuorum            int     `json:"pressure_start_quorum"`
 	PressureStartedAtBusinessStart int64   `json:"pressure_started_at_business_start"`
 	MarkerWaitMS                   float64 `json:"marker_wait_ms"`
-	BusinessHoldMS                 float64 `json:"business_hold_ms"`
-	MinimumLocalWindowMS           float64 `json:"minimum_local_window_ms"`
-	LocalBusinessWindowMS          float64 `json:"local_business_window_ms"`
 }
 
 type rankBurstCompleteEvent struct {
@@ -197,9 +190,6 @@ func newRankBurstCoordinator(sessions []rankBurstSession, cfg RankBurstConfig, l
 			return nil, fmt.Errorf("rank pressure start timeout must be positive")
 		}
 	}
-	if cfg.MinimumLocalWindow < 0 || cfg.MinimumLocalWindow > cfg.BusinessTimeout {
-		return nil, fmt.Errorf("rank minimum local window must be in [0,business timeout]")
-	}
 	if logger == nil {
 		logger = writeRankBurstEvent
 	}
@@ -218,7 +208,6 @@ func newRankBurstCoordinator(sessions []rankBurstSession, cfg RankBurstConfig, l
 		dedicatedBusinessLane: cfg.DedicatedBusinessLane,
 		pressureStartQuorum:   cfg.PressureStartQuorum,
 		pressureStartTimeout:  cfg.PressureStartTimeout,
-		minimumLocalWindow:    cfg.MinimumLocalWindow,
 	}
 	c.workers = make([]chan rankBurstJob, cfg.PoolSize)
 	for index := range sessions {
@@ -335,23 +324,8 @@ func (c *RankBurstCoordinator) Rank(request *pipelinepb.RankRequest, requestID s
 	business.markerWaitUS = markerWait.Microseconds()
 	business.pressureStartedAtBusinessStart = pressureStartedAtBusinessStart
 	business.pressureStartQuorum = c.pressureStartQuorum
-	business.minimumLocalWindowUS = c.minimumLocalWindow.Microseconds()
 	if markerErr != nil {
 		business.err = markerErr
-	}
-	if business.err == nil && business.response != nil && c.minimumLocalWindow > 0 {
-		serviceUS := int64(0)
-		if business.response.Trace != nil {
-			serviceUS = pipelinepb.Int64(business.response.Trace.TotalUS)
-		}
-		localFront := time.Duration(maxInt64(0, business.latencyUS-serviceUS)) * time.Microsecond
-		if hold := c.minimumLocalWindow - localFront; hold > 0 {
-			holdStarted := time.Now()
-			time.Sleep(hold)
-			business.businessHoldUS = time.Since(holdStarted).Microseconds()
-			business.endEpochNS = time.Now().UnixNano()
-			business.latencyUS = (business.endEpochNS - business.startEpochNS) / 1000
-		}
 	}
 	businessEvent := makeRankBurstBusinessEvent(
 		c.eventPrefix, c.traceComponent, requestID, c.concurrency,
@@ -478,8 +452,6 @@ func makeRankBurstBusinessEvent(eventPrefix, traceComponent, requestID string,
 		PressureStartQuorum:            result.pressureStartQuorum,
 		PressureStartedAtBusinessStart: result.pressureStartedAtBusinessStart,
 		MarkerWaitMS:                   float64(result.markerWaitUS) / 1000,
-		BusinessHoldMS:                 float64(result.businessHoldUS) / 1000,
-		MinimumLocalWindowMS:           float64(result.minimumLocalWindowUS) / 1000,
 	}
 	if result.err != nil {
 		event.Error = result.err.Error()
@@ -488,22 +460,14 @@ func makeRankBurstBusinessEvent(eventPrefix, traceComponent, requestID string,
 		return event
 	}
 	event.ServiceTotalMS = float64(pipelinepb.Int64(result.response.Trace.TotalUS)) / 1000
-	event.FrontBRPCEstimateMS = event.ClientWallMS - event.ServiceTotalMS - event.BusinessHoldMS
+	event.FrontBRPCEstimateMS = event.ClientWallMS - event.ServiceTotalMS
 	if event.FrontBRPCEstimateMS < 0 {
 		event.FrontBRPCEstimateMS = 0
 	}
-	event.LocalBusinessWindowMS = event.FrontBRPCEstimateMS + event.BusinessHoldMS
 	event.TraceValid = pipelinepb.Int32(result.response.Code) == 200 &&
 		pipelinepb.String(result.response.Trace.Component) == traceComponent &&
 		pipelinepb.Int64(result.response.Trace.TotalUS) > 0
 	return event
-}
-
-func maxInt64(left, right int64) int64 {
-	if left > right {
-		return left
-	}
-	return right
 }
 
 func makeRankBurstCompleteEvent(eventPrefix, requestID string,

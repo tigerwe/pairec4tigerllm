@@ -64,7 +64,6 @@ env \
   POST_RANK_BURST_POOL_SIZE=1000 POST_RANK_PAYLOAD_BYTES=102400 \
   POST_RANK_PRESSURE_TIMEOUT_MS=5000 E2E_TIMEOUT_MS=5000 \
   POST_RANK_PRESSURE_START_QUORUM=950 POST_RANK_PRESSURE_START_TIMEOUT_MS=250 \
-  POST_RANK_MINIMUM_LOCAL_WINDOW_MS=20 \
   bash scripts/validate_pairec_brpc_wrapper_kvc_combined.sh \
   | tee "$OUTPUT_DIR/run.console.log"
 
@@ -105,12 +104,8 @@ for sample in samples:
       "post_rank_hop1_business_ms":outer["business_client_wall_ms"],
       "post_rank_hop1_front_brpc_ms":outer["front_brpc_estimate_ms"],
       "post_rank_hop1_marker_wait_ms":outer["marker_wait_ms"],
-      "post_rank_hop1_business_hold_ms":outer["business_hold_ms"],
-      "post_rank_hop1_local_business_window_ms":outer["local_business_window_ms"],
       "post_rank_hop2_front_brpc_ms":inner["front_brpc_estimate_ms"],
       "post_rank_hop2_marker_wait_ms":inner["marker_wait_ms"],
-      "post_rank_hop2_business_hold_ms":inner["business_hold_ms"],
-      "post_rank_hop2_local_business_window_ms":inner["local_business_window_ms"],
       "post_rank_hop1_pressure_success":outer_complete["pressure_success"],
       "post_rank_hop2_pressure_success":inner_complete["pressure_success"],
       "candidate_count":chain["candidate_count"], "candidate_sha256":chain["candidate_sha256"],
@@ -118,8 +113,6 @@ for sample in samples:
     assert row["candidate_count"]==50,row
     assert outer["pressure_started_at_business_start"]>=950,outer
     assert inner["pressure_started_at_business_start"]>=950,inner
-    assert row["post_rank_hop1_local_business_window_ms"]>=19.5,row
-    assert row["post_rank_hop2_local_business_window_ms"]>=19.5,row
     assert outer_complete["burst_valid"] is True and outer_complete["pressure_errors"]==0,outer_complete
     assert inner_complete["burst_valid"] is True and inner_complete["pressure_errors"]==0,inner_complete
     assert outer_complete["pressure_overlap_business"] > 0,outer_complete
@@ -133,8 +126,10 @@ def metric(name):
 result={"classification":"PAIREC_POST_RANK_TWO_HOP_B_N3_OK","requests":3,
         "metrics":{"client_e2e":metric("client_e2e_ms"),
                    "post_rank_two_hop":metric("post_rank_two_hop_ms"),
-                   "post_rank_hop1_local_business_window":metric("post_rank_hop1_local_business_window_ms"),
-                   "post_rank_hop2_local_business_window":metric("post_rank_hop2_local_business_window_ms")},
+                   "post_rank_hop1_front_brpc":metric("post_rank_hop1_front_brpc_ms"),
+                   "post_rank_hop2_front_brpc":metric("post_rank_hop2_front_brpc_ms"),
+                   "post_rank_hop1_marker_wait":metric("post_rank_hop1_marker_wait_ms"),
+                   "post_rank_hop2_marker_wait":metric("post_rank_hop2_marker_wait_ms")},
         "samples":rows}
 pathlib.Path(sys.argv[4]).write_text(json.dumps(result,indent=2)+"\n")
 print(f"classification={result['classification']}")

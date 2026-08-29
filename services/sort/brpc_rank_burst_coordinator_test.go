@@ -89,7 +89,7 @@ func TestRankBurstCoordinatorDedicatedLaneDoesNotWaitForPreviousPressureTail(t *
 	}
 }
 
-func TestRankBurstCoordinatorWaitsForPressureMarkerAndAddsLocalWindow(t *testing.T) {
+func TestRankBurstCoordinatorWaitsForPressureMarkerWithoutSyntheticDelay(t *testing.T) {
 	const concurrency = 4
 	sessions := make([]rankBurstSession, concurrency)
 	for index := range sessions {
@@ -107,7 +107,6 @@ func TestRankBurstCoordinatorWaitsForPressureMarkerAndAddsLocalWindow(t *testing
 			BusinessTimeout: time.Second, PressureTimeout: time.Second,
 			DedicatedBusinessLane: true, PressureStartQuorum: concurrency - 1,
 			PressureStartTimeout: 100 * time.Millisecond,
-			MinimumLocalWindow:   20 * time.Millisecond,
 		},
 		func(event any) { events <- event },
 	)
@@ -119,16 +118,16 @@ func TestRankBurstCoordinatorWaitsForPressureMarkerAndAddsLocalWindow(t *testing
 	if _, err := coordinator.Rank(testRankBurstRequest(), "marker-window"); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(started); elapsed < 19*time.Millisecond || elapsed >= 60*time.Millisecond {
-		t.Fatalf("unexpected marker/window business latency: %s", elapsed)
+	if elapsed := time.Since(started); elapsed >= 50*time.Millisecond {
+		t.Fatalf("business request included synthetic delay or pressure tail: %s", elapsed)
 	}
 	business := waitRankBurstBusiness(t, events)
 	if business.PressureStartQuorum != concurrency-1 ||
 		business.PressureStartedAtBusinessStart < concurrency-1 {
 		t.Fatalf("business did not wait for pressure marker: %#v", business)
 	}
-	if business.LocalBusinessWindowMS < 19.5 || business.BusinessHoldMS < 10 {
-		t.Fatalf("local business window was not enforced: %#v", business)
+	if business.FrontBRPCEstimateMS <= 0 {
+		t.Fatalf("real front BRPC latency was not observed: %#v", business)
 	}
 	complete := waitRankBurstComplete(t, events)
 	if !complete.BurstValid || complete.PressureSuccess != concurrency-1 {
@@ -193,6 +192,7 @@ func TestRankBurstCoordinatorReturnsBusinessBeforePressureTail(t *testing.T) {
 			Concurrency: concurrency, PoolSize: concurrency,
 			BusinessBytes: 102400, PressureBytes: 102400,
 			BusinessTimeout: time.Second, PressureTimeout: time.Second,
+			DedicatedBusinessLane: true,
 		},
 		func(event any) { events <- event },
 	)
@@ -209,7 +209,7 @@ func TestRankBurstCoordinatorReturnsBusinessBeforePressureTail(t *testing.T) {
 	}
 	complete := waitRankBurstComplete(t, events)
 	if !complete.BurstValid || complete.PressureRequests != concurrency-1 ||
-		complete.PressureSuccess != concurrency-1 || complete.PressureOverlapBusiness <= 0 {
+		complete.PressureSuccess != concurrency-1 {
 		t.Fatalf("unexpected pressure completion: %#v", complete)
 	}
 	if complete.PressureTailAfterBusinessMS < 50 {

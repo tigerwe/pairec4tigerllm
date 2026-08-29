@@ -56,7 +56,6 @@ type Config struct {
 	PostRankPressureTimeoutMS      int    `json:"post_rank_pressure_timeout_ms"`
 	PostRankPressureStartQuorum    int    `json:"post_rank_pressure_start_quorum"`
 	PostRankPressureStartTimeoutMS int    `json:"post_rank_pressure_start_timeout_ms"`
-	PostRankMinimumLocalWindowMS   int    `json:"post_rank_minimum_local_window_ms"`
 }
 
 type userDefineConfig struct {
@@ -193,9 +192,6 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 		if config.PostRankPressureStartTimeoutMS < 1 || config.PostRankPressureStartTimeoutMS > 1000 {
 			return nil, errors.New("post-rank pressure start timeout must be in [1,1000] ms")
 		}
-		if config.PostRankMinimumLocalWindowMS < 1 || config.PostRankMinimumLocalWindowMS > 100 {
-			return nil, errors.New("post-rank minimum local window must be in [1,100] ms")
-		}
 	}
 	transport := &http.Transport{
 		Proxy: nil,
@@ -261,7 +257,6 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 				DedicatedBusinessLane: true,
 				PressureStartQuorum:   config.PostRankPressureStartQuorum,
 				PressureStartTimeout:  time.Duration(config.PostRankPressureStartTimeoutMS) * time.Millisecond,
-				MinimumLocalWindow:    time.Duration(config.PostRankMinimumLocalWindowMS) * time.Millisecond,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("initialize post-rank hop1 burst: %w", err)
