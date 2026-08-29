@@ -78,19 +78,36 @@ def classify(
     adapter_text: str,
     backend_text: str,
     artifact_text: str,
+    rank_kvc_text: str = "",
+    hop1_text: str = "",
+    hop2_text: str = "",
 ) -> Dict[str, Any]:
     pairec_events = json_events("\n".join((pairec_text, artifact_text)), request_id)
     business = last_event(pairec_events, "pairec_rank_brpc_burst_business_complete")
     complete = last_event(pairec_events, "pairec_rank_brpc_burst_complete")
     rank_error = last_event(pairec_events, "deepfm_rank_error")
     pipeline = last_event(pairec_events, "pipeline_trace_complete")
+    post_hop1_business = last_event(
+        pairec_events, "pairec_post_rank_hop1_brpc_burst_business_complete"
+    )
+    post_hop1_complete = last_event(
+        pairec_events, "pairec_post_rank_hop1_brpc_burst_complete"
+    )
+    hop1_events = json_events("\n".join((hop1_text, artifact_text)), request_id)
+    post_hop2_business = last_event(
+        hop1_events, "pairec_post_rank_hop2_brpc_burst_business_complete"
+    )
+    post_hop2_complete = last_event(
+        hop1_events, "pairec_post_rank_hop2_brpc_burst_complete"
+    )
     wrapper_line, wrapper = parse_wrapper_line(
         "\n".join((wrapper_text, artifact_text)), request_id
     )
 
     request_text = "\n".join(
         part for part in (
-            pairec_text, wrapper_text, adapter_text, backend_text, artifact_text
+            pairec_text, wrapper_text, rank_kvc_text, adapter_text, backend_text,
+            hop1_text, hop2_text, artifact_text
         ) if part
     )
     rank_error_text = str((rank_error or {}).get("error", ""))
@@ -115,6 +132,29 @@ def classify(
         confidence = "high"
         reason = "no live or artifact log contains the request"
         next_action = "rerun immediately with a longer LOG_SINCE before the Pods are replaced"
+    elif re.search(r"rank KVC business Get failed", rank_error_text + " " + wrapper_error, re.I):
+        classification = "RANK_KVC_BUSINESS_GET_FAILURE"
+        confidence = "high"
+        reason = rank_error_text or wrapper_error
+        next_action = "inspect rank-kvc-request.log and rank-wrapper-request.log; do not change BRPC timeouts"
+    elif rank_error_text and re.search(r"post-rank", rank_error_text, re.I):
+        if re.search(r"pressure start marker timed out", rank_error_text, re.I):
+            classification = "POST_RANK_PRESSURE_MARKER_FAILURE"
+            next_action = "compare Hop-1/Hop-2 pressure_started_at_business_start with the 950 quorum"
+        elif post_hop2_business and post_hop2_business.get("business_success") is False:
+            classification = "POST_RANK_HOP2_BUSINESS_FAILURE"
+            next_action = "inspect post-rank-hop1-request.log for the Hop-1 to Hop-2 RPC error"
+        elif post_hop1_business and post_hop1_business.get("business_success") is False:
+            classification = "POST_RANK_HOP1_BUSINESS_FAILURE"
+            next_action = "inspect PaiRec post-rank Hop-1 business event and Hop-1 admission logs"
+        elif re.search(r"item count|order mismatch|sha mismatch|contract", rank_error_text, re.I):
+            classification = "POST_RANK_RESPONSE_CONTRACT_FAILURE"
+            next_action = "compare candidate count, order, and SHA across both Hop responses"
+        else:
+            classification = "POST_RANK_TWO_HOP_FAILURE"
+            next_action = "inspect both post-rank request logs; Rank itself completed before this boundary"
+        confidence = "high"
+        reason = rank_error_text
     elif rank_error_text and re.search(contract_patterns, rank_error_text, re.I):
         classification = "RANK_RESPONSE_CONTRACT_FAILURE"
         confidence = "high"
@@ -198,6 +238,13 @@ def classify(
             "wrapper_fields": wrapper,
             "adapter_request_found": request_id in adapter_text,
             "backend_request_found": request_id in backend_text,
+            "rank_kvc_request_found": request_id in rank_kvc_text,
+            "post_hop1_business_event": post_hop1_business,
+            "post_hop1_complete_event": post_hop1_complete,
+            "post_hop2_business_event": post_hop2_business,
+            "post_hop2_complete_event": post_hop2_complete,
+            "post_hop1_log_found": request_id in hop1_text,
+            "post_hop2_log_found": request_id in hop2_text,
         },
     }
     return result
@@ -208,8 +255,11 @@ def main() -> None:
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--pairec", default="")
     parser.add_argument("--wrapper", default="")
+    parser.add_argument("--rank-kvc", default="")
     parser.add_argument("--adapter", default="")
     parser.add_argument("--backend", default="")
+    parser.add_argument("--hop1", default="")
+    parser.add_argument("--hop2", default="")
     parser.add_argument("--artifacts", default="")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -221,6 +271,9 @@ def main() -> None:
         read_text(args.adapter),
         read_text(args.backend),
         read_text(args.artifacts),
+        read_text(args.rank_kvc),
+        read_text(args.hop1),
+        read_text(args.hop2),
     )
     output = pathlib.Path(args.output)
     output.write_text(json.dumps(result, indent=2) + "\n")
@@ -254,6 +307,13 @@ def main() -> None:
         f'success={complete.get("pressure_success", "missing")} '
         f'errors={complete.get("pressure_errors", "missing")} '
         f'samples={complete.get("pressure_error_samples", [])}'
+    )
+    print(
+        "post_rank "
+        f'hop1_business={str(bool(evidence["post_hop1_business_event"])).lower()} '
+        f'hop1_complete={str(bool(evidence["post_hop1_complete_event"])).lower()} '
+        f'hop2_business={str(bool(evidence["post_hop2_business_event"])).lower()} '
+        f'hop2_complete={str(bool(evidence["post_hop2_complete_event"])).lower()}'
     )
     print(f'next_action={result["next_action"]}')
     print(f"summary_json={output}")

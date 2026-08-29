@@ -18,7 +18,7 @@ class RankBurstFailureSummaryTest(unittest.TestCase):
         self.assertNotIn("kubectl -n \"$NAMESPACE\" exec", source)
         self.assertNotIn("curl ", source)
 
-    def summarize(self, pairec_events, wrapper="", adapter="", backend=""):
+    def summarize(self, pairec_events, wrapper="", adapter="", backend="", rank_kvc="", hop1="", hop2=""):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)
             files = {}
@@ -27,6 +27,9 @@ class RankBurstFailureSummaryTest(unittest.TestCase):
                 "wrapper": wrapper,
                 "adapter": adapter,
                 "backend": backend,
+                "rank-kvc": rank_kvc,
+                "hop1": hop1,
+                "hop2": hop2,
             }.items():
                 files[name] = root / f"{name}.log"
                 files[name].write_text(content + "\n")
@@ -38,6 +41,9 @@ class RankBurstFailureSummaryTest(unittest.TestCase):
                     "--wrapper", str(files["wrapper"]),
                     "--adapter", str(files["adapter"]),
                     "--backend", str(files["backend"]),
+                    "--rank-kvc", str(files["rank-kvc"]),
+                    "--hop1", str(files["hop1"]),
+                    "--hop2", str(files["hop2"]),
                     "--output", str(output),
                 ],
                 cwd=ROOT, check=True, text=True, capture_output=True,
@@ -88,6 +94,35 @@ class RankBurstFailureSummaryTest(unittest.TestCase):
         )
         result = self.summarize(events, wrapper=wrapper)
         self.assertEqual(result["classification"], "RANK_RESPONSE_CONTRACT_FAILURE")
+        self.assertEqual(result["confidence"], "high")
+
+    def test_classifies_rank_kvc_business_get_failure(self):
+        events = [{
+            "event": "deepfm_rank_error", "request_id": "rid-1",
+            "error": "rank service code=500 msg=rank KVC business Get failed: timeout",
+        }]
+        wrapper = (
+            "[brpc-rank-burst-wrapper] method=Rank request_id=rid-1 code=500 "
+            "wrapper_total_ms=1000 backend_rpc_ms=0 rank_kvc_success=false "
+            "error=timeout"
+        )
+        result = self.summarize(events, wrapper=wrapper, rank_kvc="rid-1 timeout")
+        self.assertEqual(result["classification"], "RANK_KVC_BUSINESS_GET_FAILURE")
+
+    def test_classifies_post_rank_marker_failure_after_rank(self):
+        events = [
+            {
+                "event": "pairec_rank_brpc_burst_business_complete",
+                "request_id": "rid-1", "business_success": True,
+                "business_client_wall_ms": 20.0, "trace_valid": True,
+            },
+            {
+                "event": "deepfm_rank_error", "request_id": "rid-1",
+                "error": "post-rank two-hop BRPC failed: pressure start marker timed out: started=912 quorum=950",
+            },
+        ]
+        result = self.summarize(events)
+        self.assertEqual(result["classification"], "POST_RANK_PRESSURE_MARKER_FAILURE")
         self.assertEqual(result["confidence"], "high")
 
 

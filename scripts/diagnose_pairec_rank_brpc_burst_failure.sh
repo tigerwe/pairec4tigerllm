@@ -6,6 +6,8 @@ NAMESPACE="${NAMESPACE:-pairec}"
 PAIREC_APP="${PAIREC_APP:-pairec-brpc-observed-wrapper}"
 RANK_WRAPPER_APP="${RANK_WRAPPER_APP:-deepfm-rank-burst-wrapper}"
 RANK_BACKEND_APP="${RANK_BACKEND_APP:-deepfm-rank-brpc-worker1}"
+POST_HOP1_APP="${POST_HOP1_APP:-post-rank-hop1}"
+POST_HOP2_APP="${POST_HOP2_APP:-post-rank-hop2}"
 REQUEST_ID="${REQUEST_ID:-${1:-}}"
 RUN_ROOT="${RUN_ROOT:-${2:-}}"
 LOG_SINCE="${LOG_SINCE:-60m}"
@@ -72,8 +74,11 @@ collect_app_logs() {
 echo "== Collect Rank BRPC failure evidence =="
 collect_app_logs "$PAIREC_APP" pairec "$OUTPUT_DIR/pairec.log"
 collect_app_logs "$RANK_WRAPPER_APP" rank-burst-wrapper "$OUTPUT_DIR/rank-wrapper.log"
+collect_app_logs "$RANK_WRAPPER_APP" rank-kvc-burst-wrapper "$OUTPUT_DIR/rank-kvc.log"
 collect_app_logs "$RANK_BACKEND_APP" adapter "$OUTPUT_DIR/rank-adapter.log"
 collect_app_logs "$RANK_BACKEND_APP" backend "$OUTPUT_DIR/rank-backend.log"
+collect_app_logs "$POST_HOP1_APP" post-rank-hop1 "$OUTPUT_DIR/post-rank-hop1.log"
+collect_app_logs "$POST_HOP2_APP" post-rank-hop2 "$OUTPUT_DIR/post-rank-hop2.log"
 
 if [[ -z "$REQUEST_ID" ]]; then
   REQUEST_ID="$(python3 - "$OUTPUT_DIR/pairec.log" <<'PY'
@@ -93,7 +98,7 @@ fi
 [[ -n "$REQUEST_ID" ]] \
   || die "set REQUEST_ID or RUN_ROOT containing a failed warmup/response-*.json"
 
-for source in pairec rank-wrapper rank-adapter rank-backend; do
+for source in pairec rank-wrapper rank-kvc rank-adapter rank-backend post-rank-hop1 post-rank-hop2; do
   grep -F "$REQUEST_ID" "$OUTPUT_DIR/${source}.log" \
     >"$OUTPUT_DIR/${source}-request.log" 2>/dev/null || true
 done
@@ -107,24 +112,28 @@ else
   : >"$OUTPUT_DIR/run-request.log"
 fi
 
-apps="${PAIREC_APP},${RANK_WRAPPER_APP},${RANK_BACKEND_APP}"
+apps="${PAIREC_APP},${RANK_WRAPPER_APP},${RANK_BACKEND_APP},${POST_HOP1_APP},${POST_HOP2_APP}"
 kubectl -n "$NAMESPACE" get pods -l "app in ($apps)" -o wide \
   >"$OUTPUT_DIR/pods.txt" 2>&1 || true
 kubectl -n "$NAMESPACE" get pods -l "app in ($apps)" -o json \
   >"$OUTPUT_DIR/pods.json" 2>&1 || true
 kubectl -n "$NAMESPACE" get deployment \
-  "$PAIREC_APP" "$RANK_WRAPPER_APP" "$RANK_BACKEND_APP" -o yaml \
+  "$PAIREC_APP" "$RANK_WRAPPER_APP" "$RANK_BACKEND_APP" \
+  "$POST_HOP1_APP" "$POST_HOP2_APP" -o yaml \
   >"$OUTPUT_DIR/deployments.yaml" 2>&1 || true
 kubectl -n "$NAMESPACE" get service \
-  "$PAIREC_APP" "$RANK_WRAPPER_APP" "$RANK_BACKEND_APP" -o wide \
+  "$PAIREC_APP" "$RANK_WRAPPER_APP" "$RANK_BACKEND_APP" \
+  "$POST_HOP1_APP" "$POST_HOP2_APP" -o wide \
   >"$OUTPUT_DIR/services.txt" 2>&1 || true
 kubectl -n "$NAMESPACE" get endpoints \
-  "$PAIREC_APP" "$RANK_WRAPPER_APP" "$RANK_BACKEND_APP" -o wide \
+  "$PAIREC_APP" "$RANK_WRAPPER_APP" "$RANK_BACKEND_APP" \
+  "$POST_HOP1_APP" "$POST_HOP2_APP" -o wide \
   >"$OUTPUT_DIR/endpoints.txt" 2>&1 || true
 kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp \
   >"$OUTPUT_DIR/events.txt" 2>&1 || true
 
-for app in "$PAIREC_APP" "$RANK_WRAPPER_APP" "$RANK_BACKEND_APP"; do
+for app in "$PAIREC_APP" "$RANK_WRAPPER_APP" "$RANK_BACKEND_APP" \
+  "$POST_HOP1_APP" "$POST_HOP2_APP"; do
   mapfile -t pods < <(kubectl -n "$NAMESPACE" get pods -l "app=$app" -o name 2>/dev/null || true)
   for pod_ref in "${pods[@]}"; do
     pod="${pod_ref#pod/}"
@@ -137,15 +146,18 @@ python3 scripts/summarize_pairec_rank_brpc_failure.py \
   --request-id "$REQUEST_ID" \
   --pairec "$OUTPUT_DIR/pairec-request.log" \
   --wrapper "$OUTPUT_DIR/rank-wrapper-request.log" \
+  --rank-kvc "$OUTPUT_DIR/rank-kvc-request.log" \
   --adapter "$OUTPUT_DIR/rank-adapter-request.log" \
   --backend "$OUTPUT_DIR/rank-backend-request.log" \
+  --hop1 "$OUTPUT_DIR/post-rank-hop1-request.log" \
+  --hop2 "$OUTPUT_DIR/post-rank-hop2-request.log" \
   --artifacts "$OUTPUT_DIR/run-request.log" \
   --output "$OUTPUT_DIR/summary.json" \
   | tee "$OUTPUT_DIR/summary.txt"
 
 echo
 echo "== Request evidence tails =="
-for source in pairec rank-wrapper rank-adapter rank-backend run; do
+for source in pairec rank-wrapper rank-kvc rank-adapter rank-backend post-rank-hop1 post-rank-hop2 run; do
   echo "-- $source --"
   if [[ -s "$OUTPUT_DIR/${source}-request.log" ]]; then
     tail -20 "$OUTPUT_DIR/${source}-request.log"
