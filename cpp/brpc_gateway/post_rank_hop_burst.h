@@ -8,7 +8,8 @@
 namespace pairec::post_rank {
 
 struct BurstConfig {
-  std::string endpoint;
+  std::string business_endpoint;
+  std::string pressure_endpoint;
   int concurrency = 1000;
   int payload_bytes = 102400;
   int business_timeout_ms = 1000;

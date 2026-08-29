@@ -25,7 +25,8 @@ spec:
           args:
             - --role=hop1
             - --listen_port=18311
-            - --backend=192.168.100.12:18312
+            - --business_backend=192.168.100.12:18312
+            - --pressure_backend=192.168.100.12:18313
             - --concurrency=1000
             - --payload_bytes=102400
             - --business_timeout_ms=1000

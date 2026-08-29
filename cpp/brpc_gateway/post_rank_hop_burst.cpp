@@ -88,11 +88,12 @@ class BurstCoordinator::Impl {
   ~Impl() { Shutdown(); }
 
   bool Init(const BurstConfig& config, std::string* error) {
-    if (config.endpoint.empty() || config.concurrency != 1000 ||
+    if (config.business_endpoint.empty() || config.pressure_endpoint.empty() ||
+        config.concurrency != 1000 ||
         config.payload_bytes != 102400 || config.business_timeout_ms != 1000 ||
         config.pressure_timeout_ms != 5000 || config.startup_batch_size <= 0 ||
         config.startup_batch_size > config.concurrency) {
-      *error = "post-rank hop requires endpoint, c1000, payload=102400, business=1000ms, pressure=5000ms";
+      *error = "post-rank hop requires business/pressure endpoints, c1000, payload=102400, business=1000ms, pressure=5000ms";
       return false;
     }
     config_ = config;
@@ -124,7 +125,8 @@ class BurstCoordinator::Impl {
       return false;
     }
     std::cout << "{\"event\":\"pairec_post_rank_hop2_brpc_burst_ready\","
-              << "\"endpoint\":\"" << Escape(config.endpoint)
+              << "\"business_endpoint\":\"" << Escape(config.business_endpoint)
+              << "\",\"pressure_endpoint\":\"" << Escape(config.pressure_endpoint)
               << "\",\"connected_sessions\":" << connected_sessions_
               << ",\"armed_workers\":" << config.concurrency
               << ",\"payload_bytes\":" << config.payload_bytes << "}" << std::endl;
@@ -228,7 +230,8 @@ class BurstCoordinator::Impl {
       options.timeout_ms = config_.pressure_timeout_ms;
       options.max_retry = 0;
       auto channel = std::make_unique<brpc::Channel>();
-      if (channel->Init(config_.endpoint.c_str(), "", &options) == 0) {
+      const std::string& endpoint = lane == 0 ? config_.business_endpoint : config_.pressure_endpoint;
+      if (channel->Init(endpoint.c_str(), "", &options) == 0) {
         auto stub = std::make_unique<pairec::pipeline::DeepFMRankService_Stub>(channel.get());
         pairec::pipeline::HealthRequest request;
         pairec::pipeline::HealthResponse response;

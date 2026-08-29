@@ -55,6 +55,8 @@ grep -Fq '"event":"pairec_post_rank_hop2_brpc_burst_ready"' "$OUTPUT_DIR/hop1.lo
   || die "Hop-1 did not prove 1000 preconnected Hop-2 sessions"
 grep -Fq '"connected_sessions":1000' "$OUTPUT_DIR/hop1.log" \
   || die "Hop-1 connected session count is not 1000"
+grep -Fq 'post-rank hop2 pressure listening on 0.0.0.0:18313' "$OUTPUT_DIR/hop2.log" \
+  || die "Hop-2 pressure listener is not ready on 18313"
 
-echo "PAIREC_POST_RANK_TWO_HOP_READY hop1=192.168.100.12:18311 hop2=192.168.100.12:18312"
+echo "PAIREC_POST_RANK_TWO_HOP_READY hop1=192.168.100.12:18311 hop2_business=192.168.100.12:18312 hop2_pressure=192.168.100.12:18313"
 echo "output_dir=$OUTPUT_DIR"

@@ -25,6 +25,7 @@ spec:
           args:
             - --role=hop2
             - --listen_port=18312
+            - --pressure_listen_port=18313
             - --idle_timeout_sec=-1
           resources:
             requests:
@@ -66,3 +67,6 @@ spec:
     - name: brpc
       port: 18312
       targetPort: 18312
+    - name: pressure
+      port: 18313
+      targetPort: 18313

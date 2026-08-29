@@ -18,6 +18,7 @@ namespace {
 
 struct Config {
   int listen_port = 18311;
+  int pressure_listen_port = 18313;
   std::string role = "hop1";
   pairec::post_rank::BurstConfig burst;
   int idle_timeout_sec = -1;
@@ -36,7 +37,9 @@ bool Parse(int argc, char** argv, Config* config) {
     std::string value;
     if (Value(argv[i], "listen_port", &value)) config->listen_port = std::atoi(value.c_str());
     else if (Value(argv[i], "role", &value)) config->role = value;
-    else if (Value(argv[i], "backend", &value)) config->burst.endpoint = value;
+    else if (Value(argv[i], "backend", &value)) config->burst.business_endpoint = value;
+    else if (Value(argv[i], "business_backend", &value)) config->burst.business_endpoint = value;
+    else if (Value(argv[i], "pressure_backend", &value)) config->burst.pressure_endpoint = value;
     else if (Value(argv[i], "concurrency", &value)) config->burst.concurrency = std::atoi(value.c_str());
     else if (Value(argv[i], "payload_bytes", &value)) config->burst.payload_bytes = std::atoi(value.c_str());
     else if (Value(argv[i], "business_timeout_ms", &value)) config->burst.business_timeout_ms = std::atoi(value.c_str());
@@ -46,13 +49,16 @@ bool Parse(int argc, char** argv, Config* config) {
     else if (Value(argv[i], "startup_max_retries", &value)) config->burst.startup_max_retries = std::atoi(value.c_str());
     else if (Value(argv[i], "startup_retry_backoff_ms", &value)) config->burst.startup_retry_backoff_ms = std::atoi(value.c_str());
     else if (Value(argv[i], "idle_timeout_sec", &value)) config->idle_timeout_sec = std::atoi(value.c_str());
+    else if (Value(argv[i], "pressure_listen_port", &value)) config->pressure_listen_port = std::atoi(value.c_str());
     else {
       std::cerr << "Unknown argument: " << argv[i] << std::endl;
       return false;
     }
   }
-  return config->listen_port > 0 && (config->role == "hop1" || config->role == "hop2") &&
-      (config->role != "hop1" || !config->burst.endpoint.empty());
+  return config->listen_port > 0 && config->pressure_listen_port > 0 &&
+      (config->role == "hop1" || config->role == "hop2") &&
+      (config->role != "hop1" ||
+       (!config->burst.business_endpoint.empty() && !config->burst.pressure_endpoint.empty()));
 }
 
 int64_t SystemNanos() {
@@ -178,13 +184,23 @@ int main(int argc, char** argv) {
     }
   }
   PostRankHopService service(config.role, config.role == "hop1" ? &burst : nullptr);
+  std::unique_ptr<PostRankHopService> pressure_service;
   brpc::Server server;
   if (server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) return 1;
   brpc::ServerOptions options;
   options.idle_timeout_sec = config.idle_timeout_sec;
   if (server.Start(config.listen_port, &options) != 0) return 1;
+  brpc::Server pressure_server;
+  if (config.role == "hop2") {
+    pressure_service = std::make_unique<PostRankHopService>(config.role, nullptr);
+    if (pressure_server.AddService(pressure_service.get(), brpc::SERVER_DOESNT_OWN_SERVICE) != 0) return 1;
+    if (pressure_server.Start(config.pressure_listen_port, &options) != 0) return 1;
+    std::cout << "post-rank hop2 pressure listening on 0.0.0.0:"
+              << config.pressure_listen_port << std::endl;
+  }
   std::cout << "post-rank " << config.role << " listening on 0.0.0.0:"
             << config.listen_port << std::endl;
   server.RunUntilAskedToQuit();
+  if (config.role == "hop2") pressure_server.Stop(0);
   return 0;
 }
