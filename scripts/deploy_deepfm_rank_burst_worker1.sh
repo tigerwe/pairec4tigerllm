@@ -21,6 +21,7 @@ RANK_KVC_RUNTIME_HOST_DIR="${RANK_KVC_RUNTIME_HOST_DIR:-/home/zcx/rank-kvc-runti
 RANK_KVC_RUNTIME_POD_DIR="${RANK_KVC_RUNTIME_POD_DIR:-/opt/pairec-rank-runtime}"
 RANK_KVC_CONCURRENCY="${RANK_KVC_CONCURRENCY:-32}"
 RANK_KVC_PRESSURE_KEY_COUNT="${RANK_KVC_PRESSURE_KEY_COUNT:-4}"
+RANK_REVERSE_BURST_ENDPOINT="${RANK_REVERSE_BURST_ENDPOINT:-}"
 WORKER_SSH="${WORKER_SSH:-root@192.168.100.11}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-10m}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/deepfm-rank-burst-worker1/$(date +%Y%m%d-%H%M%S)}"
@@ -52,6 +53,10 @@ if [[ "$RANK_KVC_CONCURRENCY" = 1 ]]; then
 else
   [[ "$RANK_KVC_PRESSURE_KEY_COUNT" = 4 ]] \
     || die "Rank KVC c32 requires RANK_KVC_PRESSURE_KEY_COUNT=4"
+fi
+if [[ -n "$RANK_REVERSE_BURST_ENDPOINT" && \
+      ! "$RANK_REVERSE_BURST_ENDPOINT" =~ ^[^:[:space:]]+:[0-9]+$ ]]; then
+  die "RANK_REVERSE_BURST_ENDPOINT must be empty or host:port"
 fi
 test -f "$RANK_MANIFEST" || die "missing manifest: $RANK_MANIFEST"
 test -f "$WRAPPER_MANIFEST" || die "missing manifest: $WRAPPER_MANIFEST"
@@ -124,7 +129,7 @@ done
 python3 - "$WRAPPER_MANIFEST" "$OUTPUT_DIR/wrapper.yaml" "${RANK_IP}:18211" \
   "$RANK_KVC_CONCURRENCY" "$RANK_KVC_PRESSURE_KEY_COUNT" \
   "$INFERENCE_RUNTIME_ENV" "$RANK_KVC_RUNTIME_POD_DIR" \
-  "$RANK_KVC_RUNTIME_HOST_DIR" <<'PY'
+  "$RANK_KVC_RUNTIME_HOST_DIR" "$RANK_REVERSE_BURST_ENDPOINT" <<'PY'
 import json,pathlib,re,sys
 text=pathlib.Path(sys.argv[1]).read_text()
 for old,new in {
@@ -134,6 +139,10 @@ for old,new in {
     "__RANK_KVC_RUNTIME_POD_DIR__":sys.argv[7],
     "__RANK_KVC_RUNTIME_HOST_DIR__":sys.argv[8],
 }.items(): text=text.replace(old,new)
+reverse_pattern=r"(?m)^(\s*-\s+--reverse_burst_endpoint=).*$"
+if len(re.findall(reverse_pattern, text)) != 1:
+    raise RuntimeError("expected exactly one reverse_burst_endpoint argument")
+text=re.sub(reverse_pattern, lambda match: match.group(1) + sys.argv[9], text)
 runtime={}
 for line in pathlib.Path(sys.argv[6]).read_text().splitlines():
     name,separator,value=line.partition("=")
@@ -171,6 +180,7 @@ assert "__" not in text
 pathlib.Path(sys.argv[2]).write_text(text, encoding="utf-8")
 print("Rank KVC runtime environment inherited from inference Pod; LD_PRELOAD="
       + runtime["LD_PRELOAD"])
+print("Rank reverse BRPC endpoint=" + (sys.argv[9] or "<disabled>"))
 PY
 kubectl apply -f "$OUTPUT_DIR/wrapper.yaml"
 kubectl -n "$NAMESPACE" rollout restart "deployment/$WRAPPER_DEPLOYMENT"

@@ -10,6 +10,7 @@ ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
 WRAPPER_HOST_BIN="${WRAPPER_HOST_BIN:-/home/zcx/bin/brpc_burst_wrapper}"
 RECOMMEND_CLIENT_HOST_BIN="${RECOMMEND_CLIENT_HOST_BIN:-/home/zcx/bin/brpc_recommend_client}"
 WRAPPER_WORKER="${WRAPPER_WORKER:-root@192.168.100.11}"
+REVERSE_BURST_ENDPOINT="${REVERSE_BURST_ENDPOINT:-}"
 
 die() {
   echo "ERROR: $*" >&2
@@ -19,6 +20,27 @@ die() {
 [ -f "$MANIFEST" ] || die "manifest not found: $MANIFEST"
 command -v kubectl >/dev/null 2>&1 || die "kubectl is required"
 command -v ssh >/dev/null 2>&1 || die "ssh is required"
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
+if [[ -n "$REVERSE_BURST_ENDPOINT" && \
+      ! "$REVERSE_BURST_ENDPOINT" =~ ^[^:[:space:]]+:[0-9]+$ ]]; then
+  die "REVERSE_BURST_ENDPOINT must be empty or host:port"
+fi
+
+RENDERED_MANIFEST="$(mktemp /tmp/brpc-burst-wrapper.XXXXXX.yaml)"
+trap 'rm -f "$RENDERED_MANIFEST"' EXIT
+python3 - "$MANIFEST" "$RENDERED_MANIFEST" "$REVERSE_BURST_ENDPOINT" <<'PY'
+import pathlib
+import re
+import sys
+
+source, target, endpoint = sys.argv[1:]
+text = pathlib.Path(source).read_text()
+pattern = r"(?m)^(\s*-\s+--reverse_burst_endpoint=).*$"
+if len(re.findall(pattern, text)) != 1:
+    raise RuntimeError("expected exactly one reverse_burst_endpoint argument")
+text = re.sub(pattern, lambda match: match.group(1) + endpoint, text)
+pathlib.Path(target).write_text(text, encoding="utf-8")
+PY
 
 echo "== Wrapper binary preflight on worker1 =="
 kubectl get node worker1 >/dev/null 2>&1 || die "Kubernetes node worker1 does not exist"
@@ -43,7 +65,8 @@ timeout 3 bash -c "cat </dev/null >/dev/tcp/${backend_host}/${backend_port}" \
   || die "backend is unreachable: ${BACKEND_ENDPOINT}"
 
 echo "== Deploy BRPC burst wrapper =="
-kubectl apply -f "$MANIFEST"
+echo "reverse_burst_endpoint=${REVERSE_BURST_ENDPOINT:-<disabled>}"
+kubectl apply -f "$RENDERED_MANIFEST"
 # The executable is a hostPath File mount. Replacing the host file preserves
 # the old bind-mount inode in an existing Pod, so every deployment must restart.
 kubectl -n "$NAMESPACE" rollout restart "deployment/${DEPLOYMENT}"

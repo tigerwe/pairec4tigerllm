@@ -49,11 +49,13 @@ NAMESPACE="$NAMESPACE" bash scripts/k8s_apply_brpc_return_pressure_sinks_master.
 
 echo "== Redeploy generation Wrapper after host binary update =="
 NAMESPACE="$NAMESPACE" WRAPPER_WORKER="$WRAPPER_WORKER" \
+  REVERSE_BURST_ENDPOINT=192.168.100.12:18301 \
   bash scripts/k8s_apply_brpc_burst_wrapper_188.sh \
   | tee "$OUTPUT_DIR/generation-wrapper-deploy.log"
 
 echo "== Deploy Rank KVC c32 infrastructure once =="
 NAMESPACE="$NAMESPACE" RANK_KVC_CONCURRENCY=32 RANK_KVC_PRESSURE_KEY_COUNT=4 \
+  RANK_REVERSE_BURST_ENDPOINT=192.168.100.12:18302 \
   OUTPUT_DIR="$OUTPUT_DIR/rank-infrastructure" \
   bash scripts/deploy_deepfm_rank_burst_worker1.sh \
   | tee "$OUTPUT_DIR/rank-infrastructure.log"

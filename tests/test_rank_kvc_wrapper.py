@@ -101,11 +101,13 @@ class RankKvcWrapperTest(unittest.TestCase):
                 [sys.executable, "-c", renderer,
                  str(ROOT / "k8s/deployment-deepfm-rank-burst-wrapper-worker1.yaml"),
                  str(output), "10.0.0.1:18211", "1", "0", str(runtime),
-                 "/opt/pairec-rank-runtime", "/home/zcx/rank-kvc-runtime"],
+                 "/opt/pairec-rank-runtime", "/home/zcx/rank-kvc-runtime", ""],
                 check=True, capture_output=True, text=True,
             )
             documents = list(yaml.safe_load_all(output.read_text()))
         containers = documents[0]["spec"]["template"]["spec"]["containers"]
+        wrapper = next(item for item in containers if item["name"] == "rank-burst-wrapper")
+        self.assertIn("--reverse_burst_endpoint=", wrapper["args"])
         for container_name in ("rank-burst-wrapper", "rank-kvc-burst-wrapper"):
             container = next(item for item in containers if item["name"] == container_name)
             env = {entry["name"]: entry["value"] for entry in container["env"]}

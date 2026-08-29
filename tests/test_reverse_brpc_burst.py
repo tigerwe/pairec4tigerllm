@@ -93,7 +93,7 @@ class ReverseBrpcBurstTest(unittest.TestCase):
             self.assertEqual("8", container["resources"]["limits"]["cpu"])
             self.assertEqual("2Gi", container["resources"]["limits"]["memory"])
 
-    def test_reverse_wrappers_use_master_25g_endpoint(self):
+    def test_reverse_wrappers_are_disabled_by_default_and_abba_enables_them(self):
         generation = yaml.safe_load((
             ROOT / "k8s/deployment-brpc-burst-wrapper-188.yaml"
         ).read_text())
@@ -108,12 +108,25 @@ class ReverseBrpcBurstTest(unittest.TestCase):
             item for item in rank["spec"]["template"]["spec"]["containers"]
             if item["name"] == "rank-burst-wrapper"
         )
+        self.assertIn("--reverse_burst_endpoint=", generation_args)
+        self.assertIn("--reverse_burst_endpoint=", rank_wrapper["args"])
+        benchmark = (
+            ROOT / "scripts/benchmark_pairec_reverse_brpc_abba.sh"
+        ).read_text()
         self.assertIn(
-            "--reverse_burst_endpoint=192.168.100.12:18301", generation_args
+            "REVERSE_BURST_ENDPOINT=192.168.100.12:18301", benchmark
         )
         self.assertIn(
-            "--reverse_burst_endpoint=192.168.100.12:18302", rank_wrapper["args"]
+            "RANK_REVERSE_BURST_ENDPOINT=192.168.100.12:18302", benchmark
         )
+        generation_deploy = (
+            ROOT / "scripts/k8s_apply_brpc_burst_wrapper_188.sh"
+        ).read_text()
+        rank_deploy = (
+            ROOT / "scripts/deploy_deepfm_rank_burst_worker1.sh"
+        ).read_text()
+        self.assertIn('REVERSE_BURST_ENDPOINT="${REVERSE_BURST_ENDPOINT:-}"', generation_deploy)
+        self.assertIn('RANK_REVERSE_BURST_ENDPOINT="${RANK_REVERSE_BURST_ENDPOINT:-}"', rank_deploy)
         for wrapper_args in (generation_args, rank_wrapper["args"]):
             self.assertIn("--reverse_burst_startup_timeout_ms=120000", wrapper_args)
             self.assertIn("--reverse_burst_startup_batch_size=64", wrapper_args)
