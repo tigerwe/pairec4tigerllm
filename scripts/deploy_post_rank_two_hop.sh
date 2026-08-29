@@ -41,10 +41,12 @@ render "$HOP1_MANIFEST" "$OUTPUT_DIR/hop1.yaml"
 
 echo "== Deploy post-rank Hop-2 first =="
 kubectl apply -f "$OUTPUT_DIR/hop2.yaml"
+kubectl -n "$NAMESPACE" rollout restart deployment/post-rank-hop2
 kubectl -n "$NAMESPACE" rollout status deployment/post-rank-hop2 --timeout="$ROLLOUT_TIMEOUT"
 
 echo "== Deploy post-rank Hop-1 and preconnect c1000 to Hop-2 =="
 kubectl apply -f "$OUTPUT_DIR/hop1.yaml"
+kubectl -n "$NAMESPACE" rollout restart deployment/post-rank-hop1
 kubectl -n "$NAMESPACE" rollout status deployment/post-rank-hop1 --timeout="$ROLLOUT_TIMEOUT"
 
 HOP1_POD="$(kubectl -n "$NAMESPACE" get pod -l app=post-rank-hop1 -o jsonpath='{.items[0].metadata.name}')"
@@ -58,5 +60,16 @@ grep -Fq '"connected_sessions":1000' "$OUTPUT_DIR/hop1.log" \
 grep -Fq 'post-rank hop2 pressure listening on 0.0.0.0:18313' "$OUTPUT_DIR/hop2.log" \
   || die "Hop-2 pressure listener is not ready on 18313"
 
+HOST_BINARY_SHA256="$(sha256sum "$BINARY_PATH" | awk '{print $1}')"
+for tuple in "$HOP1_POD:post-rank-hop1" "$HOP2_POD:post-rank-hop2"; do
+  IFS=: read -r pod container <<<"$tuple"
+  POD_BINARY_SHA256="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$container" -- \
+    sha256sum /opt/pairec-brpc-mounted/brpc_post_rank_hop | awk '{print $1}')"
+  [[ "$POD_BINARY_SHA256" = "$HOST_BINARY_SHA256" ]] \
+    || die "running post-rank binary mismatch pod=$pod host_sha=$HOST_BINARY_SHA256 pod_sha=$POD_BINARY_SHA256"
+done
+printf 'binary_sha256=%s\n' "$HOST_BINARY_SHA256" >"$OUTPUT_DIR/binary-sha256.txt"
+
 echo "PAIREC_POST_RANK_TWO_HOP_READY hop1=192.168.100.12:18311 hop2_business=192.168.100.12:18312 hop2_pressure=192.168.100.12:18313"
+echo "binary_sha256=$HOST_BINARY_SHA256"
 echo "output_dir=$OUTPUT_DIR"
