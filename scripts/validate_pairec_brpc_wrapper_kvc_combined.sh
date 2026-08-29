@@ -52,6 +52,7 @@ RANK_KVC_CONCURRENCY=${RANK_KVC_CONCURRENCY:-1}
 RANK_KVC_OBJECT_SIZE=${RANK_KVC_OBJECT_SIZE:-8388608}
 RANK_KVC_BUSINESS_TIMEOUT_MS=${RANK_KVC_BUSINESS_TIMEOUT_MS:-500}
 RANK_KVC_SERVICE_TIMEOUT_MS=${RANK_KVC_SERVICE_TIMEOUT_MS:-750}
+RANK_KVC_COMPLETION_TIMEOUT_SECONDS=${RANK_KVC_COMPLETION_TIMEOUT_SECONDS:-10}
 E2E_TIMEOUT_MS=${E2E_TIMEOUT_MS:-1500}
 LOG_SINCE_LOOKBACK_SECONDS=${LOG_SINCE_LOOKBACK_SECONDS:-60}
 REVERSE_BURST_ENABLED=${REVERSE_BURST_ENABLED:-0}
@@ -159,6 +160,8 @@ if [[ "$RANK_KVC_ENABLED" = 1 ]]; then
     || die "RANK_KVC_CONCURRENCY must be 1 or 32"
   [[ "$RANK_KVC_OBJECT_SIZE" = 8388608 ]] \
     || die "Rank KVC experiment requires exact 8MiB objects"
+  [[ "$RANK_KVC_COMPLETION_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+    || die "RANK_KVC_COMPLETION_TIMEOUT_SECONDS must be positive"
 fi
 
 reverse_burst_control() {
@@ -217,17 +220,6 @@ NAMESPACE="$NAMESPACE" DEPLOYMENT=inference-brpc-trtllm \
   | tee "$OUTPUT_DIR/kvc-overlay.log"
 
 echo "== Deploy preconnected BRPC Wrapper full chain =="
-if [[ "$RANK_KVC_ENABLED" = 1 ]]; then
-  RANK_KVC_POD="$(kubectl -n "$NAMESPACE" get pod -l "app=$RANK_DEPLOYMENT" \
-    --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')"
-  [[ -n "$RANK_KVC_POD" ]] || die "Rank KVC Wrapper Pod not found"
-  echo "== Refresh and verify Rank KVC business key before full-chain warmup =="
-  kubectl -n "$NAMESPACE" exec "$RANK_KVC_POD" -c rank-burst-wrapper -- \
-    /opt/pairec-brpc/bin/brpc_pipeline_client \
-      --server=127.0.0.1:18213 --service=rank --timeout_ms=3000 \
-      --control=rank-kvc-refresh \
-    | tee "$OUTPUT_DIR/rank-kvc-business-refresh-before-warmup.txt"
-fi
 set +e
 NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
   WRAPPER_ENDPOINT="$WRAPPER_ENDPOINT" \
@@ -245,6 +237,9 @@ NAMESPACE="$NAMESPACE" REQUESTS=1 WARMUP_REQUESTS="$WARMUP_REQUESTS" \
   RANK_BUSINESS_PAYLOAD_BYTES="$RANK_BUSINESS_PAYLOAD_BYTES" \
   RANK_BURST_PRESSURE_TIMEOUT_MS="$RANK_BURST_PRESSURE_TIMEOUT_MS" \
   RANK_TIMEOUT_MS="$RANK_TIMEOUT_MS" \
+  RANK_KVC_ENABLED="$RANK_KVC_ENABLED" \
+  RANK_KVC_CONCURRENCY="$RANK_KVC_CONCURRENCY" \
+  RANK_KVC_COMPLETION_TIMEOUT_SECONDS="$RANK_KVC_COMPLETION_TIMEOUT_SECONDS" \
   POST_RANK_HOPS_ENABLED="$POST_RANK_HOPS_ENABLED" \
   POST_RANK_HOP1_ENDPOINT="$POST_RANK_HOP1_ENDPOINT" \
   POST_RANK_TIMEOUT_MS="$POST_RANK_TIMEOUT_MS" \

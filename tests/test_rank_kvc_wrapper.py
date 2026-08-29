@@ -48,14 +48,38 @@ class RankKvcWrapperTest(unittest.TestCase):
         combined = (
             ROOT / "scripts/validate_pairec_brpc_wrapper_kvc_combined.sh"
         ).read_text()
+        full_chain = (
+            ROOT / "scripts/deploy_and_validate_pairec_brpc_wrapper_full.sh"
+        ).read_text()
         self.assertIn("Load(&control.prepared_generation)", sidecar)
         self.assertNotIn("++pressureKeyGeneration;", sidecar)
+        self.assertIn("because burst state did not become ready", sidecar)
         self.assertIn('config->control == "rank-kvc-refresh"', client)
         self.assertIn("--control=rank-kvc-refresh", contention)
-        self.assertIn("rank-kvc-business-refresh-before-warmup.txt", combined)
+        self.assertIn('RANK_KVC_ENABLED="$RANK_KVC_ENABLED"', combined)
+        self.assertNotIn("rank-kvc-business-refresh-before-warmup.txt", combined)
+        self.assertIn("prepare_rank_kvc_request", full_chain)
+        self.assertIn("wait_rank_kvc_completion", full_chain)
+        self.assertIn("--control_action=refresh-and-arm", full_chain)
+        self.assertIn('event.get("pressure_success") == expected - 1', full_chain)
+        self.assertLess(
+            full_chain.index("--control=rank-kvc-refresh"),
+            full_chain.index("--control_action=refresh-and-arm"),
+        )
         self.assertLess(
             contention.index("--control=rank-kvc-refresh"),
             contention.index("--control_action=refresh-and-arm"),
+        )
+
+    def test_rank_kvc_round_failure_does_not_restart_only_the_sidecar(self):
+        sidecar = (ROOT / "cpp/kvc_burst/kvc_burst_wrapper.cpp").read_text()
+        self.assertIn("kvc burst round failed without terminating coordinator", sidecar)
+        self.assertNotIn(
+            "if (!config.readyFile.empty()) std::remove(config.readyFile.c_str());\n"
+            "            break;\n"
+            "        }\n"
+            "        while (!config.inProcessPressure",
+            sidecar,
         )
 
     def test_rank_kvc_sidecar_is_independent_and_exact_shape(self):

@@ -26,6 +26,12 @@ RANK_BURST_POOL_SIZE="${RANK_BURST_POOL_SIZE:-$RANK_BURST_CONCURRENCY}"
 RANK_BURST_PAYLOAD_BYTES="${RANK_BURST_PAYLOAD_BYTES:-102400}"
 RANK_BURST_PRECONNECT="${RANK_BURST_PRECONNECT:-1}"
 RANK_BURST_PRESSURE_TIMEOUT_MS="${RANK_BURST_PRESSURE_TIMEOUT_MS:-5000}"
+RANK_KVC_ENABLED="${RANK_KVC_ENABLED:-0}"
+RANK_KVC_CONCURRENCY="${RANK_KVC_CONCURRENCY:-1}"
+RANK_KVC_CONTAINER="${RANK_KVC_CONTAINER:-rank-kvc-burst-wrapper}"
+RANK_KVC_CONTROL_PATH="${RANK_KVC_CONTROL_PATH:-/run/pairec-rank-kvc-burst/control}"
+RANK_KVC_RESULTS_PATH="${RANK_KVC_RESULTS_PATH:-/run/pairec-rank-kvc-burst/results.jsonl}"
+RANK_KVC_COMPLETION_TIMEOUT_SECONDS="${RANK_KVC_COMPLETION_TIMEOUT_SECONDS:-10}"
 POST_RANK_HOPS_ENABLED="${POST_RANK_HOPS_ENABLED:-0}"
 POST_RANK_HOP1_ENDPOINT="${POST_RANK_HOP1_ENDPOINT:-192.168.100.12:18311}"
 POST_RANK_TIMEOUT_MS="${POST_RANK_TIMEOUT_MS:-1500}"
@@ -88,6 +94,18 @@ die() { echo "ERROR: $*" >&2; exit 1; }
   || die "RANK_BURST_PRECONNECT must be 0 or 1"
 [[ "$RANK_BURST_PRESSURE_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] \
   || die "RANK_BURST_PRESSURE_TIMEOUT_MS must be positive"
+[[ "$RANK_KVC_ENABLED" = 0 || "$RANK_KVC_ENABLED" = 1 ]] \
+  || die "RANK_KVC_ENABLED must be 0 or 1"
+if [[ "$RANK_KVC_ENABLED" = 1 ]]; then
+  [[ "$RANK_BURST_ENABLED" = 1 ]] \
+    || die "RANK_KVC_ENABLED requires RANK_BURST_ENABLED=1"
+  [[ "$RANK_KVC_CONCURRENCY" =~ ^(1|32)$ ]] \
+    || die "RANK_KVC_CONCURRENCY must be 1 or 32"
+  [[ "$REQUESTS" = 1 ]] \
+    || die "Rank KVC full-chain qualification requires REQUESTS=1; repeated measured rounds are owned by the contention runner"
+fi
+[[ "$RANK_KVC_COMPLETION_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+  || die "RANK_KVC_COMPLETION_TIMEOUT_SECONDS must be positive"
 [[ "$POST_RANK_HOPS_ENABLED" = 0 || "$POST_RANK_HOPS_ENABLED" = 1 ]] \
   || die "POST_RANK_HOPS_ENABLED must be 0 or 1"
 if [[ "$POST_RANK_HOPS_ENABLED" = 1 ]]; then
@@ -222,6 +240,78 @@ wait_ready_pod() {
       return 1
     fi
     sleep 0.2
+  done
+}
+
+prepare_rank_kvc_request() {
+  [[ "$RANK_KVC_ENABLED" = 1 ]] || return 0
+  local phase="$1" pod output
+  pod="$(ready_pod "$RANK_DEPLOYMENT")"
+  output="$OUTPUT_DIR/rank-kvc-prepare-${phase}.log"
+  {
+    echo "phase=$phase pod=$pod"
+    kubectl -n "$NAMESPACE" exec "$pod" -c rank-burst-wrapper -- \
+      /opt/pairec-brpc/bin/brpc_pipeline_client \
+        --server=127.0.0.1:18213 --service=rank --timeout_ms=3000 \
+        --control=rank-kvc-refresh
+    kubectl -n "$NAMESPACE" exec "$pod" -c "$RANK_KVC_CONTAINER" -- \
+      /opt/pairec-brpc/bin/kvc_burst_wrapper \
+        --control_action=refresh-and-arm --control_path="$RANK_KVC_CONTROL_PATH"
+  } | tee "$output"
+  echo "PAIREC_RANK_KVC_PREPARED phase=$phase concurrency=$RANK_KVC_CONCURRENCY"
+}
+
+wait_rank_kvc_completion() {
+  [[ "$RANK_KVC_ENABLED" = 1 ]] || return 0
+  local request_id="$1" phase="$2" pod snapshot result deadline status
+  pod="$(ready_pod "$RANK_DEPLOYMENT")"
+  snapshot="$OUTPUT_DIR/rank-kvc-results-${phase}.jsonl"
+  result="$OUTPUT_DIR/rank-kvc-result-${phase}.json"
+  deadline=$((SECONDS + RANK_KVC_COMPLETION_TIMEOUT_SECONDS))
+  while true; do
+    kubectl -n "$NAMESPACE" exec "$pod" -c "$RANK_KVC_CONTAINER" -- \
+      sh -c "cat '$RANK_KVC_RESULTS_PATH' 2>/dev/null || true" >"$snapshot"
+    if python3 - "$snapshot" "$result" "$request_id" "$RANK_KVC_CONCURRENCY" <<'PY'
+import json
+import pathlib
+import sys
+
+source, target, request_id, concurrency = sys.argv[1:]
+matches = []
+for line in pathlib.Path(source).read_text(errors="replace").splitlines():
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if event.get("event") == "kvc_burst_complete" and event.get("request_id") == request_id:
+        matches.append(event)
+if not matches:
+    raise SystemExit(2)
+assert len(matches) == 1, matches
+event = matches[0]
+pathlib.Path(target).write_text(json.dumps(event, indent=2) + "\n")
+expected = int(concurrency)
+assert event.get("concurrency") == expected, event
+assert event.get("business_get_count") == 1, event
+assert event.get("business_get_success_count") == 1, event
+assert event.get("pressure_success") == expected - 1, event
+assert event.get("pressure_errors") == 0, event
+assert event.get("business_success") is True, event
+assert event.get("valid") is True and event.get("failure") == 0, event
+PY
+    then
+      echo "PAIREC_RANK_KVC_REQUEST_COMPLETE phase=$phase request_id=$request_id pressure_success=$((RANK_KVC_CONCURRENCY - 1))"
+      return 0
+    else
+      status=$?
+      if [[ "$status" -ne 2 ]]; then
+        [[ -s "$result" ]] && cat "$result" >&2
+        die "Rank KVC request failed validation: phase=$phase request_id=$request_id"
+      fi
+    fi
+    (( SECONDS < deadline )) \
+      || die "timed out waiting for Rank KVC completion: phase=$phase request_id=$request_id"
+    sleep 0.1
   done
 }
 
@@ -458,12 +548,13 @@ if (( QUALIFICATION_REQUESTS > 0 )); then
   echo "== Qualify deterministic workload user before measurement: $QUALIFICATION_REQUESTS requests =="
   mkdir -p "$OUTPUT_DIR/qualification"
   for index in $(seq 1 "$QUALIFICATION_REQUESTS"); do
+    prepare_rank_kvc_request "qualification-${index}"
     response="$OUTPUT_DIR/qualification/response-${index}.json"
     curl --noproxy '*' -fsS --connect-timeout 2 --max-time 10 \
       "$PAIREC_URL" -H 'Content-Type: application/json' \
       -d "{\"scene_id\":\"$SCENE_ID\",\"uid\":\"$USER_ID\",\"size\":$SIZE}" \
       -o "$response"
-    python3 - "$response" "$SIZE" <<'PY'
+    qualification_request_id="$(python3 - "$response" "$SIZE" <<'PY'
 import json,sys
 data=json.load(open(sys.argv[1])); size=int(sys.argv[2]); items=data.get("items",[])
 assert data.get("code")==200,data
@@ -472,7 +563,10 @@ sources=[item.get("retrieve_id") for item in items]
 generative=sources.count("generative_recall")
 assert 1<=generative<=min(2,size),data
 assert sources==["milvus_recall"]*(size-generative)+["generative_recall"]*generative,data
+print(data["request_id"])
 PY
+    )"
+    wait_rank_kvc_completion "$qualification_request_id" "qualification-${index}"
   done
   echo "PAIREC_BRPC_WRAPPER_WORKLOAD_QUALIFIED user_id=$USER_ID requests=$QUALIFICATION_REQUESTS"
 fi
@@ -482,6 +576,7 @@ if (( WARMUP_REQUESTS > 0 )); then
   mkdir -p "$OUTPUT_DIR/warmup"
   WARMUP_REQUEST_IDS=()
   for index in $(seq 1 "$WARMUP_REQUESTS"); do
+    prepare_rank_kvc_request "warmup-${index}"
     response="$OUTPUT_DIR/warmup/response-${index}.json"
     curl --noproxy '*' -fsS --connect-timeout 2 --max-time 10 \
       "$PAIREC_URL" -H 'Content-Type: application/json' \
@@ -501,6 +596,7 @@ PY
     )"
     WARMUP_REQUEST_IDS+=("$warmup_request_id")
     echo "warmup request_id=$warmup_request_id"
+    wait_rank_kvc_completion "$warmup_request_id" "warmup-${index}"
   done
   echo "== Wait for warmup pressure completion =="
   warmup_deadline=$((SECONDS + COMPLETION_TIMEOUT_SECONDS))
@@ -592,6 +688,7 @@ PY
   echo "PAIREC_BRPC_WRAPPER_FULL_WARMUP_OK requests=$WARMUP_REQUESTS all_enabled_bursts_drained=true"
 fi
 
+prepare_rank_kvc_request "measured-1"
 for app in "$PAIREC_DEPLOYMENT" "$WRAPPER_DEPLOYMENT" "$INFERENCE_DEPLOYMENT" \
   "$VECTOR_DEPLOYMENT" "$RANK_DEPLOYMENT"; do
   pod_state "$app" >"$OUTPUT_DIR/${app}.before"
@@ -620,6 +717,7 @@ LOG_SINCE_AT="$(date --date="${LOG_SINCE_LOOKBACK_SECONDS} seconds ago" --iso-86
 echo "log_since_at=$LOG_SINCE_AT lookback_seconds=$LOG_SINCE_LOOKBACK_SECONDS"
 WORKLOAD_STARTED_AT="$(date +%s.%N)"
 printf 'index\te2e_ms\trequest_id\tresponse_end_epoch_ns\n' >"$OUTPUT_DIR/requests.tsv"
+MEASURED_REQUEST_IDS=()
 for index in $(seq 1 "$REQUESTS"); do
   response="$OUTPUT_DIR/response-${index}.json"
   seconds="$(curl --noproxy '*' -sS --connect-timeout 2 --max-time 10 \
@@ -642,12 +740,16 @@ PY
   e2e_ms="$(python3 -c 'import sys; print(round(float(sys.argv[1])*1000,3))' "$seconds")"
   printf '%s\t%s\t%s\t%s\n' "$index" "$e2e_ms" "$request_id" \
     "$response_end_epoch_ns" | tee -a "$OUTPUT_DIR/requests.tsv"
+  MEASURED_REQUEST_IDS+=("$request_id")
 done
 WORKLOAD_FINISHED_AT="$(date +%s.%N)"
 WORKLOAD_ELAPSED_SECONDS="$(python3 -c \
   'import sys; print(float(sys.argv[2])-float(sys.argv[1]))' \
   "$WORKLOAD_STARTED_AT" "$WORKLOAD_FINISHED_AT")"
 echo "workload elapsed_seconds=$WORKLOAD_ELAPSED_SECONDS requests=$REQUESTS"
+for index in "${!MEASURED_REQUEST_IDS[@]}"; do
+  wait_rank_kvc_completion "${MEASURED_REQUEST_IDS[$index]}" "measured-$((index + 1))"
+done
 
 deadline=$((SECONDS + COMPLETION_TIMEOUT_SECONDS))
 while true; do

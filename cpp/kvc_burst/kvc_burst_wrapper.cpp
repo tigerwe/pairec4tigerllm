@@ -529,9 +529,19 @@ int ApplyControlAction(const Config& config)
     }
 
     pairec::kvc_burst::Store(&control.trigger_armed, 0U);
-    if (pairec::kvc_burst::Load(&control.state) != static_cast<uint32_t>(State::kReady))
+    auto readyDeadline = pairec::kvc_burst::DeadlineNs(30000);
+    auto state = pairec::kvc_burst::Load(&control.state);
+    while (state != static_cast<uint32_t>(State::kReady)
+        && state != static_cast<uint32_t>(State::kFailed)
+        && state != static_cast<uint32_t>(State::kStopping)
+        && pairec::kvc_burst::MonotonicNs() < readyDeadline)
     {
-        std::cerr << "cannot refresh or verify pressure keys unless burst state is ready"
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        state = pairec::kvc_burst::Load(&control.state);
+    }
+    if (state != static_cast<uint32_t>(State::kReady))
+    {
+        std::cerr << "cannot refresh or verify pressure keys because burst state did not become ready"
                   << std::endl;
         return 1;
     }
@@ -1434,9 +1444,9 @@ int Run(int argc, char** argv)
 
         if (result.failure == Failure::kBarrierTimeout || result.failure == Failure::kPressureGetFailed)
         {
-            pairec::kvc_burst::Store(&control.state, static_cast<uint32_t>(State::kFailed));
-            if (!config.readyFile.empty()) std::remove(config.readyFile.c_str());
-            break;
+            std::cerr << "kvc burst round failed without terminating coordinator generation="
+                      << runningGeneration << " failure=" << static_cast<uint32_t>(result.failure)
+                      << std::endl;
         }
         while (!config.inProcessPressure && !gStop.load(std::memory_order_relaxed)
             && pairec::kvc_burst::Load(&control.armed_pressure_lanes) != pressureLanes)
