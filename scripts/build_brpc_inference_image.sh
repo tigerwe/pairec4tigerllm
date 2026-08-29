@@ -16,6 +16,28 @@ DATASYSTEM_INCLUDE_DIR="${DATASYSTEM_INCLUDE_DIR:-}"
 DATASYSTEM_LIBRARY="${DATASYSTEM_LIBRARY:-}"
 SOURCE_COMMIT="${SOURCE_COMMIT:-$(git rev-parse --short=12 HEAD)}"
 
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+if [ "$ENABLE_DATASYSTEM_KV_PROBE" = "ON" ] || [ "$ENABLE_DATASYSTEM_KV_PROBE" = "1" ]; then
+  docker image inspect "$BASE_IMAGE" >/dev/null 2>&1 \
+    || die "DataSystem build base image does not exist locally: $BASE_IMAGE"
+  if [ -z "$DATASYSTEM_INCLUDE_DIR" ]; then
+    ds_header="$(env -u LD_PRELOAD docker run --rm --entrypoint /bin/bash \
+      -e LD_PRELOAD= "$BASE_IMAGE" -lc \
+      'find /usr/local /opt /workspace -type f -path "*/datasystem/include/datasystem/kv_client.h" -print -quit 2>/dev/null')"
+    [ -n "$ds_header" ] \
+      || die "DataSystem C++ header datasystem/kv_client.h is absent from base image $BASE_IMAGE"
+    DATASYSTEM_INCLUDE_DIR="${ds_header%/datasystem/kv_client.h}"
+  fi
+  if [ -z "$DATASYSTEM_LIBRARY" ]; then
+    DATASYSTEM_LIBRARY="$(env -u LD_PRELOAD docker run --rm --entrypoint /bin/bash \
+      -e LD_PRELOAD= "$BASE_IMAGE" -lc \
+      'find /usr/local /opt /workspace \( -type f -o -type l \) -path "*/datasystem/lib/libdatasystem.so" -print -quit 2>/dev/null')"
+    [ -n "$DATASYSTEM_LIBRARY" ] \
+      || die "libdatasystem.so is absent from base image $BASE_IMAGE"
+  fi
+fi
+
 echo "Building brpc inference image"
 echo "  image:             $IMAGE"
 echo "  base image:        $BASE_IMAGE"
@@ -61,6 +83,9 @@ docker run --rm --entrypoint /bin/bash -e LD_PRELOAD= "$IMAGE" -lc '
       exit 1
     }
   done
+  grep -a -q rank-kvc-refresh /opt/pairec-brpc/bin/brpc_pipeline_client
+  grep -a -q rank_kvc_business_refresh_complete \
+    /opt/pairec-brpc/bin/brpc_rank_burst_wrapper
 '
 
 echo "Checking runtime dynamic library dependencies ..."

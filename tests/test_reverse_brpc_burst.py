@@ -187,6 +187,18 @@ class ReverseBrpcBurstTest(unittest.TestCase):
             benchmark.index("Functional treatment smoke n1"),
         )
 
+    def test_datasystem_build_artifacts_are_discovered_inside_base_image(self):
+        build = (ROOT / "scripts/build_brpc_inference_image.sh").read_text()
+        for token in (
+            'docker image inspect "$BASE_IMAGE"',
+            '*/datasystem/include/datasystem/kv_client.h',
+            'DATASYSTEM_INCLUDE_DIR="${ds_header%/datasystem/kv_client.h}"',
+            '*/datasystem/lib/libdatasystem.so',
+            "rank-kvc-refresh",
+            "rank_kvc_business_refresh_complete",
+        ):
+            self.assertIn(token, build)
+
     def test_abba_uses_two_thousand_generation_sessions(self):
         benchmark = (
             ROOT / "scripts/benchmark_pairec_reverse_brpc_abba.sh"
