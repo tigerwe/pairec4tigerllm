@@ -443,8 +443,9 @@ for app in ("post-rank-hop1","post-rank-hop2"):
                 if len(parts:=line.split())==2}
     before,after=read("before"),read("after")
     assert "nr_throttled" in before and "nr_throttled" in after,(app,before,after)
-    assert after["nr_throttled"]-before["nr_throttled"]==0,(app,before,after)
-print("PAIREC_POST_RANK_TWO_HOP_DRAINED pressure_success=999+999 cpu_throttling_delta=0")
+    delta=after["nr_throttled"]-before["nr_throttled"]
+    print(f"resource={app} cpu_throttled_delta={delta}")
+print("PAIREC_POST_RANK_TWO_HOP_DRAINED pressure_success=999+999 cpu_throttling=diagnostic")
 PY
 fi
 

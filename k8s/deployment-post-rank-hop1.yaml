@@ -43,7 +43,6 @@ spec:
               cpu: "8"
               memory: 2Gi
             limits:
-              cpu: "8"
               memory: 2Gi
           startupProbe:
             tcpSocket:

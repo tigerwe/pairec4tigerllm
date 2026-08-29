@@ -72,7 +72,7 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
             'LOG_SINCE_LOOKBACK_SECONDS="$LOG_SINCE_LOOKBACK_SECONDS"',
             combined,
         )
-        self.assertEqual(4, combined.count('--since-time="$LOG_SINCE_AT"'))
+        self.assertEqual(7, combined.count('--since-time="$LOG_SINCE_AT"'))
         self.assertNotIn('--since-time="$STARTED_AT"', combined)
 
     def test_generation_kvc_rank_ab_summary_math(self):
@@ -200,7 +200,7 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
             full_chain,
         )
         self.assertIn("warmup Rank burst completion timed out", full_chain)
-        self.assertIn("generation_and_rank_drained=true", full_chain)
+        self.assertIn("all_enabled_bursts_drained=true", full_chain)
         self.assertIn('WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"', benchmark)
         self.assertIn("requires exactly one excluded warmup request", benchmark)
         self.assertIn(
@@ -218,10 +218,40 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
         for name in ("deployment-post-rank-hop1.yaml", "deployment-post-rank-hop2.yaml"):
             manifest = (ROOT / "k8s" / name).read_text()
             self.assertIn("strategy:\n    type: Recreate", manifest)
+            self.assertNotIn('limits:\n              cpu: "8"', manifest)
         self.assertIn("wait_pods_gone", script)
         self.assertIn("scale deployment/\"$deployment\" --replicas=0", script)
         self.assertIn("timed out deleting old hostNetwork pods", script)
+        self.assertIn("failed to query old hostNetwork pods", script)
+        self.assertIn("pairec_post_rank_binary_identity", script)
         self.assertNotIn("rollout restart deployment/post-rank-hop", script)
+
+    def test_post_rank_business_lanes_do_not_wait_for_pressure_arming(self):
+        outer = (ROOT / "services" / "sort" / "deepfm_rank_sort.go").read_text()
+        coordinator = (
+            ROOT / "services" / "sort" / "brpc_rank_burst_coordinator.go"
+        ).read_text()
+        inner = (ROOT / "cpp" / "brpc_gateway" / "post_rank_hop_burst.cpp").read_text()
+        self.assertIn("DedicatedBusinessLane: true", outer)
+        self.assertIn("businessLane = 1", coordinator)
+        self.assertIn("c.slot <- struct{}{}", coordinator)
+        self.assertIn("std::deque<std::shared_ptr<Round>> rounds", inner)
+        self.assertIn("business_mutex_", inner)
+        self.assertNotIn("round->ready == config_.concurrency - 1", inner)
+        self.assertNotIn("previous post-rank hop2 burst is still active", inner)
+
+    def test_post_rank_benchmark_has_latency_and_pressure_gates(self):
+        benchmark = (
+            ROOT / "scripts" / "benchmark_pairec_post_rank_two_hop_b_n1.sh"
+        ).read_text()
+        validator = (
+            ROOT / "scripts" / "validate_pairec_brpc_wrapper_kvc_combined.sh"
+        ).read_text()
+        self.assertIn('MAX_E2E_MS="${MAX_E2E_MS:-550}"', benchmark)
+        self.assertIn('MAX_POST_RANK_MS="${MAX_POST_RANK_MS:-120}"', benchmark)
+        self.assertIn('outer_complete["burst_valid"] is True', benchmark)
+        self.assertIn("cpu_throttling=diagnostic", validator)
+        self.assertNotIn('after["nr_throttled"]-before["nr_throttled"]==0', validator)
 
     def test_valid_pressure_case_and_tail_windows(self):
         with tempfile.TemporaryDirectory() as directory:

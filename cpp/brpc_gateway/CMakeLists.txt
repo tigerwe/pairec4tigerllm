@@ -468,6 +468,11 @@ add_executable(
   brpc_post_rank_hop.cpp
   post_rank_hop_burst.cpp
 )
+set(PAIREC_SOURCE_COMMIT "unknown" CACHE STRING "Source commit embedded in runtime binaries")
+target_compile_definitions(
+  brpc_post_rank_hop
+  PRIVATE PAIREC_SOURCE_COMMIT="${PAIREC_SOURCE_COMMIT}"
+)
 target_include_directories(brpc_post_rank_hop PRIVATE ${BRPC_INCLUDE_DIR})
 target_link_libraries(
   brpc_post_rank_hop

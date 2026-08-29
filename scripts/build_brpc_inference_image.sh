@@ -14,12 +14,14 @@ TRTLLM_CUDA_INCLUDE_DIR="${TRTLLM_CUDA_INCLUDE_DIR:-}"
 CUDA_DRIVER_LIBRARY="${CUDA_DRIVER_LIBRARY:-}"
 DATASYSTEM_INCLUDE_DIR="${DATASYSTEM_INCLUDE_DIR:-}"
 DATASYSTEM_LIBRARY="${DATASYSTEM_LIBRARY:-}"
+SOURCE_COMMIT="${SOURCE_COMMIT:-$(git rev-parse --short=12 HEAD)}"
 
 echo "Building brpc inference image"
 echo "  image:             $IMAGE"
 echo "  base image:        $BASE_IMAGE"
 echo "  trtllm cpp:        $ENABLE_TRTLLM_CPP"
 echo "  ds kv probe:       $ENABLE_DATASYSTEM_KV_PROBE"
+echo "  source commit:     $SOURCE_COMMIT"
 if [ "$ENABLE_TRTLLM_CPP" = "ON" ] || [ "$ENABLE_TRTLLM_CPP" = "1" ]; then
   echo "  trtllm include:    ${TRTLLM_INCLUDE_DIR:-<auto>}"
   echo "  trtllm library:    ${TRTLLM_LIBRARY:-<auto>}"
@@ -45,6 +47,7 @@ env -u LD_PRELOAD docker build \
   --build-arg "CUDA_DRIVER_LIBRARY=$CUDA_DRIVER_LIBRARY" \
   --build-arg "DATASYSTEM_INCLUDE_DIR=$DATASYSTEM_INCLUDE_DIR" \
   --build-arg "DATASYSTEM_LIBRARY=$DATASYSTEM_LIBRARY" \
+  --build-arg "SOURCE_COMMIT=$SOURCE_COMMIT" \
   -f docker/Dockerfile.brpc.gateway \
   -t "$IMAGE" .
 

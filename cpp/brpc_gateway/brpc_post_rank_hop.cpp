@@ -14,6 +14,10 @@
 #include "pipeline_service.pb.h"
 #include "post_rank_hop_burst.h"
 
+#ifndef PAIREC_SOURCE_COMMIT
+#define PAIREC_SOURCE_COMMIT "unknown"
+#endif
+
 namespace {
 
 struct Config {
@@ -175,6 +179,9 @@ class PostRankHopService final : public pairec::pipeline::DeepFMRankService {
 int main(int argc, char** argv) {
   Config config;
   if (!Parse(argc, argv, &config)) return 2;
+  std::cout << "{\"event\":\"pairec_post_rank_binary_identity\","
+            << "\"source_commit\":\"" << PAIREC_SOURCE_COMMIT << "\","
+            << "\"role\":\"" << config.role << "\"}" << std::endl;
   pairec::post_rank::BurstCoordinator burst;
   if (config.role == "hop1") {
     std::string error;

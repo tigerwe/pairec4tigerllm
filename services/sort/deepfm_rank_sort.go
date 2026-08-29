@@ -243,8 +243,9 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 				Concurrency: config.PostRankBurstConcurrency, PoolSize: config.PostRankBurstPoolSize,
 				PressureBytes: config.PostRankPayloadBytes, BusinessBytes: config.PostRankPayloadBytes,
 				BusinessTimeout: postTimeout, PressureTimeout: pressureTimeout,
-				EventPrefix:    "pairec_post_rank_hop1_brpc_burst",
-				TraceComponent: "post_rank_hop1",
+				EventPrefix:           "pairec_post_rank_hop1_brpc_burst",
+				TraceComponent:        "post_rank_hop1",
+				DedicatedBusinessLane: true,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("initialize post-rank hop1 burst: %w", err)

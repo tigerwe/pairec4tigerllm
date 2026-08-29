@@ -2,7 +2,8 @@
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-pairec}"
-BUILD_IMAGE="${BUILD_IMAGE:-docker.io/library/pairec-brpc-inference:post-rank-two-hop-20260829}"
+SOURCE_COMMIT="${SOURCE_COMMIT:-$(git rev-parse --short=12 HEAD)}"
+BUILD_IMAGE="${BUILD_IMAGE:-docker.io/library/pairec-brpc-inference:post-rank-two-hop-${SOURCE_COMMIT}}"
 RUNTIME_IMAGE="${RUNTIME_IMAGE:-docker.io/library/pairec-brpc-inference:k8s-arm64-v1}"
 BINARY_PATH="${BINARY_PATH:-/home/zcx/bin/brpc_post_rank_hop}"
 HOP1_MANIFEST="${HOP1_MANIFEST:-k8s/deployment-post-rank-hop1.yaml}"
@@ -43,7 +44,8 @@ wait_pods_gone() {
   local app="$1" pods
   local deadline=$((SECONDS + 120))
   while true; do
-    pods="$(kubectl -n "$NAMESPACE" get pods -l "app=$app" -o name 2>/dev/null || true)"
+    pods="$(kubectl -n "$NAMESPACE" get pods -l "app=$app" -o name)" \
+      || die "failed to query old hostNetwork pods for app=$app"
     [[ -z "$pods" ]] && return
     (( SECONDS < deadline )) || die "timed out deleting old hostNetwork pods for app=$app: $pods"
     sleep 1
@@ -77,6 +79,12 @@ grep -Fq '"connected_sessions":1000' "$OUTPUT_DIR/hop1.log" \
   || die "Hop-1 connected session count is not 1000"
 grep -Fq 'post-rank hop2 pressure listening on 0.0.0.0:18313' "$OUTPUT_DIR/hop2.log" \
   || die "Hop-2 pressure listener is not ready on 18313"
+for log in "$OUTPUT_DIR/hop1.log" "$OUTPUT_DIR/hop2.log"; do
+  grep -Fq "\"event\":\"pairec_post_rank_binary_identity\"" "$log" \
+    || die "post-rank startup log does not contain binary identity: $log"
+  grep -Fq "\"source_commit\":\"$SOURCE_COMMIT\"" "$log" \
+    || die "post-rank binary source mismatch expected=$SOURCE_COMMIT log=$log"
+done
 
 HOST_BINARY_SHA256="$(sha256sum "$BINARY_PATH" | awk '{print $1}')"
 for tuple in "$HOP1_POD:post-rank-hop1" "$HOP2_POD:post-rank-hop2"; do
@@ -87,7 +95,9 @@ for tuple in "$HOP1_POD:post-rank-hop1" "$HOP2_POD:post-rank-hop2"; do
     || die "running post-rank binary mismatch pod=$pod host_sha=$HOST_BINARY_SHA256 pod_sha=$POD_BINARY_SHA256"
 done
 printf 'binary_sha256=%s\n' "$HOST_BINARY_SHA256" >"$OUTPUT_DIR/binary-sha256.txt"
+printf 'source_commit=%s\n' "$SOURCE_COMMIT" >"$OUTPUT_DIR/source-commit.txt"
 
 echo "PAIREC_POST_RANK_TWO_HOP_READY hop1=192.168.100.12:18311 hop2_business=192.168.100.12:18312 hop2_pressure=192.168.100.12:18313"
 echo "binary_sha256=$HOST_BINARY_SHA256"
+echo "source_commit=$SOURCE_COMMIT"
 echo "output_dir=$OUTPUT_DIR"

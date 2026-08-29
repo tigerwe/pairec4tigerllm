@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -58,12 +59,10 @@ class BurstCoordinator::Impl {
     uint64_t sequence = 0;
     pairec::pipeline::RankRequest request;
     std::mutex mutex;
-    std::condition_variable cv;
-    int ready = 0;
-    bool released = false;
     int completed = 0;
     int pressure_success = 0;
     int pressure_errors = 0;
+    int pressure_overlap_business = 0;
     std::atomic<int> active{0};
     std::atomic<int> max_active{0};
     int64_t released_us = 0;
@@ -81,6 +80,9 @@ class BurstCoordinator::Impl {
   struct Worker {
     std::unique_ptr<brpc::Channel> channel;
     std::unique_ptr<pairec::pipeline::DeepFMRankService_Stub> stub;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<std::shared_ptr<Round>> rounds;
     std::thread thread;
   };
 
@@ -143,13 +145,7 @@ class BurstCoordinator::Impl {
   void Shutdown() {
     if (workers_.empty()) return;
     shutdown_.store(true, std::memory_order_release);
-    state_cv_.notify_all();
-    std::shared_ptr<Round> round;
-    {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      round = current_;
-    }
-    if (round) round->cv.notify_all();
+    for (auto& worker : workers_) worker->cv.notify_all();
     for (auto& worker : workers_) {
       if (worker->thread.joinable()) worker->thread.join();
     }
@@ -163,56 +159,69 @@ class BurstCoordinator::Impl {
     round->request = request;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
-      if (current_) {
-        result->error = "previous post-rank hop2 burst is still active";
-        return false;
-      }
       round->sequence = ++sequence_;
-      current_ = round;
+      ++active_rounds_;
     }
-    state_cv_.notify_all();
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(config_.business_timeout_ms);
-    {
-      std::unique_lock<std::mutex> lock(round->mutex);
-      if (!round->cv.wait_until(lock, deadline, [&] {
-            return round->ready == config_.concurrency - 1;
-          })) {
-        result->error = "timed out arming post-rank hop2 workers";
-        round->released = true;
-        round->cv.notify_all();
-        return false;
+    std::mutex started_mutex;
+    std::condition_variable started_cv;
+    bool business_started = false;
+    std::thread business([&, round] {
+      brpc::Controller controller;
+      controller.set_timeout_ms(config_.business_timeout_ms);
+      pairec::pipeline::RankResponse business_response;
+      std::unique_lock<std::mutex> business_lock(business_mutex_);
+      const int64_t started_ns = SystemNanos();
+      {
+        std::lock_guard<std::mutex> lock(round->mutex);
+        round->business_start_ns = started_ns;
       }
-      std::cout << "{\"event\":\"pairec_post_rank_hop2_brpc_burst_start\","
-                << "\"request_id\":\"" << Escape(request.context().request_id())
-                << "\",\"concurrency\":" << config_.concurrency
-                << ",\"armed_workers\":" << config_.concurrency
-                << ",\"payload_bytes\":" << config_.payload_bytes << "}" << std::endl;
-      round->released_us = SteadyMicros();
-      round->released = true;
-      round->cv.notify_all();
-    }
-    // Run the business RPC on the caller thread so pressure workers cannot starve it.
-    const int64_t business_start_ns = SystemNanos();
-    brpc::Controller business_controller;
-    business_controller.set_timeout_ms(config_.business_timeout_ms);
-    pairec::pipeline::RankResponse business_response;
-    workers_[0]->stub->Rank(&business_controller, &round->request, &business_response, nullptr);
-    const int64_t business_end_ns = SystemNanos();
-    bool finish = false;
+      {
+        std::lock_guard<std::mutex> lock(started_mutex);
+        business_started = true;
+      }
+      started_cv.notify_one();
+      workers_[0]->stub->Rank(&controller, &round->request, &business_response, nullptr);
+      business_lock.unlock();
+      const int64_t ended_ns = SystemNanos();
+      bool finish = false;
+      {
+        std::lock_guard<std::mutex> lock(round->mutex);
+        round->business_success = !controller.Failed() && business_response.code() == 200;
+        round->business_end_ns = ended_ns;
+        round->business_response = business_response;
+        if (controller.Failed()) {
+          round->business_error = controller.ErrorText();
+        } else if (business_response.code() != 200) {
+          round->business_error = business_response.message();
+        }
+        ++round->completed;
+        finish = round->completed == config_.concurrency;
+      }
+      if (finish) Complete(round);
+    });
     {
-      std::lock_guard<std::mutex> business_lock(round->mutex);
-      round->business_success = !business_controller.Failed() && business_response.code() == 200;
-      round->business_start_ns = business_start_ns;
-      round->business_end_ns = business_end_ns;
-      round->business_response = business_response;
-      round->business_error = business_controller.Failed() ? business_controller.ErrorText() : "";
-      ++round->completed;
-      finish = round->completed == config_.concurrency;
+      std::unique_lock<std::mutex> lock(started_mutex);
+      started_cv.wait(lock, [&] { return business_started; });
     }
-    round->cv.notify_all();
-    if (finish) Complete(round);
-    std::unique_lock<std::mutex> lock(round->mutex);
+    round->released_us = SteadyMicros();
+    std::cout << "{\"event\":\"pairec_post_rank_hop2_brpc_burst_start\","
+              << "\"request_id\":\"" << Escape(request.context().request_id())
+              << "\",\"concurrency\":" << config_.concurrency
+              << ",\"armed_workers\":" << config_.concurrency
+              << ",\"payload_bytes\":" << config_.payload_bytes << "}" << std::endl;
+    {
+      std::lock_guard<std::mutex> dispatch_lock(pressure_dispatch_mutex_);
+      for (int lane = 1; lane < config_.concurrency; ++lane) {
+        Worker& worker = *workers_[lane];
+        {
+          std::lock_guard<std::mutex> lock(worker.mutex);
+          worker.rounds.push_back(round);
+        }
+        worker.cv.notify_one();
+      }
+    }
+    business.join();
+    std::lock_guard<std::mutex> lock(round->mutex);
     result->success = round->business_success;
     result->business_wall_ms =
         static_cast<double>(round->business_end_ns - round->business_start_ns) / 1e6;
@@ -234,7 +243,7 @@ class BurstCoordinator::Impl {
 
   bool idle() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    return current_ == nullptr;
+    return active_rounds_ == 0;
   }
 
   int connected_sessions() const {
@@ -284,29 +293,20 @@ class BurstCoordinator::Impl {
     startup_cv_.notify_all();
     if (!connected) return;
 
-    uint64_t seen = 0;
     while (!shutdown_.load(std::memory_order_acquire)) {
       std::shared_ptr<Round> round;
       {
-        std::unique_lock<std::mutex> lock(state_mutex_);
-        state_cv_.wait(lock, [&] {
-          return shutdown_.load(std::memory_order_acquire) ||
-              (current_ && current_->sequence > seen);
+        std::unique_lock<std::mutex> lock(worker.mutex);
+        worker.cv.wait(lock, [&] {
+          return shutdown_.load(std::memory_order_acquire) || !worker.rounds.empty();
         });
         if (shutdown_.load(std::memory_order_acquire)) return;
-        round = current_;
-        seen = round->sequence;
-      }
-      {
-        std::unique_lock<std::mutex> lock(round->mutex);
-        ++round->ready;
-        round->cv.notify_all();
-        round->cv.wait(lock, [&] {
-          return shutdown_.load(std::memory_order_acquire) || round->released;
-        });
+        round = worker.rounds.front();
+        worker.rounds.pop_front();
       }
       if (shutdown_.load(std::memory_order_acquire)) return;
       const int64_t started_us = SteadyMicros();
+      const int64_t started_ns = SystemNanos();
       const int current = round->active.fetch_add(1) + 1;
       UpdateMax(&round->max_active, current);
       bool ok = false;
@@ -319,6 +319,7 @@ class BurstCoordinator::Impl {
       worker.stub->Health(&controller, &health, &health_response, nullptr);
       ok = !controller.Failed() && health_response.code() == 200;
       const int64_t ended_us = SteadyMicros();
+      const int64_t ended_ns = SystemNanos();
       round->active.fetch_sub(1);
       bool finish = false;
       {
@@ -328,18 +329,21 @@ class BurstCoordinator::Impl {
         round->last_end_us = std::max(round->last_end_us, ended_us);
         if (ok) ++round->pressure_success;
         else ++round->pressure_errors;
+        if (round->business_start_ns > 0 && ended_ns >= round->business_start_ns &&
+            (round->business_end_ns == 0 || started_ns <= round->business_end_ns)) {
+          ++round->pressure_overlap_business;
+        }
         round->pressure_us.push_back(ended_us - started_us);
         ++round->completed;
         finish = round->completed == config_.concurrency;
       }
-      round->cv.notify_all();
       if (finish) Complete(round);
     }
   }
 
   void Complete(const std::shared_ptr<Round>& round) {
     std::vector<int64_t> latencies;
-    int success, errors, max_active;
+    int success, errors, overlap, max_active;
     int64_t first, last_start, last_end, released;
     bool business_success;
     {
@@ -347,6 +351,7 @@ class BurstCoordinator::Impl {
       latencies = round->pressure_us;
       success = round->pressure_success;
       errors = round->pressure_errors;
+      overlap = round->pressure_overlap_business;
       max_active = round->max_active.load();
       first = round->first_start_us;
       last_start = round->last_start_us;
@@ -363,6 +368,7 @@ class BurstCoordinator::Impl {
               << ",\"pressure_requests\":" << config_.concurrency - 1
               << ",\"pressure_success\":" << success
               << ",\"pressure_errors\":" << errors
+              << ",\"pressure_overlap_business\":" << overlap
               << ",\"business_success\":" << (business_success ? "true" : "false")
               << ",\"max_active_workers\":" << max_active
               << ",\"start_skew_us\":" << std::max<int64_t>(0, last_start - first)
@@ -373,20 +379,20 @@ class BurstCoordinator::Impl {
               << "}" << std::endl;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
-      if (current_ == round) current_.reset();
+      if (active_rounds_ > 0) --active_rounds_;
     }
-    state_cv_.notify_all();
   }
 
   BurstConfig config_;
   std::vector<std::unique_ptr<Worker>> workers_;
   mutable std::mutex state_mutex_;
-  std::condition_variable state_cv_;
   std::condition_variable startup_cv_;
-  std::shared_ptr<Round> current_;
   std::atomic<bool> shutdown_{false};
+  std::mutex business_mutex_;
+  std::mutex pressure_dispatch_mutex_;
   int startup_finished_ = 0;
   int connected_sessions_ = 0;
+  int active_rounds_ = 0;
   uint64_t sequence_ = 0;
 };
 

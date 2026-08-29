@@ -14,14 +14,15 @@ import (
 )
 
 type RankBurstConfig struct {
-	Concurrency     int
-	PoolSize        int
-	PressureBytes   int
-	BusinessBytes   int
-	BusinessTimeout time.Duration
-	PressureTimeout time.Duration
-	EventPrefix     string
-	TraceComponent  string
+	Concurrency           int
+	PoolSize              int
+	PressureBytes         int
+	BusinessBytes         int
+	BusinessTimeout       time.Duration
+	PressureTimeout       time.Duration
+	EventPrefix           string
+	TraceComponent        string
+	DedicatedBusinessLane bool
 }
 
 type rankBurstSession interface {
@@ -32,20 +33,23 @@ type rankBurstSession interface {
 }
 
 type RankBurstCoordinator struct {
-	sessions        []rankBurstSession
-	workers         []chan rankBurstJob
-	concurrency     int
-	poolSize        int
-	pressureBytes   int
-	businessBytes   int
-	businessTimeout time.Duration
-	pressureTimeout time.Duration
-	poolCursor      int
-	sequence        uint64
-	slot            chan struct{}
-	logEvent        func(any)
-	eventPrefix     string
-	traceComponent  string
+	sessions              []rankBurstSession
+	workers               []chan rankBurstJob
+	concurrency           int
+	poolSize              int
+	pressureBytes         int
+	businessBytes         int
+	businessTimeout       time.Duration
+	pressureTimeout       time.Duration
+	poolCursor            int
+	sequence              uint64
+	slot                  chan struct{}
+	logEvent              func(any)
+	eventPrefix           string
+	traceComponent        string
+	dedicatedBusinessLane bool
+	pressureDispatch      sync.Mutex
+	rounds                sync.WaitGroup
 }
 
 type rankBurstJob struct {
@@ -58,6 +62,7 @@ type rankBurstJob struct {
 	results        chan<- rankBurstLaneResult
 	businessResult chan<- rankBurstLaneResult
 	complete       *sync.WaitGroup
+	started        chan<- struct{}
 	active         *int64
 	maxActive      *int64
 }
@@ -148,6 +153,9 @@ func newRankBurstCoordinator(sessions []rankBurstSession, cfg RankBurstConfig, l
 	if cfg.PoolSize < cfg.Concurrency || cfg.PoolSize > 1000 {
 		return nil, fmt.Errorf("rank burst pool size must be in [concurrency,1000]")
 	}
+	if cfg.DedicatedBusinessLane && cfg.PoolSize != cfg.Concurrency {
+		return nil, fmt.Errorf("dedicated business lane requires pool size to equal concurrency")
+	}
 	if len(sessions) != cfg.PoolSize {
 		return nil, fmt.Errorf("rank session count %d does not match pool size %d", len(sessions), cfg.PoolSize)
 	}
@@ -175,6 +183,7 @@ func newRankBurstCoordinator(sessions []rankBurstSession, cfg RankBurstConfig, l
 		businessTimeout: cfg.BusinessTimeout, pressureTimeout: cfg.PressureTimeout,
 		slot: make(chan struct{}, 1), logEvent: logger,
 		eventPrefix: cfg.EventPrefix, traceComponent: cfg.TraceComponent,
+		dedicatedBusinessLane: cfg.DedicatedBusinessLane,
 	}
 	c.workers = make([]chan rankBurstJob, cfg.PoolSize)
 	for index := range sessions {
@@ -201,19 +210,38 @@ func (c *RankBurstCoordinator) Rank(request *pipelinepb.RankRequest, requestID s
 	selected := c.selectSessions()
 	sequence := atomic.AddUint64(&c.sequence, 1)
 	businessLane := int((sequence-1)%uint64(c.concurrency)) + 1
+	if c.dedicatedBusinessLane {
+		businessLane = 1
+	}
 	results := make(chan rankBurstLaneResult, c.concurrency)
 	businessResult := make(chan rankBurstLaneResult, 1)
 	gate := make(chan struct{})
+	businessGate := gate
+	pressureGate := gate
+	var businessStarted chan struct{}
+	if c.dedicatedBusinessLane {
+		businessGate = make(chan struct{})
+		pressureGate = make(chan struct{})
+		businessStarted = make(chan struct{}, 1)
+	}
 	var complete sync.WaitGroup
 	var active, maxActive int64
 	var releasedAt time.Time
 	complete.Add(c.concurrency)
-	for lane, sessionIndex := range selected {
-		c.workers[sessionIndex] <- rankBurstJob{
-			request: request, requestID: requestID, lane: lane + 1,
-			business: lane+1 == businessLane, gate: gate, releasedAt: &releasedAt,
+	c.rounds.Add(1)
+	makeJob := func(lane, sessionIndex int, laneGate <-chan struct{}, started chan<- struct{}) rankBurstJob {
+		return rankBurstJob{
+			request: request, requestID: requestID, lane: lane,
+			business: lane == businessLane, gate: laneGate, releasedAt: &releasedAt,
 			results: results, businessResult: businessResult, complete: &complete,
-			active: &active, maxActive: &maxActive,
+			started: started, active: &active, maxActive: &maxActive,
+		}
+	}
+	if c.dedicatedBusinessLane {
+		c.workers[selected[0]] <- makeJob(1, selected[0], businessGate, businessStarted)
+	} else {
+		for lane, sessionIndex := range selected {
+			c.workers[sessionIndex] <- makeJob(lane+1, sessionIndex, gate, nil)
 		}
 	}
 	c.logEvent(map[string]any{
@@ -223,7 +251,21 @@ func (c *RankBurstCoordinator) Rank(request *pipelinepb.RankRequest, requestID s
 		"pressure_payload_bytes": c.pressureBytes, "business_payload_bytes": c.businessBytes,
 	})
 	releasedAt = time.Now()
-	close(gate)
+	if c.dedicatedBusinessLane {
+		close(businessGate)
+		<-businessStarted
+		close(pressureGate)
+		go func() {
+			c.pressureDispatch.Lock()
+			defer c.pressureDispatch.Unlock()
+			for lane := 1; lane < len(selected); lane++ {
+				sessionIndex := selected[lane]
+				c.workers[sessionIndex] <- makeJob(lane+1, sessionIndex, pressureGate, nil)
+			}
+		}()
+	} else {
+		close(gate)
+	}
 	business := <-businessResult
 	businessEvent := makeRankBurstBusinessEvent(
 		c.eventPrefix, c.traceComponent, requestID, c.concurrency,
@@ -235,9 +277,16 @@ func (c *RankBurstCoordinator) Rank(request *pipelinepb.RankRequest, requestID s
 		c.logEvent(makeRankBurstCompleteEvent(
 			c.eventPrefix, requestID, c.concurrency, businessLane, releasedAt,
 			atomic.LoadInt64(&maxActive), businessEvent, results, c.poolSize,
+			!c.dedicatedBusinessLane,
 		))
-		c.slot <- struct{}{}
+		c.rounds.Done()
+		if !c.dedicatedBusinessLane {
+			c.slot <- struct{}{}
+		}
 	}()
+	if c.dedicatedBusinessLane {
+		c.slot <- struct{}{}
+	}
 	if business.err != nil {
 		return nil, business.err
 	}
@@ -261,6 +310,9 @@ func (c *RankBurstCoordinator) runWorker(sessionIndex int, jobs <-chan rankBurst
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		if job.business {
+			if job.started != nil {
+				job.started <- struct{}{}
+			}
 			result.response, result.err = c.sessions[sessionIndex].Rank(ctx, job.request)
 		} else {
 			_, result.err = c.sessions[sessionIndex].HealthWithPayload(ctx, job.requestID, c.pressureBytes)
@@ -314,6 +366,7 @@ func (c *RankBurstCoordinator) connectAll() error {
 
 func (c *RankBurstCoordinator) Close() {
 	<-c.slot
+	c.rounds.Wait()
 	for _, worker := range c.workers {
 		close(worker)
 	}
@@ -348,7 +401,7 @@ func makeRankBurstBusinessEvent(eventPrefix, traceComponent, requestID string,
 func makeRankBurstCompleteEvent(eventPrefix, requestID string,
 	concurrency, businessLane int, releasedAt time.Time, maxActive int64,
 	business rankBurstBusinessEvent, results <-chan rankBurstLaneResult,
-	poolSize int) rankBurstCompleteEvent {
+	poolSize int, requirePressureOverlap bool) rankBurstCompleteEvent {
 	latencies := make([]int64, 0, concurrency-1)
 	starts := make([]int64, 0, concurrency)
 	pressureSuccess, overlap := 0, 0
@@ -398,7 +451,7 @@ func makeRankBurstCompleteEvent(eventPrefix, requestID string,
 		BusinessStartEpochNS: business.StartEpochNS, BusinessEndEpochNS: business.EndEpochNS,
 		BusinessSuccess: business.Success, TraceValid: business.TraceValid,
 		BurstValid: business.Success && business.TraceValid && pressureSuccess == pressureRequests &&
-			(pressureRequests == 0 || overlap > 0),
+			(!requirePressureOverlap || pressureRequests == 0 || overlap > 0),
 		PressurePayloadTransport: "protobuf",
 	}
 }

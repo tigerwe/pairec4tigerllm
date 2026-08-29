@@ -2,6 +2,7 @@ package ranksort
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,7 +13,9 @@ import (
 
 type fakeRankBurstSession struct {
 	pressureDelay time.Duration
+	rankDelay     time.Duration
 	connected     atomic.Bool
+	rankCalls     atomic.Int64
 }
 
 func (s *fakeRankBurstSession) Connect(context.Context) error {
@@ -21,6 +24,10 @@ func (s *fakeRankBurstSession) Connect(context.Context) error {
 }
 
 func (s *fakeRankBurstSession) Rank(_ context.Context, request *pipelinepb.RankRequest) (*pipelinepb.RankResponse, error) {
+	s.rankCalls.Add(1)
+	if s.rankDelay > 0 {
+		time.Sleep(s.rankDelay)
+	}
 	return &pipelinepb.RankResponse{
 		Code: proto.Int32(200),
 		Trace: &pipelinepb.ServiceTrace{
@@ -29,6 +36,57 @@ func (s *fakeRankBurstSession) Rank(_ context.Context, request *pipelinepb.RankR
 			TotalUS:   proto.Int64(1000),
 		},
 	}, nil
+}
+
+func TestRankBurstCoordinatorDedicatedLaneDoesNotWaitForPreviousPressureTail(t *testing.T) {
+	const concurrency = 4
+	sessions := make([]rankBurstSession, concurrency)
+	fakes := make([]*fakeRankBurstSession, concurrency)
+	for index := range sessions {
+		fakes[index] = &fakeRankBurstSession{
+			pressureDelay: 80 * time.Millisecond,
+			rankDelay:     20 * time.Millisecond,
+		}
+		sessions[index] = fakes[index]
+	}
+	events := make(chan any, 16)
+	coordinator, err := newRankBurstCoordinator(
+		sessions,
+		RankBurstConfig{
+			Concurrency: concurrency, PoolSize: concurrency,
+			BusinessBytes: 102400, PressureBytes: 102400,
+			BusinessTimeout: time.Second, PressureTimeout: time.Second,
+			DedicatedBusinessLane: true,
+		},
+		func(event any) { events <- event },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coordinator.Close()
+	for index := 0; index < 2; index++ {
+		started := time.Now()
+		if _, err := coordinator.Rank(testRankBurstRequest(), fmt.Sprintf("dedicated-%d", index)); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(started); elapsed >= 50*time.Millisecond {
+			t.Fatalf("business request %d waited for a pressure tail: %s", index, elapsed)
+		}
+	}
+	for index := 0; index < 2; index++ {
+		complete := waitRankBurstComplete(t, events)
+		if complete.BusinessLane != 1 || !complete.BurstValid || complete.PressureSuccess != concurrency-1 {
+			t.Fatalf("unexpected dedicated completion: %#v", complete)
+		}
+	}
+	if got := fakes[0].rankCalls.Load(); got != 2 {
+		t.Fatalf("dedicated business session calls=%d, want 2", got)
+	}
+	for index := 1; index < len(fakes); index++ {
+		if got := fakes[index].rankCalls.Load(); got != 0 {
+			t.Fatalf("pressure session %d handled %d business calls", index, got)
+		}
+	}
 }
 
 func (s *fakeRankBurstSession) HealthWithPayload(ctx context.Context, _ string, _ int) (*pipelinepb.HealthResponse, error) {
