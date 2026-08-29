@@ -39,15 +39,33 @@ IMAGE="$RUNTIME_IMAGE"
 render "$HOP2_MANIFEST" "$OUTPUT_DIR/hop2.yaml"
 render "$HOP1_MANIFEST" "$OUTPUT_DIR/hop1.yaml"
 
+wait_pods_gone() {
+  local app="$1" pods
+  local deadline=$((SECONDS + 120))
+  while true; do
+    pods="$(kubectl -n "$NAMESPACE" get pods -l "app=$app" -o name 2>/dev/null || true)"
+    [[ -z "$pods" ]] && return
+    (( SECONDS < deadline )) || die "timed out deleting old hostNetwork pods for app=$app: $pods"
+    sleep 1
+  done
+}
+
+deploy_host_network() {
+  local deployment="$1" app="$2" manifest="$3"
+  if kubectl -n "$NAMESPACE" get deployment "$deployment" >/dev/null 2>&1; then
+    echo "== Stop old $deployment before reusing hostNetwork ports =="
+    kubectl -n "$NAMESPACE" scale deployment/"$deployment" --replicas=0
+    wait_pods_gone "$app"
+  fi
+  kubectl apply -f "$manifest"
+  kubectl -n "$NAMESPACE" rollout status deployment/"$deployment" --timeout="$ROLLOUT_TIMEOUT"
+}
+
 echo "== Deploy post-rank Hop-2 first =="
-kubectl apply -f "$OUTPUT_DIR/hop2.yaml"
-kubectl -n "$NAMESPACE" rollout restart deployment/post-rank-hop2
-kubectl -n "$NAMESPACE" rollout status deployment/post-rank-hop2 --timeout="$ROLLOUT_TIMEOUT"
+deploy_host_network post-rank-hop2 post-rank-hop2 "$OUTPUT_DIR/hop2.yaml"
 
 echo "== Deploy post-rank Hop-1 and preconnect c1000 to Hop-2 =="
-kubectl apply -f "$OUTPUT_DIR/hop1.yaml"
-kubectl -n "$NAMESPACE" rollout restart deployment/post-rank-hop1
-kubectl -n "$NAMESPACE" rollout status deployment/post-rank-hop1 --timeout="$ROLLOUT_TIMEOUT"
+deploy_host_network post-rank-hop1 post-rank-hop1 "$OUTPUT_DIR/hop1.yaml"
 
 HOP1_POD="$(kubectl -n "$NAMESPACE" get pod -l app=post-rank-hop1 -o jsonpath='{.items[0].metadata.name}')"
 HOP2_POD="$(kubectl -n "$NAMESPACE" get pod -l app=post-rank-hop2 -o jsonpath='{.items[0].metadata.name}')"

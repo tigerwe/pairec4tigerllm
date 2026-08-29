@@ -178,6 +178,7 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
         self.assertIn("trace->set_attribution_complete(true);", wrapper_source)
         self.assertIn("CPU placement diagnostics (non-blocking)", script)
         self.assertIn("cpu_isolation_valid=", script)
+
         self.assertNotIn(
             'assert not conflicts, "Rank CPU sets overlap',
             script,
@@ -211,6 +212,16 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
         self.assertIn('RANK_ENDPOINT_SOURCE="override"', full_chain)
         self.assertIn('RANK_ENDPOINT_SOURCE="service"', full_chain)
         self.assertIn('>"$OUTPUT_DIR/rank-endpoint.txt"', full_chain)
+
+    def test_post_rank_host_network_rollout_does_not_overlap_ports(self):
+        script = (ROOT / "scripts" / "deploy_post_rank_two_hop.sh").read_text()
+        for name in ("deployment-post-rank-hop1.yaml", "deployment-post-rank-hop2.yaml"):
+            manifest = (ROOT / "k8s" / name).read_text()
+            self.assertIn("strategy:\n    type: Recreate", manifest)
+        self.assertIn("wait_pods_gone", script)
+        self.assertIn("scale deployment/\"$deployment\" --replicas=0", script)
+        self.assertIn("timed out deleting old hostNetwork pods", script)
+        self.assertNotIn("rollout restart deployment/post-rank-hop", script)
 
     def test_valid_pressure_case_and_tail_windows(self):
         with tempfile.TemporaryDirectory() as directory:

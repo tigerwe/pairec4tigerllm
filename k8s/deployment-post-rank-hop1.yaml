@@ -5,6 +5,8 @@ metadata:
   namespace: pairec
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: post-rank-hop1
