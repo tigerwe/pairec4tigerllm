@@ -31,29 +31,32 @@ const (
 )
 
 type Config struct {
-	Name                       string `json:"name"`
-	Protocol                   string `json:"protocol"`
-	ServerURL                  string `json:"server_url"`
-	BRPCEndpoint               string `json:"brpc_endpoint"`
-	BRPCServiceName            string `json:"brpc_service_name"`
-	TimeoutMS                  int    `json:"timeout_ms"`
-	ExpectedCandidates         int    `json:"expected_candidates"`
-	RequiredModelRole          string `json:"required_model_role"`
-	BRPCPayloadBytes           int    `json:"brpc_payload_bytes"`
-	BRPCBurstEnabled           bool   `json:"brpc_burst_enabled"`
-	BRPCBurstConcurrency       int    `json:"brpc_burst_concurrency"`
-	BRPCBurstPoolSize          int    `json:"brpc_burst_pool_size"`
-	BRPCBurstPayloadBytes      int    `json:"brpc_burst_payload_bytes"`
-	BRPCBurstPreconnect        bool   `json:"brpc_burst_preconnect"`
-	BRPCBurstPressureTimeoutMS int    `json:"brpc_burst_pressure_timeout_ms"`
-	PostRankHopsEnabled        bool   `json:"post_rank_hops_enabled"`
-	PostRankHop1Endpoint       string `json:"post_rank_hop1_endpoint"`
-	PostRankServiceName        string `json:"post_rank_service_name"`
-	PostRankTimeoutMS          int    `json:"post_rank_timeout_ms"`
-	PostRankBurstConcurrency   int    `json:"post_rank_burst_concurrency"`
-	PostRankBurstPoolSize      int    `json:"post_rank_burst_pool_size"`
-	PostRankPayloadBytes       int    `json:"post_rank_payload_bytes"`
-	PostRankPressureTimeoutMS  int    `json:"post_rank_pressure_timeout_ms"`
+	Name                           string `json:"name"`
+	Protocol                       string `json:"protocol"`
+	ServerURL                      string `json:"server_url"`
+	BRPCEndpoint                   string `json:"brpc_endpoint"`
+	BRPCServiceName                string `json:"brpc_service_name"`
+	TimeoutMS                      int    `json:"timeout_ms"`
+	ExpectedCandidates             int    `json:"expected_candidates"`
+	RequiredModelRole              string `json:"required_model_role"`
+	BRPCPayloadBytes               int    `json:"brpc_payload_bytes"`
+	BRPCBurstEnabled               bool   `json:"brpc_burst_enabled"`
+	BRPCBurstConcurrency           int    `json:"brpc_burst_concurrency"`
+	BRPCBurstPoolSize              int    `json:"brpc_burst_pool_size"`
+	BRPCBurstPayloadBytes          int    `json:"brpc_burst_payload_bytes"`
+	BRPCBurstPreconnect            bool   `json:"brpc_burst_preconnect"`
+	BRPCBurstPressureTimeoutMS     int    `json:"brpc_burst_pressure_timeout_ms"`
+	PostRankHopsEnabled            bool   `json:"post_rank_hops_enabled"`
+	PostRankHop1Endpoint           string `json:"post_rank_hop1_endpoint"`
+	PostRankServiceName            string `json:"post_rank_service_name"`
+	PostRankTimeoutMS              int    `json:"post_rank_timeout_ms"`
+	PostRankBurstConcurrency       int    `json:"post_rank_burst_concurrency"`
+	PostRankBurstPoolSize          int    `json:"post_rank_burst_pool_size"`
+	PostRankPayloadBytes           int    `json:"post_rank_payload_bytes"`
+	PostRankPressureTimeoutMS      int    `json:"post_rank_pressure_timeout_ms"`
+	PostRankPressureStartQuorum    int    `json:"post_rank_pressure_start_quorum"`
+	PostRankPressureStartTimeoutMS int    `json:"post_rank_pressure_start_timeout_ms"`
+	PostRankMinimumLocalWindowMS   int    `json:"post_rank_minimum_local_window_ms"`
 }
 
 type userDefineConfig struct {
@@ -183,6 +186,16 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 		if config.PostRankPressureTimeoutMS != 5000 {
 			return nil, errors.New("post-rank pressure timeout must be exactly 5000 ms")
 		}
+		if config.PostRankPressureStartQuorum < 1 ||
+			config.PostRankPressureStartQuorum > config.PostRankBurstConcurrency-1 {
+			return nil, errors.New("post-rank pressure start quorum must be in [1,999]")
+		}
+		if config.PostRankPressureStartTimeoutMS < 1 || config.PostRankPressureStartTimeoutMS > 1000 {
+			return nil, errors.New("post-rank pressure start timeout must be in [1,1000] ms")
+		}
+		if config.PostRankMinimumLocalWindowMS < 1 || config.PostRankMinimumLocalWindowMS > 100 {
+			return nil, errors.New("post-rank minimum local window must be in [1,100] ms")
+		}
 	}
 	transport := &http.Transport{
 		Proxy: nil,
@@ -246,6 +259,9 @@ func NewDeepFMRankSort(config Config) (*DeepFMRankSort, error) {
 				EventPrefix:           "pairec_post_rank_hop1_brpc_burst",
 				TraceComponent:        "post_rank_hop1",
 				DedicatedBusinessLane: true,
+				PressureStartQuorum:   config.PostRankPressureStartQuorum,
+				PressureStartTimeout:  time.Duration(config.PostRankPressureStartTimeoutMS) * time.Millisecond,
+				MinimumLocalWindow:    time.Duration(config.PostRankMinimumLocalWindowMS) * time.Millisecond,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("initialize post-rank hop1 burst: %w", err)

@@ -77,6 +77,10 @@ grep -Fq '"event":"pairec_post_rank_hop2_brpc_burst_ready"' "$OUTPUT_DIR/hop1.lo
   || die "Hop-1 did not prove 1000 preconnected Hop-2 sessions"
 grep -Fq '"connected_sessions":1000' "$OUTPUT_DIR/hop1.log" \
   || die "Hop-1 connected session count is not 1000"
+grep -Fq '"pressure_start_quorum":950' "$OUTPUT_DIR/hop1.log" \
+  || die "Hop-1 pressure start quorum is not 950"
+grep -Fq '"minimum_local_window_ms":20' "$OUTPUT_DIR/hop1.log" \
+  || die "Hop-1 local business window is not 20ms"
 grep -Fq 'post-rank hop2 pressure listening on 0.0.0.0:18313' "$OUTPUT_DIR/hop2.log" \
   || die "Hop-2 pressure listener is not ready on 18313"
 for log in "$OUTPUT_DIR/hop1.log" "$OUTPUT_DIR/hop2.log"; do

@@ -33,6 +33,9 @@ POST_RANK_BURST_CONCURRENCY="${POST_RANK_BURST_CONCURRENCY:-1000}"
 POST_RANK_BURST_POOL_SIZE="${POST_RANK_BURST_POOL_SIZE:-1000}"
 POST_RANK_PAYLOAD_BYTES="${POST_RANK_PAYLOAD_BYTES:-102400}"
 POST_RANK_PRESSURE_TIMEOUT_MS="${POST_RANK_PRESSURE_TIMEOUT_MS:-5000}"
+POST_RANK_PRESSURE_START_QUORUM="${POST_RANK_PRESSURE_START_QUORUM:-950}"
+POST_RANK_PRESSURE_START_TIMEOUT_MS="${POST_RANK_PRESSURE_START_TIMEOUT_MS:-250}"
+POST_RANK_MINIMUM_LOCAL_WINDOW_MS="${POST_RANK_MINIMUM_LOCAL_WINDOW_MS:-20}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-1}"
 QUALIFICATION_REQUESTS="${QUALIFICATION_REQUESTS:-0}"
 REQUESTS="${REQUESTS:-3}"
@@ -94,6 +97,9 @@ if [[ "$POST_RANK_HOPS_ENABLED" = 1 ]]; then
     || die "post-rank burst requires concurrency=pool_size=1000"
   [[ "$POST_RANK_PAYLOAD_BYTES" = 102400 ]] || die "post-rank payload must be 102400"
   [[ "$POST_RANK_PRESSURE_TIMEOUT_MS" = 5000 ]] || die "post-rank pressure timeout must be 5000"
+  [[ "$POST_RANK_PRESSURE_START_QUORUM" = 950 ]] || die "post-rank pressure start quorum must be 950"
+  [[ "$POST_RANK_PRESSURE_START_TIMEOUT_MS" = 250 ]] || die "post-rank pressure start timeout must be 250ms"
+  [[ "$POST_RANK_MINIMUM_LOCAL_WINDOW_MS" = 20 ]] || die "post-rank minimum local window must be 20ms"
 fi
 python3 -c 'import json,sys; value=json.loads(sys.argv[1]); assert isinstance(value,list); assert all(isinstance(x,int) and x>=0 for x in value); assert len(value)==len(set(value))' \
   "$BURST_CPU_SHARDS" || die "BURST_CPU_SHARDS must be a JSON array of unique non-negative CPU IDs"
@@ -271,9 +277,11 @@ python3 - "$CONFIG_TEMPLATE" "$OUTPUT_DIR/pairec_config.json" \
   "$RANK_BURST_PRESSURE_TIMEOUT_MS" "$POST_RANK_HOPS_ENABLED" \
   "$POST_RANK_HOP1_ENDPOINT" "$POST_RANK_TIMEOUT_MS" \
   "$POST_RANK_BURST_CONCURRENCY" "$POST_RANK_BURST_POOL_SIZE" \
-  "$POST_RANK_PAYLOAD_BYTES" "$POST_RANK_PRESSURE_TIMEOUT_MS" <<'PY'
+  "$POST_RANK_PAYLOAD_BYTES" "$POST_RANK_PRESSURE_TIMEOUT_MS" \
+  "$POST_RANK_PRESSURE_START_QUORUM" "$POST_RANK_PRESSURE_START_TIMEOUT_MS" \
+  "$POST_RANK_MINIMUM_LOCAL_WINDOW_MS" <<'PY'
 import json, pathlib, sys
-source,target,wrapper,concurrency,vector,rank,role,pool,active,cpu_shards,payload_bytes,business_payload_bytes,rank_timeout,rank_business_bytes,rank_burst_enabled,rank_burst_concurrency,rank_burst_pool,rank_burst_bytes,rank_preconnect,rank_pressure_timeout,post_enabled,post_endpoint,post_timeout,post_concurrency,post_pool,post_bytes,post_pressure_timeout=sys.argv[1:]
+source,target,wrapper,concurrency,vector,rank,role,pool,active,cpu_shards,payload_bytes,business_payload_bytes,rank_timeout,rank_business_bytes,rank_burst_enabled,rank_burst_concurrency,rank_burst_pool,rank_burst_bytes,rank_preconnect,rank_pressure_timeout,post_enabled,post_endpoint,post_timeout,post_concurrency,post_pool,post_bytes,post_pressure_timeout,post_start_quorum,post_start_timeout,post_min_window=sys.argv[1:]
 text=pathlib.Path(source).read_text()
 for old,new in {
     "__WRAPPER_ENDPOINT__": wrapper,
@@ -301,6 +309,9 @@ for old,new in {
     "__POST_RANK_BURST_POOL_SIZE__": post_pool,
     "__POST_RANK_PAYLOAD_BYTES__": post_bytes,
     "__POST_RANK_PRESSURE_TIMEOUT_MS__": post_pressure_timeout,
+    "__POST_RANK_PRESSURE_START_QUORUM__": post_start_quorum,
+    "__POST_RANK_PRESSURE_START_TIMEOUT_MS__": post_start_timeout,
+    "__POST_RANK_MINIMUM_LOCAL_WINDOW_MS__": post_min_window,
 }.items():
     text=text.replace(old,new)
 assert "__" not in text
@@ -336,6 +347,9 @@ assert ranker["post_rank_burst_concurrency"]==int(post_concurrency)
 assert ranker["post_rank_burst_pool_size"]==int(post_pool)
 assert ranker["post_rank_payload_bytes"]==int(post_bytes)
 assert ranker["post_rank_pressure_timeout_ms"]==int(post_pressure_timeout)
+assert ranker["post_rank_pressure_start_quorum"]==int(post_start_quorum)
+assert ranker["post_rank_pressure_start_timeout_ms"]==int(post_start_timeout)
+assert ranker["post_rank_minimum_local_window_ms"]==int(post_min_window)
 rerank=config["UserDefineConfs"]["RerankConfs"][0]
 assert rerank["fail_closed"] is True and rerank["minimum_generative"]==1
 pathlib.Path(target).write_text(json.dumps(config, indent=2)+"\n")

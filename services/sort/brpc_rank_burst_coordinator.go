@@ -23,6 +23,9 @@ type RankBurstConfig struct {
 	EventPrefix           string
 	TraceComponent        string
 	DedicatedBusinessLane bool
+	PressureStartQuorum   int
+	PressureStartTimeout  time.Duration
+	MinimumLocalWindow    time.Duration
 }
 
 type rankBurstSession interface {
@@ -48,6 +51,9 @@ type RankBurstCoordinator struct {
 	eventPrefix           string
 	traceComponent        string
 	dedicatedBusinessLane bool
+	pressureStartQuorum   int
+	pressureStartTimeout  time.Duration
+	minimumLocalWindow    time.Duration
 	pressureDispatch      sync.Mutex
 	rounds                sync.WaitGroup
 }
@@ -63,35 +69,47 @@ type rankBurstJob struct {
 	businessResult chan<- rankBurstLaneResult
 	complete       *sync.WaitGroup
 	started        chan<- struct{}
+	startedCount   *int64
 	active         *int64
 	maxActive      *int64
 }
 
 type rankBurstLaneResult struct {
-	lane          int
-	business      bool
-	startOffsetUS int64
-	latencyUS     int64
-	startEpochNS  int64
-	endEpochNS    int64
-	response      *pipelinepb.RankResponse
-	err           error
+	lane                           int
+	business                       bool
+	startOffsetUS                  int64
+	latencyUS                      int64
+	startEpochNS                   int64
+	endEpochNS                     int64
+	response                       *pipelinepb.RankResponse
+	err                            error
+	markerWaitUS                   int64
+	businessHoldUS                 int64
+	pressureStartedAtBusinessStart int64
+	pressureStartQuorum            int
+	minimumLocalWindowUS           int64
 }
 
 type rankBurstBusinessEvent struct {
-	Event                string  `json:"event"`
-	RequestID            string  `json:"request_id"`
-	Concurrency          int     `json:"concurrency"`
-	BusinessLane         int     `json:"business_lane"`
-	BusinessPayloadBytes int     `json:"business_payload_bytes"`
-	Success              bool    `json:"business_success"`
-	Error                string  `json:"business_error,omitempty"`
-	ClientWallMS         float64 `json:"business_client_wall_ms"`
-	ServiceTotalMS       float64 `json:"service_total_ms"`
-	FrontBRPCEstimateMS  float64 `json:"front_brpc_estimate_ms"`
-	StartEpochNS         int64   `json:"rank_business_start_epoch_ns"`
-	EndEpochNS           int64   `json:"rank_business_end_epoch_ns"`
-	TraceValid           bool    `json:"trace_valid"`
+	Event                          string  `json:"event"`
+	RequestID                      string  `json:"request_id"`
+	Concurrency                    int     `json:"concurrency"`
+	BusinessLane                   int     `json:"business_lane"`
+	BusinessPayloadBytes           int     `json:"business_payload_bytes"`
+	Success                        bool    `json:"business_success"`
+	Error                          string  `json:"business_error,omitempty"`
+	ClientWallMS                   float64 `json:"business_client_wall_ms"`
+	ServiceTotalMS                 float64 `json:"service_total_ms"`
+	FrontBRPCEstimateMS            float64 `json:"front_brpc_estimate_ms"`
+	StartEpochNS                   int64   `json:"rank_business_start_epoch_ns"`
+	EndEpochNS                     int64   `json:"rank_business_end_epoch_ns"`
+	TraceValid                     bool    `json:"trace_valid"`
+	PressureStartQuorum            int     `json:"pressure_start_quorum"`
+	PressureStartedAtBusinessStart int64   `json:"pressure_started_at_business_start"`
+	MarkerWaitMS                   float64 `json:"marker_wait_ms"`
+	BusinessHoldMS                 float64 `json:"business_hold_ms"`
+	MinimumLocalWindowMS           float64 `json:"minimum_local_window_ms"`
+	LocalBusinessWindowMS          float64 `json:"local_business_window_ms"`
 }
 
 type rankBurstCompleteEvent struct {
@@ -168,6 +186,20 @@ func newRankBurstCoordinator(sessions []rankBurstSession, cfg RankBurstConfig, l
 	if cfg.BusinessTimeout <= 0 {
 		return nil, fmt.Errorf("rank business timeout must be positive")
 	}
+	if cfg.PressureStartQuorum < 0 || cfg.PressureStartQuorum > cfg.Concurrency-1 {
+		return nil, fmt.Errorf("rank pressure start quorum must be in [0,concurrency-1]")
+	}
+	if cfg.PressureStartQuorum > 0 {
+		if !cfg.DedicatedBusinessLane {
+			return nil, fmt.Errorf("rank pressure start quorum requires a dedicated business lane")
+		}
+		if cfg.PressureStartTimeout <= 0 {
+			return nil, fmt.Errorf("rank pressure start timeout must be positive")
+		}
+	}
+	if cfg.MinimumLocalWindow < 0 || cfg.MinimumLocalWindow > cfg.BusinessTimeout {
+		return nil, fmt.Errorf("rank minimum local window must be in [0,business timeout]")
+	}
 	if logger == nil {
 		logger = writeRankBurstEvent
 	}
@@ -184,6 +216,9 @@ func newRankBurstCoordinator(sessions []rankBurstSession, cfg RankBurstConfig, l
 		slot: make(chan struct{}, 1), logEvent: logger,
 		eventPrefix: cfg.EventPrefix, traceComponent: cfg.TraceComponent,
 		dedicatedBusinessLane: cfg.DedicatedBusinessLane,
+		pressureStartQuorum:   cfg.PressureStartQuorum,
+		pressureStartTimeout:  cfg.PressureStartTimeout,
+		minimumLocalWindow:    cfg.MinimumLocalWindow,
 	}
 	c.workers = make([]chan rankBurstJob, cfg.PoolSize)
 	for index := range sessions {
@@ -219,29 +254,32 @@ func (c *RankBurstCoordinator) Rank(request *pipelinepb.RankRequest, requestID s
 	businessGate := gate
 	pressureGate := gate
 	var businessStarted chan struct{}
+	var pressureStarted chan struct{}
+	var pressureStartedCount int64
 	if c.dedicatedBusinessLane {
 		businessGate = make(chan struct{})
 		pressureGate = make(chan struct{})
 		businessStarted = make(chan struct{}, 1)
+		pressureStarted = make(chan struct{}, c.concurrency-1)
 	}
 	var complete sync.WaitGroup
 	var active, maxActive int64
 	var releasedAt time.Time
 	complete.Add(c.concurrency)
 	c.rounds.Add(1)
-	makeJob := func(lane, sessionIndex int, laneGate <-chan struct{}, started chan<- struct{}) rankBurstJob {
+	makeJob := func(lane, sessionIndex int, laneGate <-chan struct{}, started chan<- struct{}, startedCount *int64) rankBurstJob {
 		return rankBurstJob{
 			request: request, requestID: requestID, lane: lane,
 			business: lane == businessLane, gate: laneGate, releasedAt: &releasedAt,
 			results: results, businessResult: businessResult, complete: &complete,
-			started: started, active: &active, maxActive: &maxActive,
+			started: started, startedCount: startedCount, active: &active, maxActive: &maxActive,
 		}
 	}
 	if c.dedicatedBusinessLane {
-		c.workers[selected[0]] <- makeJob(1, selected[0], businessGate, businessStarted)
+		c.workers[selected[0]] <- makeJob(1, selected[0], businessGate, businessStarted, nil)
 	} else {
 		for lane, sessionIndex := range selected {
-			c.workers[sessionIndex] <- makeJob(lane+1, sessionIndex, gate, nil)
+			c.workers[sessionIndex] <- makeJob(lane+1, sessionIndex, gate, nil, nil)
 		}
 	}
 	c.logEvent(map[string]any{
@@ -251,22 +289,70 @@ func (c *RankBurstCoordinator) Rank(request *pipelinepb.RankRequest, requestID s
 		"pressure_payload_bytes": c.pressureBytes, "business_payload_bytes": c.businessBytes,
 	})
 	releasedAt = time.Now()
+	var markerWait time.Duration
+	var markerErr error
+	var pressureStartedAtBusinessStart int64
 	if c.dedicatedBusinessLane {
-		close(businessGate)
-		<-businessStarted
-		close(pressureGate)
-		go func() {
+		dispatchPressure := func() {
 			c.pressureDispatch.Lock()
 			defer c.pressureDispatch.Unlock()
 			for lane := 1; lane < len(selected); lane++ {
 				sessionIndex := selected[lane]
-				c.workers[sessionIndex] <- makeJob(lane+1, sessionIndex, pressureGate, nil)
+				c.workers[sessionIndex] <- makeJob(
+					lane+1, sessionIndex, pressureGate, pressureStarted, &pressureStartedCount)
 			}
-		}()
+		}
+		if c.pressureStartQuorum > 0 {
+			close(pressureGate)
+			go dispatchPressure()
+			markerStarted := time.Now()
+			timer := time.NewTimer(c.pressureStartTimeout)
+			started := 0
+			for started < c.pressureStartQuorum {
+				select {
+				case <-pressureStarted:
+					started++
+				case <-timer.C:
+					markerErr = fmt.Errorf("pressure start marker timed out: started=%d quorum=%d", started, c.pressureStartQuorum)
+					started = c.pressureStartQuorum
+				}
+			}
+			timer.Stop()
+			markerWait = time.Since(markerStarted)
+			close(businessGate)
+			<-businessStarted
+			pressureStartedAtBusinessStart = atomic.LoadInt64(&pressureStartedCount)
+		} else {
+			close(businessGate)
+			<-businessStarted
+			close(pressureGate)
+			go dispatchPressure()
+		}
 	} else {
 		close(gate)
 	}
 	business := <-businessResult
+	business.markerWaitUS = markerWait.Microseconds()
+	business.pressureStartedAtBusinessStart = pressureStartedAtBusinessStart
+	business.pressureStartQuorum = c.pressureStartQuorum
+	business.minimumLocalWindowUS = c.minimumLocalWindow.Microseconds()
+	if markerErr != nil {
+		business.err = markerErr
+	}
+	if business.err == nil && business.response != nil && c.minimumLocalWindow > 0 {
+		serviceUS := int64(0)
+		if business.response.Trace != nil {
+			serviceUS = pipelinepb.Int64(business.response.Trace.TotalUS)
+		}
+		localFront := time.Duration(maxInt64(0, business.latencyUS-serviceUS)) * time.Microsecond
+		if hold := c.minimumLocalWindow - localFront; hold > 0 {
+			holdStarted := time.Now()
+			time.Sleep(hold)
+			business.businessHoldUS = time.Since(holdStarted).Microseconds()
+			business.endEpochNS = time.Now().UnixNano()
+			business.latencyUS = (business.endEpochNS - business.startEpochNS) / 1000
+		}
+	}
 	businessEvent := makeRankBurstBusinessEvent(
 		c.eventPrefix, c.traceComponent, requestID, c.concurrency,
 		businessLane, c.businessBytes, business)
@@ -315,6 +401,12 @@ func (c *RankBurstCoordinator) runWorker(sessionIndex int, jobs <-chan rankBurst
 			}
 			result.response, result.err = c.sessions[sessionIndex].Rank(ctx, job.request)
 		} else {
+			if job.startedCount != nil {
+				atomic.AddInt64(job.startedCount, 1)
+			}
+			if job.started != nil {
+				job.started <- struct{}{}
+			}
 			_, result.err = c.sessions[sessionIndex].HealthWithPayload(ctx, job.requestID, c.pressureBytes)
 		}
 		cancel()
@@ -383,6 +475,11 @@ func makeRankBurstBusinessEvent(eventPrefix, traceComponent, requestID string,
 		Success:      result.err == nil && result.response != nil,
 		ClientWallMS: float64(result.latencyUS) / 1000,
 		StartEpochNS: result.startEpochNS, EndEpochNS: result.endEpochNS,
+		PressureStartQuorum:            result.pressureStartQuorum,
+		PressureStartedAtBusinessStart: result.pressureStartedAtBusinessStart,
+		MarkerWaitMS:                   float64(result.markerWaitUS) / 1000,
+		BusinessHoldMS:                 float64(result.businessHoldUS) / 1000,
+		MinimumLocalWindowMS:           float64(result.minimumLocalWindowUS) / 1000,
 	}
 	if result.err != nil {
 		event.Error = result.err.Error()
@@ -391,11 +488,22 @@ func makeRankBurstBusinessEvent(eventPrefix, traceComponent, requestID string,
 		return event
 	}
 	event.ServiceTotalMS = float64(pipelinepb.Int64(result.response.Trace.TotalUS)) / 1000
-	event.FrontBRPCEstimateMS = event.ClientWallMS - event.ServiceTotalMS
+	event.FrontBRPCEstimateMS = event.ClientWallMS - event.ServiceTotalMS - event.BusinessHoldMS
+	if event.FrontBRPCEstimateMS < 0 {
+		event.FrontBRPCEstimateMS = 0
+	}
+	event.LocalBusinessWindowMS = event.FrontBRPCEstimateMS + event.BusinessHoldMS
 	event.TraceValid = pipelinepb.Int32(result.response.Code) == 200 &&
 		pipelinepb.String(result.response.Trace.Component) == traceComponent &&
 		pipelinepb.Int64(result.response.Trace.TotalUS) > 0
 	return event
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func makeRankBurstCompleteEvent(eventPrefix, requestID string,

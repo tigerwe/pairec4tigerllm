@@ -48,6 +48,9 @@ bool Parse(int argc, char** argv, Config* config) {
     else if (Value(argv[i], "payload_bytes", &value)) config->burst.payload_bytes = std::atoi(value.c_str());
     else if (Value(argv[i], "business_timeout_ms", &value)) config->burst.business_timeout_ms = std::atoi(value.c_str());
     else if (Value(argv[i], "pressure_timeout_ms", &value)) config->burst.pressure_timeout_ms = std::atoi(value.c_str());
+    else if (Value(argv[i], "pressure_start_quorum", &value)) config->burst.pressure_start_quorum = std::atoi(value.c_str());
+    else if (Value(argv[i], "pressure_start_timeout_ms", &value)) config->burst.pressure_start_timeout_ms = std::atoi(value.c_str());
+    else if (Value(argv[i], "minimum_local_window_ms", &value)) config->burst.minimum_local_window_ms = std::atoi(value.c_str());
     else if (Value(argv[i], "startup_timeout_ms", &value)) config->burst.startup_timeout_ms = std::atoi(value.c_str());
     else if (Value(argv[i], "startup_batch_size", &value)) config->burst.startup_batch_size = std::atoi(value.c_str());
     else if (Value(argv[i], "startup_max_retries", &value)) config->burst.startup_max_retries = std::atoi(value.c_str());
@@ -140,7 +143,7 @@ class PostRankHopService final : public pairec::pipeline::DeepFMRankService {
     trace->set_total_us(total_us);
     trace->set_backend_total_us(static_cast<int64_t>(burst_result.business_wall_ms * 1000));
     trace->set_backend_rpc_us(static_cast<int64_t>(
-        std::max(0.0, burst_result.business_wall_ms - burst_result.service_ms) * 1000));
+        burst_result.front_brpc_ms * 1000));
     std::cout << "{\"event\":\"post_rank_" << role_ << "_business_complete\","
               << "\"request_id\":\"" << Escape(request->context().request_id())
               << "\",\"candidate_count\":" << request->items_size()

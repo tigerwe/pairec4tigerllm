@@ -59,12 +59,14 @@ class BurstCoordinator::Impl {
     uint64_t sequence = 0;
     pairec::pipeline::RankRequest request;
     std::mutex mutex;
+    std::condition_variable pressure_started_cv;
     int completed = 0;
     int pressure_success = 0;
     int pressure_errors = 0;
     int pressure_overlap_business = 0;
     std::atomic<int> active{0};
     std::atomic<int> max_active{0};
+    std::atomic<int> pressure_started{0};
     int64_t released_us = 0;
     int64_t first_start_us = 0;
     int64_t last_start_us = 0;
@@ -74,6 +76,8 @@ class BurstCoordinator::Impl {
     int64_t business_end_ns = 0;
     pairec::pipeline::RankResponse business_response;
     std::string business_error;
+    double marker_wait_ms = 0;
+    double business_hold_ms = 0;
     std::vector<int64_t> pressure_us;
   };
 
@@ -93,8 +97,13 @@ class BurstCoordinator::Impl {
         config.concurrency != 1000 ||
         config.payload_bytes != 102400 || config.business_timeout_ms != 1000 ||
         config.pressure_timeout_ms != 5000 || config.startup_batch_size <= 0 ||
-        config.startup_batch_size > config.concurrency) {
-      *error = "post-rank hop requires business/pressure endpoints, c1000, payload=102400, business=1000ms, pressure=5000ms";
+        config.startup_batch_size > config.concurrency ||
+        config.pressure_start_quorum < 1 ||
+        config.pressure_start_quorum >= config.concurrency ||
+        config.pressure_start_timeout_ms < 1 ||
+        config.minimum_local_window_ms < 1 ||
+        config.minimum_local_window_ms > 100) {
+      *error = "post-rank hop requires c1000, payload=102400, marker quorum, and a 1..100ms local window";
       return false;
     }
     config_ = config;
@@ -138,6 +147,9 @@ class BurstCoordinator::Impl {
               << "\",\"pressure_endpoint\":\"" << Escape(config.pressure_endpoint)
               << "\",\"connected_sessions\":" << connected_sessions_
               << ",\"armed_workers\":" << config.concurrency
+              << ",\"pressure_start_quorum\":" << config.pressure_start_quorum
+              << ",\"pressure_start_timeout_ms\":" << config.pressure_start_timeout_ms
+              << ",\"minimum_local_window_ms\":" << config.minimum_local_window_ms
               << ",\"payload_bytes\":" << config.payload_bytes << "}" << std::endl;
     return true;
   }
@@ -162,52 +174,12 @@ class BurstCoordinator::Impl {
       round->sequence = ++sequence_;
       ++active_rounds_;
     }
-    std::mutex started_mutex;
-    std::condition_variable started_cv;
-    bool business_started = false;
-    std::thread business([&, round] {
-      brpc::Controller controller;
-      controller.set_timeout_ms(config_.business_timeout_ms);
-      pairec::pipeline::RankResponse business_response;
-      std::unique_lock<std::mutex> business_lock(business_mutex_);
-      const int64_t started_ns = SystemNanos();
-      {
-        std::lock_guard<std::mutex> lock(round->mutex);
-        round->business_start_ns = started_ns;
-      }
-      {
-        std::lock_guard<std::mutex> lock(started_mutex);
-        business_started = true;
-      }
-      started_cv.notify_one();
-      workers_[0]->stub->Rank(&controller, &round->request, &business_response, nullptr);
-      business_lock.unlock();
-      const int64_t ended_ns = SystemNanos();
-      bool finish = false;
-      {
-        std::lock_guard<std::mutex> lock(round->mutex);
-        round->business_success = !controller.Failed() && business_response.code() == 200;
-        round->business_end_ns = ended_ns;
-        round->business_response = business_response;
-        if (controller.Failed()) {
-          round->business_error = controller.ErrorText();
-        } else if (business_response.code() != 200) {
-          round->business_error = business_response.message();
-        }
-        ++round->completed;
-        finish = round->completed == config_.concurrency;
-      }
-      if (finish) Complete(round);
-    });
-    {
-      std::unique_lock<std::mutex> lock(started_mutex);
-      started_cv.wait(lock, [&] { return business_started; });
-    }
     round->released_us = SteadyMicros();
     std::cout << "{\"event\":\"pairec_post_rank_hop2_brpc_burst_start\","
               << "\"request_id\":\"" << Escape(request.context().request_id())
               << "\",\"concurrency\":" << config_.concurrency
               << ",\"armed_workers\":" << config_.concurrency
+              << ",\"pressure_start_quorum\":" << config_.pressure_start_quorum
               << ",\"payload_bytes\":" << config_.payload_bytes << "}" << std::endl;
     {
       std::lock_guard<std::mutex> dispatch_lock(pressure_dispatch_mutex_);
@@ -220,24 +192,92 @@ class BurstCoordinator::Impl {
         worker.cv.notify_one();
       }
     }
-    business.join();
-    std::lock_guard<std::mutex> lock(round->mutex);
-    result->success = round->business_success;
-    result->business_wall_ms =
-        static_cast<double>(round->business_end_ns - round->business_start_ns) / 1e6;
-    if (round->business_response.has_trace()) {
-      result->service_ms = static_cast<double>(round->business_response.trace().total_us()) / 1000;
+    const int64_t marker_started_us = SteadyMicros();
+    bool marker_success = false;
+    {
+      std::unique_lock<std::mutex> lock(round->mutex);
+      marker_success = round->pressure_started_cv.wait_for(
+          lock, std::chrono::milliseconds(config_.pressure_start_timeout_ms), [&] {
+            return round->pressure_started.load(std::memory_order_acquire) >=
+                config_.pressure_start_quorum;
+          });
+      round->marker_wait_ms = static_cast<double>(SteadyMicros() - marker_started_us) / 1000;
     }
-    result->error = round->business_error;
-    *response = round->business_response;
+    result->marker_wait_ms = round->marker_wait_ms;
+    result->pressure_started_at_business_start =
+        round->pressure_started.load(std::memory_order_acquire);
+
+    pairec::pipeline::RankResponse business_response;
+    brpc::Controller controller;
+    controller.set_timeout_ms(config_.business_timeout_ms);
+    const int64_t business_started_ns = SystemNanos();
+    {
+      std::lock_guard<std::mutex> lock(round->mutex);
+      round->business_start_ns = business_started_ns;
+    }
+    if (marker_success) {
+      std::lock_guard<std::mutex> business_lock(business_mutex_);
+      workers_[0]->stub->Rank(&controller, &round->request, &business_response, nullptr);
+    }
+    const int64_t rpc_ended_ns = SystemNanos();
+    double service_ms = 0;
+    if (business_response.has_trace()) {
+      service_ms = static_cast<double>(business_response.trace().total_us()) / 1000;
+    }
+    const double raw_wall_ms = static_cast<double>(rpc_ended_ns - business_started_ns) / 1e6;
+    const double front_brpc_ms = std::max(0.0, raw_wall_ms - service_ms);
+    const double requested_hold_ms = marker_success
+        ? std::max(0.0, static_cast<double>(config_.minimum_local_window_ms) - front_brpc_ms)
+        : 0;
+    if (requested_hold_ms > 0) {
+      const int64_t hold_started_us = SteadyMicros();
+      std::this_thread::sleep_for(std::chrono::microseconds(
+          static_cast<int64_t>(requested_hold_ms * 1000)));
+      result->business_hold_ms = static_cast<double>(SteadyMicros() - hold_started_us) / 1000;
+    }
+    const int64_t business_ended_ns = SystemNanos();
+    bool finish = false;
+    {
+      std::lock_guard<std::mutex> lock(round->mutex);
+      round->business_end_ns = business_ended_ns;
+      round->business_response = business_response;
+      round->business_hold_ms = result->business_hold_ms;
+      round->business_success = marker_success && !controller.Failed() && business_response.code() == 200;
+      if (!marker_success) {
+        round->business_error = "pressure start marker timed out: started=" +
+            std::to_string(result->pressure_started_at_business_start) +
+            " quorum=" + std::to_string(config_.pressure_start_quorum);
+      } else if (controller.Failed()) {
+        round->business_error = controller.ErrorText();
+      } else if (business_response.code() != 200) {
+        round->business_error = business_response.message();
+      }
+      ++round->completed;
+      finish = round->completed == config_.concurrency;
+      result->success = round->business_success;
+      result->business_wall_ms = static_cast<double>(business_ended_ns - business_started_ns) / 1e6;
+      result->service_ms = service_ms;
+      result->front_brpc_ms = front_brpc_ms;
+      result->local_business_window_ms = front_brpc_ms + result->business_hold_ms;
+      result->error = round->business_error;
+      *response = round->business_response;
+    }
+    if (finish) Complete(round);
     std::cout << "{\"event\":\"pairec_post_rank_hop2_brpc_burst_business_complete\","
               << "\"request_id\":\"" << Escape(request.context().request_id())
               << "\",\"concurrency\":" << config_.concurrency
               << ",\"business_success\":" << (result->success ? "true" : "false")
               << ",\"business_client_wall_ms\":" << result->business_wall_ms
               << ",\"service_total_ms\":" << result->service_ms
-              << ",\"front_brpc_estimate_ms\":"
-              << std::max(0.0, result->business_wall_ms - result->service_ms) << "}" << std::endl;
+              << ",\"front_brpc_estimate_ms\":" << result->front_brpc_ms
+              << ",\"pressure_start_quorum\":" << config_.pressure_start_quorum
+              << ",\"pressure_started_at_business_start\":"
+              << result->pressure_started_at_business_start
+              << ",\"marker_wait_ms\":" << result->marker_wait_ms
+              << ",\"business_hold_ms\":" << result->business_hold_ms
+              << ",\"minimum_local_window_ms\":" << config_.minimum_local_window_ms
+              << ",\"local_business_window_ms\":" << result->local_business_window_ms
+              << "}" << std::endl;
     return result->success;
   }
 
@@ -307,6 +347,11 @@ class BurstCoordinator::Impl {
       if (shutdown_.load(std::memory_order_acquire)) return;
       const int64_t started_us = SteadyMicros();
       const int64_t started_ns = SystemNanos();
+      {
+        std::lock_guard<std::mutex> lock(round->mutex);
+        round->pressure_started.fetch_add(1, std::memory_order_release);
+      }
+      round->pressure_started_cv.notify_all();
       const int current = round->active.fetch_add(1) + 1;
       UpdateMax(&round->max_active, current);
       bool ok = false;

@@ -226,17 +226,23 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
         self.assertIn("pairec_post_rank_binary_identity", script)
         self.assertNotIn("rollout restart deployment/post-rank-hop", script)
 
-    def test_post_rank_business_lanes_do_not_wait_for_pressure_arming(self):
+    def test_post_rank_business_lanes_wait_for_marker_not_pressure_drain(self):
         outer = (ROOT / "services" / "sort" / "deepfm_rank_sort.go").read_text()
         coordinator = (
             ROOT / "services" / "sort" / "brpc_rank_burst_coordinator.go"
         ).read_text()
         inner = (ROOT / "cpp" / "brpc_gateway" / "post_rank_hop_burst.cpp").read_text()
         self.assertIn("DedicatedBusinessLane: true", outer)
+        self.assertIn("PressureStartQuorum:", outer)
+        self.assertIn("MinimumLocalWindow:", outer)
         self.assertIn("businessLane = 1", coordinator)
+        self.assertIn("pressure start marker timed out", coordinator)
+        self.assertIn("LocalBusinessWindowMS", coordinator)
         self.assertIn("c.slot <- struct{}{}", coordinator)
         self.assertIn("std::deque<std::shared_ptr<Round>> rounds", inner)
         self.assertIn("business_mutex_", inner)
+        self.assertIn("pressure_started_cv.wait_for", inner)
+        self.assertIn("minimum_local_window_ms", inner)
         self.assertNotIn("round->ready == config_.concurrency - 1", inner)
         self.assertNotIn("previous post-rank hop2 burst is still active", inner)
 
@@ -249,6 +255,10 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
         ).read_text()
         self.assertIn('MAX_E2E_MS="${MAX_E2E_MS:-550}"', benchmark)
         self.assertIn('MAX_POST_RANK_MS="${MAX_POST_RANK_MS:-120}"', benchmark)
+        self.assertIn('MEASURED_REQUESTS="${MEASURED_REQUESTS:-3}"', benchmark)
+        self.assertIn('"PAIREC_POST_RANK_TWO_HOP_B_N3_OK"', benchmark)
+        self.assertIn('post_rank_hop1_local_business_window_ms', benchmark)
+        self.assertIn('post_rank_hop2_local_business_window_ms', benchmark)
         self.assertIn('outer_complete["burst_valid"] is True', benchmark)
         self.assertIn("cpu_throttling=diagnostic", validator)
         self.assertNotIn('after["nr_throttled"]-before["nr_throttled"]==0', validator)

@@ -89,6 +89,53 @@ func TestRankBurstCoordinatorDedicatedLaneDoesNotWaitForPreviousPressureTail(t *
 	}
 }
 
+func TestRankBurstCoordinatorWaitsForPressureMarkerAndAddsLocalWindow(t *testing.T) {
+	const concurrency = 4
+	sessions := make([]rankBurstSession, concurrency)
+	for index := range sessions {
+		sessions[index] = &fakeRankBurstSession{
+			pressureDelay: 80 * time.Millisecond,
+			rankDelay:     5 * time.Millisecond,
+		}
+	}
+	events := make(chan any, 16)
+	coordinator, err := newRankBurstCoordinator(
+		sessions,
+		RankBurstConfig{
+			Concurrency: concurrency, PoolSize: concurrency,
+			BusinessBytes: 102400, PressureBytes: 102400,
+			BusinessTimeout: time.Second, PressureTimeout: time.Second,
+			DedicatedBusinessLane: true, PressureStartQuorum: concurrency - 1,
+			PressureStartTimeout: 100 * time.Millisecond,
+			MinimumLocalWindow:   20 * time.Millisecond,
+		},
+		func(event any) { events <- event },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coordinator.Close()
+	started := time.Now()
+	if _, err := coordinator.Rank(testRankBurstRequest(), "marker-window"); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed < 19*time.Millisecond || elapsed >= 60*time.Millisecond {
+		t.Fatalf("unexpected marker/window business latency: %s", elapsed)
+	}
+	business := waitRankBurstBusiness(t, events)
+	if business.PressureStartQuorum != concurrency-1 ||
+		business.PressureStartedAtBusinessStart < concurrency-1 {
+		t.Fatalf("business did not wait for pressure marker: %#v", business)
+	}
+	if business.LocalBusinessWindowMS < 19.5 || business.BusinessHoldMS < 10 {
+		t.Fatalf("local business window was not enforced: %#v", business)
+	}
+	complete := waitRankBurstComplete(t, events)
+	if !complete.BurstValid || complete.PressureSuccess != concurrency-1 {
+		t.Fatalf("unexpected marker/window completion: %#v", complete)
+	}
+}
+
 func (s *fakeRankBurstSession) HealthWithPayload(ctx context.Context, _ string, _ int) (*pipelinepb.HealthResponse, error) {
 	select {
 	case <-time.After(s.pressureDelay):
@@ -182,6 +229,22 @@ func waitRankBurstComplete(t *testing.T, events <-chan any) rankBurstCompleteEve
 			}
 		case <-timer.C:
 			t.Fatal("timed out waiting for rank burst completion")
+		}
+	}
+}
+
+func waitRankBurstBusiness(t *testing.T, events <-chan any) rankBurstBusinessEvent {
+	t.Helper()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case event := <-events:
+			if business, ok := event.(rankBurstBusinessEvent); ok {
+				return business
+			}
+		case <-timer.C:
+			t.Fatal("timed out waiting for rank burst business event")
 		}
 	}
 }
