@@ -118,6 +118,16 @@ class RankKvcWrapperTest(unittest.TestCase):
                 "/opt/pairec-rank-runtime/block_ds_consumer.so", env["LD_PRELOAD"]
             )
 
+    def test_cpu_placement_diagnostics_do_not_abort_on_container_churn(self):
+        deploy = (
+            ROOT / "scripts/deploy_deepfm_rank_burst_worker1.sh"
+        ).read_text()
+        self.assertIn("len(containers)==expected", deploy)
+        self.assertIn("text=True,capture_output=True", deploy)
+        self.assertIn('"available":False', deploy)
+        self.assertIn('"valid":not conflicts and not errors', deploy)
+        self.assertIn('2>/dev/null || true', deploy)
+
     def test_full_combination_ab_wiring(self):
         benchmark = (
             ROOT / "scripts/benchmark_pairec_generation_kvc_rank_kvc_ab.sh"

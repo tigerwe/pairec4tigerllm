@@ -33,7 +33,9 @@ import json,sys
 ready=[]
 for pod in json.load(sys.stdin).get("items",[]):
  status=pod.get("status",{}); containers=status.get("containerStatuses",[])
- if status.get("phase")=="Running" and containers and all(x.get("ready") for x in containers):
+ expected=len(pod.get("spec",{}).get("containers",[]))
+ if (status.get("phase")=="Running" and expected > 0 and
+     len(containers)==expected and all(x.get("ready") for x in containers)):
   ready.append((pod["metadata"].get("creationTimestamp",""),pod["metadata"]["name"]))
 assert ready, "no ready pod for app="+sys.argv[1]
 print(max(ready)[1])
@@ -198,7 +200,9 @@ done
 
 echo "== CPU placement diagnostics (non-blocking) =="
 for pod in "$RANK_POD" "$WRAPPER_POD"; do
-  qos="$(kubectl -n "$NAMESPACE" get pod "$pod" -o jsonpath='{.status.qosClass}')"
+  qos="$(kubectl -n "$NAMESPACE" get pod "$pod" \
+    -o jsonpath='{.status.qosClass}' 2>/dev/null || true)"
+  qos="${qos:-unavailable}"
   echo "pod=$pod qos=$qos" | tee -a "$OUTPUT_DIR/cpu-isolation.txt"
 done
 python3 - "$NAMESPACE" "$RANK_POD" "$WRAPPER_POD" "$INFERENCE_POD" \
@@ -207,9 +211,17 @@ import json,subprocess,sys
 namespace,rank_pod,wrapper_pod,inference_pod,output=sys.argv[1:]
 targets=[(rank_pod,"adapter","rank_adapter"),(rank_pod,"backend","rank_backend"),
          (wrapper_pod,"rank-burst-wrapper","rank_wrapper")]
-raw=json.loads(subprocess.check_output(["kubectl","-n",namespace,"get","pod",inference_pod,"-o","json"]))
-for item in raw["spec"]["containers"]:
- targets.append((inference_pod,item["name"],"inference_"+item["name"]))
+errors=[]
+discovery=subprocess.run(
+ ["kubectl","-n",namespace,"get","pod",inference_pod,"-o","json"],
+ text=True,capture_output=True)
+if discovery.returncode == 0:
+ raw=json.loads(discovery.stdout)
+ for item in raw["spec"]["containers"]:
+  targets.append((inference_pod,item["name"],"inference_"+item["name"]))
+else:
+ errors.append({"component":"inference_discovery",
+                "error":discovery.stderr.strip() or "kubectl get pod failed"})
 def expand(value):
  out=set()
  for part in value.split(","):
@@ -217,17 +229,27 @@ def expand(value):
  return out
 rows={}
 for pod,container,name in targets:
- text=subprocess.check_output(["kubectl","-n",namespace,"exec",pod,"-c",container,"--",
-                               "sh","-c","grep Cpus_allowed_list /proc/1/status"],text=True)
- value=text.split(":",1)[1].strip(); rows[name]={"cpulist":value,"cpus":sorted(expand(value))}
+ completed=subprocess.run(
+  ["kubectl","-n",namespace,"exec",pod,"-c",container,"--",
+   "sh","-c","grep Cpus_allowed_list /proc/1/status"],
+  text=True,capture_output=True)
+ if completed.returncode != 0:
+  error=completed.stderr.strip() or "CPU placement command failed"
+  rows[name]={"available":False,"pod":pod,"container":container,"error":error}
+  errors.append({"component":name,"error":error})
+  continue
+ value=completed.stdout.split(":",1)[1].strip()
+ rows[name]={"available":True,"cpulist":value,"cpus":sorted(expand(value))}
 rank_names=["rank_adapter","rank_backend","rank_wrapper"]
 inference_names=[name for name in rows if name.startswith("inference_")]
 conflicts=[]
 for index,left in enumerate(rank_names):
  for right in rank_names[index+1:]+inference_names:
+  if "cpus" not in rows.get(left,{}) or "cpus" not in rows.get(right,{}): continue
   overlap=sorted(set(rows[left]["cpus"]) & set(rows[right]["cpus"]))
   if overlap: conflicts.append({"left":left,"right":right,"overlap":overlap})
-result={"valid":not conflicts,"components":rows,"conflicts":conflicts}
+result={"valid":not conflicts and not errors,"components":rows,
+        "conflicts":conflicts,"errors":errors}
 open(output,"w").write(json.dumps(result,indent=2)+"\n")
 print(json.dumps(result,indent=2))
 PY
