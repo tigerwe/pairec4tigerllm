@@ -6,6 +6,7 @@ NAMESPACE="${NAMESPACE:-pairec}"
 TARGET_ROLE="${TARGET_ROLE:-hop1}"
 HOP1_APP="${HOP1_APP:-post-rank-hop1}"
 HOP2_APP="${HOP2_APP:-post-rank-hop2}"
+BINARY_PATH="${BINARY_PATH:-/home/zcx/bin/brpc_post_rank_hop}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/pairec-post-rank-hop-diagnostic/$(date +%Y%m%d-%H%M%S)}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -78,6 +79,20 @@ else
   : >"$OUTPUT_DIR/listeners.txt"
 fi
 
+if [[ -f "$BINARY_PATH" ]]; then
+  sha256sum "$BINARY_PATH" >"$OUTPUT_DIR/host-binary-sha256.txt" 2>&1 || true
+  if command -v strings >/dev/null 2>&1; then
+    strings "$BINARY_PATH" | grep -E \
+      'PAIREC_SOURCE_COMMIT|pressure_start_quorum|pressure_start_timeout_ms|business_backend|pressure_backend' \
+      >"$OUTPUT_DIR/host-binary-capabilities.txt" 2>&1 || true
+  else
+    printf 'strings command unavailable\n' >"$OUTPUT_DIR/host-binary-capabilities.txt"
+  fi
+else
+  printf 'BINARY_NOT_FOUND path=%s\n' "$BINARY_PATH" >"$OUTPUT_DIR/host-binary-sha256.txt"
+  : >"$OUTPUT_DIR/host-binary-capabilities.txt"
+fi
+
 {
   echo "threads_max=$(cat /proc/sys/kernel/threads-max 2>/dev/null || echo unavailable)"
   echo "pid_max=$(cat /proc/sys/kernel/pid_max 2>/dev/null || echo unavailable)"
@@ -113,6 +128,7 @@ pod=json.loads((root/f"{prefix}-pod.json").read_text())
 logs="\n".join((root/f"{prefix}-{kind}.log").read_text(errors="replace")
                for kind in ("previous","current"))
 resources=(root/f"{prefix}-container-resources.txt").read_text(errors="replace")
+capabilities=(root/"host-binary-capabilities.txt").read_text(errors="replace")
 listeners=(root/"listeners.txt").read_text(errors="replace")
 tcp=json.loads((root/"tcp-probes.json").read_text())
 statuses={x.get("name"):x for x in pod.get("status",{}).get("containerStatuses",[])}
@@ -139,6 +155,9 @@ address_in_use=("Address already in use" in logs or "EADDRINUSE" in logs)
 target_port="18311" if role=="hop1" else "18312"
 target_port_listening=re.search(rf":{target_port}\b",listeners) is not None
 pod_name=pod.get("metadata",{}).get("name","")
+containers=pod.get("spec",{}).get("containers",[])
+container=next((item for item in containers if item.get("name")==name),{})
+pod_args=container.get("args",[])
 condition_messages=" ".join(str(item.get("message","")) for item in
     pod.get("status",{}).get("conditions",[]))
 
@@ -157,6 +176,16 @@ elif "Unschedulable" in condition_messages:
     confidence="high"
     detail=f"{role} cannot be scheduled: {condition_messages}"
     next_action="repair nodeSelector or requested resources before retrying the rollout"
+elif exit_code==2:
+    required=("pressure_start_quorum","pressure_start_timeout_ms",
+              "business_backend","pressure_backend") if role=="hop1" else ()
+    missing=[token for token in required if token not in capabilities]
+    classification="POST_RANK_HOP_BINARY_ARGUMENT_CONTRACT_MISMATCH"
+    confidence="high"
+    detail=f"{role} exited with code 2 during argument parsing"
+    if missing:
+        detail+=f"; host binary lacks capabilities: {','.join(missing)}"
+    next_action="build the current commit with BUILD_HOP_IMAGE=1 and redeploy; restarting this stale binary cannot recover"
 elif reason=="OOMKilled" or exit_code==137:
     classification="POST_RANK_HOP_STARTUP_OOM"
     confidence="high"
@@ -204,6 +233,8 @@ summary={
     "next_action":next_action,"restart_count":restart_count,"exit_code":exit_code,
     "signal":signal,"terminated_reason":reason,"connected_sessions":connected,
     "tcp_listening":tcp,
+    "pod_args":pod_args,
+    "host_binary_capabilities":capabilities.splitlines(),
     "container_resource_evidence":str(root/f"{prefix}-container-resources.txt"),
 }
 (root/"summary.json").write_text(json.dumps(summary,indent=2)+"\n")

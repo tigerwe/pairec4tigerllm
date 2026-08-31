@@ -15,6 +15,8 @@ class PostRankHopStartupDiagnosticTest(unittest.TestCase):
         self.assertIn("/proc/1/limits", script)
         self.assertIn("pids.current", script)
         self.assertIn("memory.events", script)
+        self.assertIn("host-binary-sha256.txt", script)
+        self.assertIn("host-binary-capabilities.txt", script)
         self.assertIn("ss -ltnp", script)
         self.assertIn("tcp-probes.json", script)
 
@@ -26,6 +28,7 @@ class PostRankHopStartupDiagnosticTest(unittest.TestCase):
             "POST_RANK_HOP_POD_NOT_CREATED",
             "POST_RANK_HOP_IMAGE_PULL_FAILURE",
             "POST_RANK_HOP_UNSCHEDULABLE",
+            "POST_RANK_HOP_BINARY_ARGUMENT_CONTRACT_MISMATCH",
             "POST_RANK_HOP_STARTUP_OOM",
             "POST_RANK_HOP1_THREAD_RESOURCE_EXHAUSTION",
             "POST_RANK_HOP2_BUSINESS_ENDPOINT_UNREACHABLE",
