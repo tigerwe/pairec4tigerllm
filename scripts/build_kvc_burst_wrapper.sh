@@ -47,7 +47,7 @@ cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" \
 cmake --build "$BUILD_DIR" -j"$BUILD_JOBS"
 cmake --install "$BUILD_DIR"
 
-for binary in kvc_burst_wrapper kvc_burst_business_probe; do
+for binary in kvc_burst_wrapper kvc_burst_business_probe kvc_ub_integrity_probe; do
   path="$INSTALL_DIR/bin/$binary"
   [[ -x "$path" ]] || die "built binary is missing: $path"
   if ldd "$path" | grep -q 'not found'; then
@@ -59,4 +59,5 @@ done
 echo "KVC_BURST_BUILD_OK"
 echo "wrapper=$INSTALL_DIR/bin/kvc_burst_wrapper"
 echo "business_probe=$INSTALL_DIR/bin/kvc_burst_business_probe"
+echo "ub_integrity_probe=$INSTALL_DIR/bin/kvc_ub_integrity_probe"
 echo "datasystem_root=$DATASYSTEM_ROOT"

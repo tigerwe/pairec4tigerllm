@@ -5,6 +5,7 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 OUTPUT=${OUTPUT:-/tmp/kvc_burst_shared_test}
 PROXY_OUTPUT=${PROXY_OUTPUT:-/tmp/kvc_operation_proxy_test}
 RANK_PROXY_OUTPUT=${RANK_PROXY_OUTPUT:-/tmp/kvc_operation_proxy_rank_test}
+UB_INTEGRITY_OUTPUT=${UB_INTEGRITY_OUTPUT:-/tmp/kvc_ub_integrity_probe_test}
 CXX=${CXX:-g++}
 
 "$CXX" \
@@ -41,3 +42,15 @@ CXX=${CXX:-g++}
   "$REPO_ROOT/cpp/kvc_burst/kvc_operation_proxy_rank_test.cpp" \
   -o "$RANK_PROXY_OUTPUT"
 "$RANK_PROXY_OUTPUT"
+
+"$CXX" \
+  -std=c++17 \
+  -Wall \
+  -Wextra \
+  -Werror \
+  -pthread \
+  -I"$REPO_ROOT/tests/stubs" \
+  "$REPO_ROOT/cpp/kvc_burst/kvc_ub_integrity_probe.cpp" \
+  -lcrypto \
+  -o "$UB_INTEGRITY_OUTPUT"
+"$UB_INTEGRITY_OUTPUT" --self_test

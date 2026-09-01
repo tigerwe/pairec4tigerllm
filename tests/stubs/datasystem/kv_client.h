@@ -26,6 +26,8 @@ struct ConnectOptions
 {
     std::string host;
     int port{0};
+    int connectTimeoutMs{0};
+    int requestTimeoutMs{0};
     bool enableCrossNodeConnection{false};
     bool enableExclusiveConnection{false};
 };
