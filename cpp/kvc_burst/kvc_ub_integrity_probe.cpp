@@ -1,3 +1,5 @@
+#include "datasystem_connect_options_compat.h"
+
 #include <datasystem/kv_client.h>
 
 #include <openssl/sha.h>
@@ -278,7 +280,7 @@ int main(int argc, char** argv)
     options.connectTimeoutMs = config.connectTimeoutMs;
     options.requestTimeoutMs = config.requestTimeoutMs;
     options.enableCrossNodeConnection = true;
-    options.enableExclusiveConnection = true;
+    pairec::kvc_burst::SetExclusiveConnectionIfSupported(options, true);
 
     datasystem::KVClient client(options);
     auto initStatus = client.Init();

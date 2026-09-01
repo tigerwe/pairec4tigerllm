@@ -1,4 +1,5 @@
 #include "kvc_burst_shared.h"
+#include "datasystem_connect_options_compat.h"
 
 #include <datasystem/kv_client.h>
 
@@ -252,7 +253,7 @@ std::unique_ptr<datasystem::KVClient> CreateClient(const Config& config, bool ex
     options.host = config.host;
     options.port = config.port;
     options.enableCrossNodeConnection = true;
-    options.enableExclusiveConnection = exclusive;
+    pairec::kvc_burst::SetExclusiveConnectionIfSupported(options, exclusive);
     auto client = std::make_unique<datasystem::KVClient>(options);
     auto status = client->Init();
     if (status.IsError())

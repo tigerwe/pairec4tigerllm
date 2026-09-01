@@ -29,7 +29,6 @@ struct ConnectOptions
     int connectTimeoutMs{0};
     int requestTimeoutMs{0};
     bool enableCrossNodeConnection{false};
-    bool enableExclusiveConnection{false};
 };
 
 enum class WriteMode
