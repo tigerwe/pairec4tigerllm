@@ -1,0 +1,49 @@
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_proto_library")
+
+COPTS = [
+    "-std=c++17",
+    "-D__STDC_FORMAT_MACROS",
+    "-D__STDC_LIMIT_MACROS",
+    "-D__STDC_CONSTANT_MACROS",
+    "-D_GNU_SOURCE",
+    "-fPIC",
+    "-Wno-unused-parameter",
+    "-fno-omit-frame-pointer",
+]
+
+proto_library(
+    name = "recommend_proto",
+    srcs = ["recommend.proto"],
+)
+
+cc_proto_library(
+    name = "recommend_cc_proto",
+    deps = [":recommend_proto"],
+)
+
+cc_binary(
+    name = "minimal_recommend_server",
+    srcs = [
+        "minimal_recommend_server.cpp",
+        "payload_integrity.h",
+    ],
+    copts = COPTS,
+    deps = [
+        ":recommend_cc_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "minimal_recommend_client",
+    srcs = [
+        "minimal_recommend_client.cpp",
+        "payload_integrity.h",
+    ],
+    copts = COPTS,
+    deps = [
+        ":recommend_cc_proto",
+        "//:brpc",
+    ],
+)
