@@ -122,6 +122,8 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             script = (ROOT / "scripts" / script_name).read_text()
             self.assertIn("--ubsocket_backup_link_enable=false", script)
             self.assertIn("--ubsocket_degrade_enable=false", script)
+            self.assertIn("URMA_RUNTIME_LIB_DIR=${URMA_RUNTIME_LIB_DIR:-/usr/lib64}", script)
+            self.assertIn('export LD_LIBRARY_PATH="$URMA_RUNTIME_LD_LIBRARY_PATH', script)
 
     def test_payload_matrix_contains_boundary_and_large_values(self):
         client = (PROBE_DIR / "minimal_recommend_client.cpp").read_text()

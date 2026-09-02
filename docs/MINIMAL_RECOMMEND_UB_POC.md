@@ -68,5 +68,44 @@ server-reported length and SHA-256 plus an exact byte comparison of the response
 also requires a UBSComm `bind jetty success` log. Both programs run with TCP degradation and the
 UBSocket backup link disabled.
 
+### URMA runtime selection
+
+The probe must load the host URMA runtime that matches the installed UB driver. Do not allow a
+DataSystem Python virtualenv's bundled `liburma.so` to take precedence: it can be found by the
+dynamic loader but not have its matching `urma/` provider directory. The run scripts therefore put
+`/usr/lib64:/usr/lib64/urma` first in `LD_LIBRARY_PATH`, verify `/usr/lib64/liburma.so`, and print
+`urma_runtime_library_path` before starting either binary. Override these defaults only as a pair:
+
+```bash
+URMA_RUNTIME_LIB_DIR=/custom/lib64 \
+URMA_PROVIDER_LIB_DIR=/custom/lib64/urma \
+URMA_RUNTIME_LD_LIBRARY_PATH=/custom/lib64:/custom/lib64/urma \
+bash scripts/run_brpc_ub_recommend_server.sh
+```
+
+On 2026-09-02, starting the server from the `ds-ub-poc` virtualenv failed before bRPC began
+listening. The decisive log was `dl_addr=/home/zcx/venvs/ds-ub-poc/.../liburma.so`, followed by a
+missing provider directory and `urma_get_device_list failed, errno 19`. This is a dynamic-library
+selection problem, not evidence of an unavailable UB device. A valid startup must instead report
+the host `liburma.so`, complete UMQ initialization, and print `MINIMAL_RECOMMEND_SERVER_READY`.
+
+## Build and Runtime Lessons
+
+- A populated Bazel `output_base` and `--nofetch` do not make Bzlmod resolution offline: module
+  metadata is still read from every configured registry.
+- Use exact versions from `MODULE.bazel.lock` and local registry contents. This POC needs
+  `leveldb@1.23` and `openssl@3.3.2.bcr.1` from the local SecretFlow registry.
+- Use `--ignore_all_rc_files` and explicit local `file://` registries to prevent a user or workspace
+  Bazel rc file from silently restoring remote BCR access.
+- Do not make `bazel mod graph` a normal build gate. It evaluates unrelated module extensions and
+  can trigger unavailable PyPI metadata downloads.
+- The OpenSSL module uses `rules_foreign_cc`; the root module needs a visible direct
+  `rules_foreign_cc` dependency when its preinstalled Make and pkg-config toolchains are selected.
+- Bazel sandbox actions do not reliably inherit GCC toolset runtime libraries. The build wrapper
+  passes the toolset `lib64` path with `--action_env=LD_LIBRARY_PATH=...` so `ar` can load
+  `libbfd-2.42.so`.
+- Because `recommend.proto` is staged under the `pairec_ub_probe` Bazel package, C++ includes must
+  use `pairec_ub_probe/recommend.pb.h`, not the CMake-style bare filename.
+
 This proves the standalone RecommendService request/response path over UB. It does not yet prove the
 Go PaiRec gateway path, production model inference, or sustained concurrency behavior.

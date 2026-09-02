@@ -10,8 +10,15 @@ TIMEOUT_MS=${TIMEOUT_MS:-15000}
 LOG_DIR=${LOG_DIR:-/root/brpc-ub-recommend/client-log}
 OUTPUT_DIR=${OUTPUT_DIR:-/root/brpc-ub-recommend/evidence}
 NOFILE_LIMIT=${NOFILE_LIMIT:-1048576}
+URMA_RUNTIME_LIB_DIR=${URMA_RUNTIME_LIB_DIR:-/usr/lib64}
+URMA_PROVIDER_LIB_DIR=${URMA_PROVIDER_LIB_DIR:-/usr/lib64/urma}
+URMA_RUNTIME_LD_LIBRARY_PATH=${URMA_RUNTIME_LD_LIBRARY_PATH:-$URMA_RUNTIME_LIB_DIR:$URMA_PROVIDER_LIB_DIR}
 
 [[ -x "$CLIENT_BIN" ]] || { echo "ERROR: client binary is not executable: $CLIENT_BIN" >&2; exit 1; }
+[[ -r "$URMA_RUNTIME_LIB_DIR/liburma.so" ]] || {
+    echo "ERROR: host URMA runtime is missing: $URMA_RUNTIME_LIB_DIR/liburma.so" >&2
+    exit 1
+}
 [[ "$REQUESTS_PER_SIZE" =~ ^[1-9][0-9]*$ ]] || {
     echo "ERROR: REQUESTS_PER_SIZE must be a positive integer" >&2
     exit 2
@@ -19,9 +26,13 @@ NOFILE_LIMIT=${NOFILE_LIMIT:-1048576}
 mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
 ulimit -n "$NOFILE_LIMIT"
 
+# Keep a DataSystem virtualenv's bundled liburma from taking precedence over the host driver stack.
+export LD_LIBRARY_PATH="$URMA_RUNTIME_LD_LIBRARY_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 run_id="MinimalRecommendUb_$(date +%Y%m%d_%H%M%S)_$$"
 raw_log="$LOG_DIR/$run_id.log"
 evidence_log="$OUTPUT_DIR/$run_id-evidence.log"
+echo "urma_runtime_library_path=$URMA_RUNTIME_LD_LIBRARY_PATH"
 
 set +e
 "$CLIENT_BIN" \
