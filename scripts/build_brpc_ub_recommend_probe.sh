@@ -82,8 +82,10 @@ if [[ -n "$BAZEL_LOCKFILE_MODE" ]]; then
 fi
 if [[ "$BAZEL_USE_PREINSTALLED_MAKE" == 1 ]]; then
     command -v make >/dev/null 2>&1 || fail "preinstalled make was requested but not found in PATH"
+    command -v pkg-config >/dev/null 2>&1 || fail "preinstalled pkg-config was requested but not found in PATH"
     bazel_repository_args+=(
         "--extra_toolchains=@rules_foreign_cc//toolchains:preinstalled_make_toolchain"
+        "--extra_toolchains=@rules_foreign_cc//toolchains:preinstalled_pkgconfig_toolchain"
     )
 fi
 

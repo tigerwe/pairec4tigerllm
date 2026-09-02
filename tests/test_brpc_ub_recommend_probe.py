@@ -26,6 +26,7 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
         self.assertNotIn("raw.githubusercontent.com", script)
         build_script = (ROOT / "scripts" / "build_brpc_ub_recommend_probe.sh").read_text()
         self.assertIn("preinstalled_make_toolchain", build_script)
+        self.assertIn("preinstalled_pkgconfig_toolchain", build_script)
 
     def test_local_registry_wrapper_repairs_module_and_resolves_graph(self):
         with tempfile.TemporaryDirectory() as temp_dir:
