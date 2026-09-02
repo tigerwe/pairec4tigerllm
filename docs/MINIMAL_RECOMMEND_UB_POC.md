@@ -165,3 +165,44 @@ If the node1 client log has been copied to master, pass it as `CLIENT_LOG=/path/
 The script records local Git state only as metadata, discovers the actual Bazel UBSocket external
 tree, finds every bthread key create/get/set/delete site, maps captured stack addresses against both
 binaries, records dynamic symbols and dependencies, and packages all evidence under `/tmp`.
+
+### Invalid bthread key root cause and fix
+
+The local-source diagnostic identified a concrete initialization bug in the customized bRPC tree:
+
+- `ubsocket_trace_rpcid_key` was defined as `{0, 0}`, which is exactly `INVALID_BTHREAD_KEY`.
+- `ubsocket_trace_call_timestamp` was defined as the hard-coded pair `{1, 0}` instead of being
+  allocated by the bthread key registry.
+- `Channel::CallMethod()` called `bthread_setspecific()` with both values, while
+  `InitializeUBSocket()` registered getters with UBSocket but never called `bthread_key_create()`.
+- The observed fatal message named `{index=0 version=0}`, matching the RPC ID key used by
+  `Channel::CallMethod()` after it creates the call ID.
+
+Apply the guarded local-tree patch on master:
+
+```bash
+cd /home/zcx/workspace/pairec4tigerllm
+BRPC_ROOT=/home/zcx/workspace/brpc-827 \
+  bash scripts/apply_brpc_ub_trace_key_fix.sh
+```
+
+The helper refuses unknown source shapes, saves both changed source files under
+`/tmp/brpc-ub-trace-key-fix-backup/<timestamp>/`, and is idempotent. The patch initializes both
+globals to `INVALID_BTHREAD_KEY`, allocates them with `bthread_key_create()` before
+`ubsocket_init()`, and rolls back the first allocation if the second one fails. Keys remain valid
+for process lifetime because UBSocket callbacks and transport threads may continue to read them.
+
+Rebuild and verify the official Echo pair before rebuilding Recommend:
+
+```bash
+cd /home/zcx/workspace/pairec4tigerllm
+ACTION=build \
+BRPC_ROOT=/home/zcx/workspace/brpc-827 \
+INSTALL_DIR=/opt/pairec-brpc-ub-echo-baseline \
+BUILD_JOBS=32 \
+  bash scripts/verify_brpc_ub_echo_baseline.sh
+```
+
+The acceptance order is: official Echo UB returns at least one response and records
+`bind jetty success`; then the 0-byte Recommend UB request passes; only then run the full payload
+matrix. A successful compile alone does not close the runtime defect.

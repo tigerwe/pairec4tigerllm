@@ -256,6 +256,62 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             self.assertIn("bthread_key_create", (output_dir / "bthread-key-usage.txt").read_text())
             self.assertTrue(pathlib.Path(f"{output_dir}.tar.gz").is_file())
 
+    def test_bthread_trace_key_fix_allocates_keys_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            brpc_root = root / "brpc"
+            bthread_dir = brpc_root / "src" / "bthread"
+            brpc_dir = brpc_root / "src" / "brpc"
+            bthread_dir.mkdir(parents=True)
+            brpc_dir.mkdir(parents=True)
+            (bthread_dir / "bthread.cpp").write_text(
+                textwrap.dedent(
+                    """
+                    #ifdef BRPC_WITH_URMA
+                    bthread_key_t ubsocket_trace_rpcid_key{0, 0};
+                    bthread_key_t ubsocket_trace_call_timestamp{1, 0};
+                    #endif
+                    namespace bthread {
+                    """
+                ).lstrip("\n")
+            )
+            (brpc_dir / "ubsocket_initializer.cpp").write_text(
+                "    }\n"
+                "    ubsocket_set_log_level(ub_log_level);\n"
+                "    ubsocket_set_logger(UBSocketLogger);\n"
+                "    /* initialize ubsocket */\n"
+                "    u_init_options_t options;\n"
+            )
+            env = os.environ.copy()
+            env.update(
+                {
+                    "BRPC_ROOT": str(brpc_root),
+                    "BACKUP_ROOT": str(root / "backups"),
+                }
+            )
+            command = ["bash", str(ROOT / "scripts" / "apply_brpc_ub_trace_key_fix.sh")]
+            first = subprocess.run(
+                command, cwd=ROOT, env=env, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            self.assertIn("BRPC_UB_TRACE_KEY_FIX_APPLIED", first.stdout)
+            bthread_text = (bthread_dir / "bthread.cpp").read_text()
+            initializer_text = (brpc_dir / "ubsocket_initializer.cpp").read_text()
+            self.assertIn(
+                "ubsocket_trace_rpcid_key = INVALID_BTHREAD_KEY", bthread_text
+            )
+            self.assertIn(
+                "bthread_key_create(&ubsocket_trace_rpcid_key, NULL)", initializer_text
+            )
+            self.assertIn("bthread_key_delete(ubsocket_trace_rpcid_key)", initializer_text)
+            self.assertEqual(len(list((root / "backups").glob("*/src/bthread/bthread.cpp"))), 1)
+
+            second = subprocess.run(
+                command, cwd=ROOT, env=env, text=True, capture_output=True, check=True
+            )
+            self.assertIn("BRPC_UB_TRACE_KEY_FIX_ALREADY_APPLIED", second.stdout)
+            self.assertEqual(len(list((root / "backups").glob("*/src/bthread/bthread.cpp"))), 1)
+
     def test_payload_matrix_contains_boundary_and_large_values(self):
         client = (PROBE_DIR / "minimal_recommend_client.cpp").read_text()
         self.assertIn("0,1,4096,4097,65536,1048576,3670016", client)
