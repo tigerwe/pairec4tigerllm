@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include "recommend.pb.h"
+#include "pairec_ub_probe/recommend.pb.h"
 
 DEFINE_string(probe_server, "127.0.0.1:18100", "Minimal RecommendService endpoint");
 DEFINE_string(probe_method, "recommend", "RPC method: recommend or health");

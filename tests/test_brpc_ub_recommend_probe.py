@@ -131,10 +131,14 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
 
     def test_bazel_package_reuses_brpc_target(self):
         build = (PROBE_DIR / "BUILD.bazel").read_text()
+        client = (PROBE_DIR / "minimal_recommend_client.cpp").read_text()
+        server = (PROBE_DIR / "minimal_recommend_server.cpp").read_text()
         self.assertIn('"//:brpc"', build)
         self.assertIn('"-std=c++17"', build)
         self.assertNotIn("datasystem", build.lower())
         self.assertNotIn("trt", build.lower())
+        self.assertIn('#include "pairec_ub_probe/recommend.pb.h"', client)
+        self.assertIn('#include "pairec_ub_probe/recommend.pb.h"', server)
 
     def test_build_script_stages_complete_package(self):
         with tempfile.TemporaryDirectory() as temp_dir:

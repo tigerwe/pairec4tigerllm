@@ -9,7 +9,7 @@
 #include <iostream>
 #include <string>
 
-#include "recommend.pb.h"
+#include "pairec_ub_probe/recommend.pb.h"
 
 DEFINE_int32(probe_port, 18100, "Port for the minimal RecommendService server");
 DEFINE_int32(probe_idle_timeout_sec, -1, "Server connection idle timeout");
