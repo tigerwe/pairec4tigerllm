@@ -8,6 +8,10 @@ This probe isolates the transport from TRT-LLM, DataSystem, and PaiRec. It reuse
 - bRPC: `827db2a9be6a3eac0a1ac3666b4a9cf33b976175`
 - UBSComm: `9f80dc9fb5f06ba8b5997064c928b89bda266ffd`
 
+These identifiers pin the local master environment used by this POC. They must not be attributed to
+the public `fanzhaonan/brpc` or openEuler UBSComm repositories without independently verifying object
+provenance; the master source trees contain site-specific history and changes.
+
 The build script stages the package into the fixed bRPC worktree and links against `//:brpc`. The bRPC
 target supplies the matching UBSComm/UMQ implementation selected by `--define brpc_with_urma=true`.
 
@@ -143,3 +147,21 @@ changing transport code.
 A passing Echo baseline only proves that the current bRPC/UB build and runtime combination works. A
 passing full Recommend matrix is still required to prove the standalone service path; neither result
 proves the Go PaiRec gateway path, production model inference, or sustained concurrency behavior.
+
+### Invalid bthread key diagnostic
+
+The current locally built official Echo reproduces the same invalid-`bthread_key` crash as the
+Recommend Probe. Collect evidence from the local source trees and binaries without comparing against
+public repositories:
+
+```bash
+BRPC_ROOT=/home/zcx/workspace/brpc-827 \
+BAZEL_OUTPUT_BASE=/root/.cache/bazel/_bazel_root/0947eeff3cdbdab635f34a3b3ff5f6d1 \
+SERVER_LOG=/root/brpc-ub-echo-baseline/server-log/echo-server-YYYYMMDD-HHMMSS.log \
+bash scripts/diagnose_brpc_ub_bthread_key_crash.sh
+```
+
+If the node1 client log has been copied to master, pass it as `CLIENT_LOG=/path/to/echo-client.log`.
+The script records local Git state only as metadata, discovers the actual Bazel UBSocket external
+tree, finds every bthread key create/get/set/delete site, maps captured stack addresses against both
+binaries, records dynamic symbols and dependencies, and packages all evidence under `/tmp`.

@@ -194,6 +194,66 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("BRPC_UB_ECHO_BASELINE_CRASH", result.stderr)
 
+    def test_bthread_key_diagnostic_uses_local_source_of_truth(self):
+        script = (ROOT / "scripts" / "diagnose_brpc_ub_bthread_key_crash.sh").read_text()
+        self.assertIn("source_of_truth=local_brpc_and_bazel_external_ubsocket", script)
+        self.assertIn("public_repository_assumption=disabled", script)
+        self.assertIn("bthread_(key_create2?|key_delete|setspecific|getspecific)", script)
+        self.assertIn("initialization-order.txt", script)
+        self.assertIn("addr2line -Cfipe", script)
+        self.assertIn("objdump -dC", script)
+        self.assertIn("client-coredump-info.txt", script)
+        self.assertNotIn("EXPECTED_BRPC_COMMIT", script)
+        self.assertNotIn("gitcode.com", script)
+        self.assertNotIn("atomgit.com", script)
+
+    def test_bthread_key_diagnostic_runs_with_local_only_fixture(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            brpc_root = root / "brpc"
+            for source_dir in ("src/brpc", "src/bthread", "src/butil"):
+                (brpc_root / source_dir).mkdir(parents=True, exist_ok=True)
+            (brpc_root / "src/brpc/example.cpp").write_text(
+                "bthread_key_t key; bthread_key_create(&key, nullptr);\n"
+            )
+            ubs_root = root / "output-base" / "external" / "_main~local_deps~ubsocket"
+            (ubs_root / "src/ubsocket").mkdir(parents=True)
+            (ubs_root / "src/ubsocket/example.c").write_text("bthread_setspecific(key, data);\n")
+            client_log = root / "client.log"
+            client_log.write_text(
+                "bthread_setspecific is called on invalid bthread_key_t{index=0 version=0}\n"
+                "#0 0x0000000000000000 bthread::KeyTable::set_data()\n"
+            )
+            output_dir = root / "evidence"
+            env = os.environ.copy()
+            env.update(
+                {
+                    "BRPC_ROOT": str(brpc_root),
+                    "BAZEL_OUTPUT_BASE": str(root / "output-base"),
+                    "CLIENT_BIN": "/bin/true",
+                    "SERVER_BIN": "/bin/true",
+                    "CLIENT_LOG": str(client_log),
+                    "SERVER_LOG": str(root / "missing-server.log"),
+                    "OUTPUT_DIR": str(output_dir),
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "diagnose_brpc_ub_bthread_key_crash.sh")],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("BRPC_UB_BTHREAD_KEY_DIAGNOSTIC_OK", result.stdout)
+            self.assertIn(
+                "classification=BRPC_UB_BTHREAD_KEY_CRASH_CONFIRMED",
+                (output_dir / "summary.txt").read_text(),
+            )
+            self.assertIn("bthread_key_create", (output_dir / "bthread-key-usage.txt").read_text())
+            self.assertTrue(pathlib.Path(f"{output_dir}.tar.gz").is_file())
+
     def test_payload_matrix_contains_boundary_and_large_values(self):
         client = (PROBE_DIR / "minimal_recommend_client.cpp").read_text()
         self.assertIn("0,1,4096,4097,65536,1048576,3670016", client)
