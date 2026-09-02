@@ -7,6 +7,7 @@ INSTALL_DIR=${INSTALL_DIR:-/opt/pairec-brpc-ub-probe}
 BUILD_JOBS=${BUILD_JOBS:-32}
 BAZEL_OUTPUT_BASE=${BAZEL_OUTPUT_BASE:-}
 BAZEL_LOCKFILE_MODE=${BAZEL_LOCKFILE_MODE:-}
+BAZEL_IGNORE_ALL_RC_FILES=${BAZEL_IGNORE_ALL_RC_FILES:-0}
 LOCAL_BCR_REGISTRY=${LOCAL_BCR_REGISTRY:-}
 LOCAL_SECRET_REGISTRY=${LOCAL_SECRET_REGISTRY:-}
 EXPECTED_BRPC_COMMIT=${EXPECTED_BRPC_COMMIT:-827db2a9be6a3eac0a1ac3666b4a9cf33b976175}
@@ -57,6 +58,9 @@ if [[ "$STAGE_ONLY" == 1 ]]; then
 fi
 
 bazel_startup_args=()
+if [[ "$BAZEL_IGNORE_ALL_RC_FILES" == 1 ]]; then
+    bazel_startup_args+=("--ignore_all_rc_files")
+fi
 if [[ -n "$BAZEL_OUTPUT_BASE" ]]; then
     bazel_startup_args+=("--output_base=$BAZEL_OUTPUT_BASE")
 fi

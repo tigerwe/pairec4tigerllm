@@ -95,8 +95,10 @@ override_count=$(grep -Fc "registry = \"$secret_registry_uri\"," "$module_file")
 [[ "$override_count" == 2 ]] || fail "expected two local SecretFlow overrides, got $override_count"
 
 echo "BRPC_LOCAL_REGISTRY_CONFIG_OK module=$module_file backup=$backup_file"
+echo "BRPC_LOCAL_REGISTRY_RC_ISOLATION_OK"
 
 bazel_startup_args=()
+bazel_startup_args+=("--ignore_all_rc_files")
 if [[ -n "$BAZEL_OUTPUT_BASE" ]]; then
     bazel_startup_args+=("--output_base=$BAZEL_OUTPUT_BASE")
 fi
@@ -122,6 +124,7 @@ fi
 BRPC_ROOT="$BRPC_ROOT" \
 BAZEL_OUTPUT_BASE="$BAZEL_OUTPUT_BASE" \
 BAZEL_LOCKFILE_MODE=off \
+BAZEL_IGNORE_ALL_RC_FILES=1 \
 LOCAL_BCR_REGISTRY="$LOCAL_BCR_REGISTRY" \
 LOCAL_SECRET_REGISTRY="$LOCAL_SECRET_REGISTRY" \
 bash "$REPO_ROOT/scripts/build_brpc_ub_recommend_probe.sh"
