@@ -203,6 +203,8 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
         self.assertIn("addr2line -Cfipe", script)
         self.assertIn("objdump -dC", script)
         self.assertIn("client-coredump-info.txt", script)
+        self.assertIn("grep -RniE -C 5", script)
+        self.assertNotIn("for command in rg ", script)
         self.assertNotIn("EXPECTED_BRPC_COMMIT", script)
         self.assertNotIn("gitcode.com", script)
         self.assertNotIn("atomgit.com", script)

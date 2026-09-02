@@ -74,6 +74,20 @@ collect_binary()
     } >"$OUTPUT_DIR/$prefix-binary.txt"
 }
 
+search_sources()
+{
+    local pattern=$1 output=$2
+    shift 2
+    if command -v rg >/dev/null 2>&1; then
+        rg -n -C 5 --glob '*.{c,cc,cpp,h,hpp}' "$pattern" "$@" >"$output" 2>&1 || true
+    else
+        grep -RniE -C 5 \
+            --include='*.c' --include='*.cc' --include='*.cpp' \
+            --include='*.h' --include='*.hpp' \
+            "$pattern" "$@" >"$output" 2>&1 || true
+    fi
+}
+
 map_crash_addresses()
 {
     local binary=$1 log=$2 prefix=$3
@@ -101,7 +115,7 @@ map_crash_addresses()
     done <"$addresses_file"
 }
 
-for command in rg git sha256sum file ldd readelf nm addr2line objdump; do
+for command in grep git sha256sum file ldd readelf nm addr2line objdump; do
     command -v "$command" >/dev/null 2>&1 || die "missing command: $command"
 done
 [[ -d "$BRPC_ROOT" ]] || die "bRPC source tree does not exist: $BRPC_ROOT"
@@ -159,12 +173,12 @@ if [[ -d "$UBS_DIR/src/hcom/umq" ]]; then
     source_roots+=("$UBS_DIR/src/hcom/umq")
 fi
 
-rg -n -C 5 --glob '*.{c,cc,cpp,h,hpp}' \
+search_sources \
     'bthread_(key_create2?|key_delete|setspecific|getspecific)|bthread_key_t' \
-    "${source_roots[@]}" >"$OUTPUT_DIR/bthread-key-usage.txt" 2>&1 || true
-rg -n -C 5 --glob '*.{c,cc,cpp,h,hpp}' \
+    "$OUTPUT_DIR/bthread-key-usage.txt" "${source_roots[@]}"
+search_sources \
     'GlobalInitializeOrDie|InitializeUBSocket|ubsocket_init|umq_init|pthread_once|bthread_once' \
-    "${source_roots[@]}" >"$OUTPUT_DIR/initialization-order.txt" 2>&1 || true
+    "$OUTPUT_DIR/initialization-order.txt" "${source_roots[@]}"
 
 collect_binary "$CLIENT_BIN" client
 collect_binary "$SERVER_BIN" server
