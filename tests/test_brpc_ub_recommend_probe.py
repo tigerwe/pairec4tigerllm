@@ -19,10 +19,13 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
         self.assertIn("modules/openssl/$OPENSSL_VERSION/MODULE.bazel", script)
         self.assertIn("RUN_MODULE_GRAPH=${RUN_MODULE_GRAPH:-0}", script)
         self.assertIn("BAZEL_LOCKFILE_MODE=update", script)
+        self.assertIn("BAZEL_USE_PREINSTALLED_MAKE=1", script)
         self.assertIn("--ignore_all_rc_files", script)
         self.assertIn("BRPC_LOCAL_REGISTRY_GRAPH_SKIPPED", script)
         self.assertNotIn("https://bcr.bazel.build", script)
         self.assertNotIn("raw.githubusercontent.com", script)
+        build_script = (ROOT / "scripts" / "build_brpc_ub_recommend_probe.sh").read_text()
+        self.assertIn("preinstalled_make_toolchain", build_script)
 
     def test_local_registry_wrapper_repairs_module_and_resolves_graph(self):
         with tempfile.TemporaryDirectory() as temp_dir:

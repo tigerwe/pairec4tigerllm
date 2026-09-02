@@ -8,6 +8,7 @@ BUILD_JOBS=${BUILD_JOBS:-32}
 BAZEL_OUTPUT_BASE=${BAZEL_OUTPUT_BASE:-}
 BAZEL_LOCKFILE_MODE=${BAZEL_LOCKFILE_MODE:-}
 BAZEL_IGNORE_ALL_RC_FILES=${BAZEL_IGNORE_ALL_RC_FILES:-0}
+BAZEL_USE_PREINSTALLED_MAKE=${BAZEL_USE_PREINSTALLED_MAKE:-0}
 LOCAL_BCR_REGISTRY=${LOCAL_BCR_REGISTRY:-}
 LOCAL_SECRET_REGISTRY=${LOCAL_SECRET_REGISTRY:-}
 EXPECTED_BRPC_COMMIT=${EXPECTED_BRPC_COMMIT:-827db2a9be6a3eac0a1ac3666b4a9cf33b976175}
@@ -78,6 +79,12 @@ if [[ -n "$LOCAL_BCR_REGISTRY" ]]; then
 fi
 if [[ -n "$BAZEL_LOCKFILE_MODE" ]]; then
     bazel_repository_args+=("--lockfile_mode=$BAZEL_LOCKFILE_MODE")
+fi
+if [[ "$BAZEL_USE_PREINSTALLED_MAKE" == 1 ]]; then
+    command -v make >/dev/null 2>&1 || fail "preinstalled make was requested but not found in PATH"
+    bazel_repository_args+=(
+        "--extra_toolchains=@rules_foreign_cc//toolchains:preinstalled_make_toolchain"
+    )
 fi
 
 (
