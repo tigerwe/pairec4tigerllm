@@ -11,6 +11,7 @@ RUN_BUILD=${RUN_BUILD:-1}
 RUN_MODULE_GRAPH=${RUN_MODULE_GRAPH:-0}
 OPENSSL_VERSION=${OPENSSL_VERSION:-3.3.2.bcr.1}
 RULES_FOREIGN_CC_VERSION=${RULES_FOREIGN_CC_VERSION:-0.12.0}
+GCC_TOOLSET_ROOT=${GCC_TOOLSET_ROOT:-/opt/openEuler/gcc-toolset-14/root/usr}
 
 fail()
 {
@@ -133,6 +134,18 @@ grep -Eq "bazel_dep\(name = ['\"]rules_foreign_cc['\"], version = ['\"]$RULES_FO
 echo "BRPC_LOCAL_REGISTRY_CONFIG_OK module=$module_file backup=$backup_file openssl=$OPENSSL_VERSION rules_foreign_cc=$RULES_FOREIGN_CC_VERSION"
 echo "BRPC_LOCAL_REGISTRY_RC_ISOLATION_OK"
 
+action_ld_library_path=""
+if [[ -x "$GCC_TOOLSET_ROOT/bin/ar" ]]; then
+    gcc_toolset_lib_dir="$GCC_TOOLSET_ROOT/lib64"
+    [[ -e "$gcc_toolset_lib_dir/libbfd-2.42.so" ]] ||
+        fail "gcc-toolset ar requires missing $gcc_toolset_lib_dir/libbfd-2.42.so"
+    action_ld_library_path="$gcc_toolset_lib_dir"
+    if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+        action_ld_library_path+=":$LD_LIBRARY_PATH"
+    fi
+    echo "BRPC_GCC_TOOLSET_RUNTIME_OK ar=$GCC_TOOLSET_ROOT/bin/ar libdir=$gcc_toolset_lib_dir"
+fi
+
 bazel_startup_args=()
 bazel_startup_args+=("--ignore_all_rc_files")
 if [[ -n "$BAZEL_OUTPUT_BASE" ]]; then
@@ -165,6 +178,7 @@ BAZEL_OUTPUT_BASE="$BAZEL_OUTPUT_BASE" \
 BAZEL_LOCKFILE_MODE=update \
 BAZEL_IGNORE_ALL_RC_FILES=1 \
 BAZEL_USE_PREINSTALLED_MAKE=1 \
+BAZEL_ACTION_LD_LIBRARY_PATH="$action_ld_library_path" \
 LOCAL_BCR_REGISTRY="$LOCAL_BCR_REGISTRY" \
 LOCAL_SECRET_REGISTRY="$LOCAL_SECRET_REGISTRY" \
 bash "$REPO_ROOT/scripts/build_brpc_ub_recommend_probe.sh"

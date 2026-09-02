@@ -9,6 +9,7 @@ BAZEL_OUTPUT_BASE=${BAZEL_OUTPUT_BASE:-}
 BAZEL_LOCKFILE_MODE=${BAZEL_LOCKFILE_MODE:-}
 BAZEL_IGNORE_ALL_RC_FILES=${BAZEL_IGNORE_ALL_RC_FILES:-0}
 BAZEL_USE_PREINSTALLED_MAKE=${BAZEL_USE_PREINSTALLED_MAKE:-0}
+BAZEL_ACTION_LD_LIBRARY_PATH=${BAZEL_ACTION_LD_LIBRARY_PATH:-}
 LOCAL_BCR_REGISTRY=${LOCAL_BCR_REGISTRY:-}
 LOCAL_SECRET_REGISTRY=${LOCAL_SECRET_REGISTRY:-}
 EXPECTED_BRPC_COMMIT=${EXPECTED_BRPC_COMMIT:-827db2a9be6a3eac0a1ac3666b4a9cf33b976175}
@@ -87,6 +88,9 @@ if [[ "$BAZEL_USE_PREINSTALLED_MAKE" == 1 ]]; then
         "--extra_toolchains=@rules_foreign_cc//toolchains:preinstalled_make_toolchain"
         "--extra_toolchains=@rules_foreign_cc//toolchains:preinstalled_pkgconfig_toolchain"
     )
+fi
+if [[ -n "$BAZEL_ACTION_LD_LIBRARY_PATH" ]]; then
+    bazel_repository_args+=("--action_env=LD_LIBRARY_PATH=$BAZEL_ACTION_LD_LIBRARY_PATH")
 fi
 
 (
