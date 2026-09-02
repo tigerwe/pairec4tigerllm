@@ -15,7 +15,8 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
     def test_local_registry_wrapper_avoids_literal_remote_registries(self):
         script = (ROOT / "scripts" / "build_brpc_ub_recommend_probe_local_registry.sh").read_text()
         self.assertIn("modules/leveldb/1.23/MODULE.bazel", script)
-        self.assertIn("modules/openssl/3.3.2.bcr.1/MODULE.bazel", script)
+        self.assertIn("OPENSSL_VERSION=${OPENSSL_VERSION:-3.3.2.bcr.1}", script)
+        self.assertIn("modules/openssl/$OPENSSL_VERSION/MODULE.bazel", script)
         self.assertIn("--lockfile_mode=off", script)
         self.assertIn("--ignore_all_rc_files", script)
         self.assertIn("BRPC_LOCAL_REGISTRY_GRAPH_OK", script)
@@ -42,6 +43,7 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             (brpc_root / "MODULE.bazel").write_text(
                 textwrap.dedent(
                     """
+                    bazel_dep(name = 'openssl', version = '3.3.2')
                     single_version_override(
                         module_name = "leveldb",
                         registry = "[file:///bad](file:///bad)",
@@ -86,6 +88,7 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             self.assertIn("BRPC_LOCAL_REGISTRY_GRAPH_OK", result.stdout)
             self.assertIn("BRPC_LOCAL_REGISTRY_RC_ISOLATION_OK", result.stdout)
             self.assertEqual(module_text.count(secret.resolve().as_uri()), 2)
+            self.assertIn("bazel_dep(name = 'openssl', version = \"3.3.2.bcr.1\")", module_text)
             self.assertNotIn("[file:", module_text)
             self.assertEqual((root / "graph.txt").read_text().strip(), "brpc@1.15.0")
             self.assertEqual((root / "bazel-cwd.txt").read_text().strip(), str(brpc_root))

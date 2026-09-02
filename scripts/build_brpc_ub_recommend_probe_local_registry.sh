@@ -8,6 +8,7 @@ LOCAL_SECRET_REGISTRY=${LOCAL_SECRET_REGISTRY:-/home/zcx/bazel-local-registry/se
 BAZEL_OUTPUT_BASE=${BAZEL_OUTPUT_BASE:-/root/.cache/bazel/_bazel_root/0947eeff3cdbdab635f34a3b3ff5f6d1}
 MODULE_GRAPH_OUT=${MODULE_GRAPH_OUT:-/tmp/brpc-module-graph.txt}
 RUN_BUILD=${RUN_BUILD:-1}
+OPENSSL_VERSION=${OPENSSL_VERSION:-3.3.2.bcr.1}
 
 fail()
 {
@@ -30,8 +31,8 @@ required_registry_files=(
     "$LOCAL_SECRET_REGISTRY/bazel_registry.json"
     "$LOCAL_SECRET_REGISTRY/modules/leveldb/1.23/MODULE.bazel"
     "$LOCAL_SECRET_REGISTRY/modules/leveldb/1.23/source.json"
-    "$LOCAL_SECRET_REGISTRY/modules/openssl/3.3.2.bcr.1/MODULE.bazel"
-    "$LOCAL_SECRET_REGISTRY/modules/openssl/3.3.2.bcr.1/source.json"
+    "$LOCAL_SECRET_REGISTRY/modules/openssl/$OPENSSL_VERSION/MODULE.bazel"
+    "$LOCAL_SECRET_REGISTRY/modules/openssl/$OPENSSL_VERSION/source.json"
 )
 for file in "${required_registry_files[@]}"; do
     [[ -f "$file" ]] || fail "missing local registry file: $file"
@@ -45,21 +46,35 @@ if [[ ! -e "$backup_file" ]]; then
     cp -p "$module_file" "$backup_file"
 fi
 
-python3 - "$module_file" "$secret_registry_uri" <<'PY'
+python3 - "$module_file" "$secret_registry_uri" "$OPENSSL_VERSION" <<'PY'
 import pathlib
 import re
 import sys
 
 module_path = pathlib.Path(sys.argv[1])
 registry_uri = sys.argv[2]
+openssl_version = sys.argv[3]
 lines = module_path.read_text().splitlines(keepends=True)
 targets = {"leveldb", "openssl"}
 updated = set()
+openssl_dependency_updated = False
 in_override = False
 current_module = None
 
 for index, line in enumerate(lines):
     stripped = line.strip()
+    if stripped.startswith("bazel_dep(") and re.search(r'name\s*=\s*["\']openssl["\']', stripped):
+        replacement, count = re.subn(
+            r'(version\s*=\s*)["\'][^"\']+["\']',
+            rf'\1"{openssl_version}"',
+            line,
+            count=1,
+        )
+        if count != 1:
+            raise SystemExit("unable to update openssl bazel_dep version")
+        lines[index] = replacement
+        openssl_dependency_updated = True
+        continue
     if stripped == "single_version_override(":
         in_override = True
         current_module = None
@@ -84,6 +99,8 @@ for index, line in enumerate(lines):
 missing = targets - updated
 if missing:
     raise SystemExit("missing registry override(s): " + ", ".join(sorted(missing)))
+if not openssl_dependency_updated:
+    raise SystemExit("missing openssl bazel_dep")
 
 module_path.write_text("".join(lines))
 PY
@@ -93,8 +110,10 @@ if grep -Eq '\[file:|\]\(file:' "$module_file"; then
 fi
 override_count=$(grep -Fc "registry = \"$secret_registry_uri\"," "$module_file")
 [[ "$override_count" == 2 ]] || fail "expected two local SecretFlow overrides, got $override_count"
+grep -Eq "bazel_dep\(name = ['\"]openssl['\"], version = ['\"]$OPENSSL_VERSION['\"]" "$module_file" ||
+    fail "openssl bazel_dep was not aligned to $OPENSSL_VERSION"
 
-echo "BRPC_LOCAL_REGISTRY_CONFIG_OK module=$module_file backup=$backup_file"
+echo "BRPC_LOCAL_REGISTRY_CONFIG_OK module=$module_file backup=$backup_file openssl=$OPENSSL_VERSION"
 echo "BRPC_LOCAL_REGISTRY_RC_ISOLATION_OK"
 
 bazel_startup_args=()
