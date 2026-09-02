@@ -118,5 +118,28 @@ UB change removes the Probe's forced `pooled` connection type: it now defaults t
 default, matching the previously successful `echo_c++_client`; `--probe_connection_type=pooled` is
 available for a later explicit comparison.
 
-This proves the standalone RecommendService request/response path over UB. It does not yet prove the
-Go PaiRec gateway path, production model inference, or sustained concurrency behavior.
+Before changing bRPC or the Probe again, build and run the official Echo targets from the exact same
+bRPC tree, Bzlmod registries, Bazel output base, and UB configuration. The single helper supports all
+three host roles:
+
+```bash
+# master: build and install the official Echo pair
+ACTION=build bash scripts/verify_brpc_ub_echo_baseline.sh
+
+# master: keep the newly built server running
+ACTION=server bash /opt/pairec-brpc-ub-echo-baseline/bin/verify_brpc_ub_echo_baseline.sh
+
+# node1: after copying echo_c++_client and this helper into the same bin directory
+ACTION=client SERVER=141.62.33.105:18200 \
+  bash /opt/pairec-brpc-ub-echo-baseline/bin/verify_brpc_ub_echo_baseline.sh
+```
+
+The client is deliberately time-bounded. It passes only after observing both a response and
+`bind jetty success`; the known invalid-`bthread_key` failure is reported as
+`BRPC_UB_ECHO_BASELINE_CRASH`. If official Echo reproduces it, debug the current bRPC/UB build and
+runtime baseline. If Echo passes, compare the Probe and official Echo compile/link actions before
+changing transport code.
+
+A passing Echo baseline only proves that the current bRPC/UB build and runtime combination works. A
+passing full Recommend matrix is still required to prove the standalone service path; neither result
+proves the Go PaiRec gateway path, production model inference, or sustained concurrency behavior.

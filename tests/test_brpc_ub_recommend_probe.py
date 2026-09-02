@@ -127,6 +127,73 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             self.assertIn("URMA_RUNTIME_LIB_DIR=${URMA_RUNTIME_LIB_DIR:-/usr/lib64}", script)
             self.assertIn('export LD_LIBRARY_PATH="$URMA_RUNTIME_LD_LIBRARY_PATH', script)
 
+    def test_echo_baseline_script_uses_same_offline_ub_build(self):
+        script = (ROOT / "scripts" / "verify_brpc_ub_echo_baseline.sh").read_text()
+        self.assertIn("ACTION=${ACTION:-client}", script)
+        self.assertIn("//example:echo_c++_server", script)
+        self.assertIn("//example:echo_c++_client", script)
+        self.assertIn("--define brpc_with_urma=true", script)
+        self.assertIn("--ignore_all_rc_files", script)
+        self.assertIn("build_brpc_ub_recommend_probe_local_registry.sh", script)
+        self.assertIn("--ubsocket_backup_link_enable=false", script)
+        self.assertIn("--ubsocket_degrade_enable=false", script)
+        self.assertIn("invalid bthread_key", script)
+        self.assertIn("BRPC_UB_ECHO_BASELINE_PASS", script)
+        self.assertIn("BRPC_UB_ECHO_BASELINE_CRASH", script)
+
+    def test_echo_baseline_client_classifies_pass_and_known_crash(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            runtime_dir = root / "lib64"
+            provider_dir = runtime_dir / "urma"
+            provider_dir.mkdir(parents=True)
+            (runtime_dir / "liburma.so").write_text("")
+            client = root / "echo_client"
+            client.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo 'bind jetty success'\n"
+                "echo 'Received response from test: hello world'\n"
+            )
+            client.chmod(0o755)
+            env = os.environ.copy()
+            env.update(
+                {
+                    "ACTION": "client",
+                    "CLIENT_BIN": str(client),
+                    "LOG_DIR": str(root / "logs"),
+                    "RUN_SECONDS": "1",
+                    "URMA_RUNTIME_LIB_DIR": str(runtime_dir),
+                    "URMA_PROVIDER_LIB_DIR": str(provider_dir),
+                    "URMA_RUNTIME_LD_LIBRARY_PATH": f"{runtime_dir}:{provider_dir}",
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "verify_brpc_ub_echo_baseline.sh")],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("BRPC_UB_ECHO_BASELINE_PASS responses=1", result.stdout)
+
+            client.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo 'bthread_setspecific is called on invalid bthread_key_t'\n"
+                "exit 139\n"
+            )
+            client.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "verify_brpc_ub_echo_baseline.sh")],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("BRPC_UB_ECHO_BASELINE_CRASH", result.stderr)
+
     def test_payload_matrix_contains_boundary_and_large_values(self):
         client = (PROBE_DIR / "minimal_recommend_client.cpp").read_text()
         self.assertIn("0,1,4096,4097,65536,1048576,3670016", client)
