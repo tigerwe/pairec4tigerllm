@@ -13,6 +13,26 @@ target supplies the matching UBSComm/UMQ implementation selected by `--define br
 
 ## Build on master
 
+When the machine cannot reach Bazel Central Registry or the SecretFlow registry, use the checked-out
+local registry wrapper. It validates the required metadata, repairs the two module-specific registry
+overrides, verifies the complete Bzlmod graph with the lock file disabled, and then runs the normal
+probe build:
+
+```bash
+BRPC_ROOT=/home/zcx/workspace/brpc-827 \
+LOCAL_BCR_REGISTRY=/home/zcx/bazel-local-registry/bcr \
+LOCAL_SECRET_REGISTRY=/home/zcx/bazel-local-registry/secretflow \
+BAZEL_OUTPUT_BASE=/root/.cache/bazel/_bazel_root/0947eeff3cdbdab635f34a3b3ff5f6d1 \
+INSTALL_DIR=/opt/pairec-brpc-ub-probe \
+BUILD_JOBS=32 \
+bash scripts/build_brpc_ub_recommend_probe_local_registry.sh
+```
+
+The original `MODULE.bazel` is preserved once as `MODULE.bazel.before-local-registry`. Set
+`RUN_BUILD=0` to perform only the registry repair and module graph check.
+
+For a machine with normal registry access, use the standard build entry point:
+
 ```bash
 BRPC_ROOT=/home/zcx/workspace/brpc-827 \
 INSTALL_DIR=/opt/pairec-brpc-ub-probe \
