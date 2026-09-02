@@ -38,6 +38,10 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             fake_bin.mkdir()
             (bcr / "bazel_registry.json").parent.mkdir(parents=True)
             (bcr / "bazel_registry.json").write_text("{}\n")
+            foreign_cc_dir = bcr / "modules" / "rules_foreign_cc" / "0.12.0"
+            foreign_cc_dir.mkdir(parents=True)
+            (foreign_cc_dir / "MODULE.bazel").write_text('module(name = "rules_foreign_cc")\n')
+            (foreign_cc_dir / "source.json").write_text("{}\n")
             for module, version in (("leveldb", "1.23"), ("openssl", "3.3.2.bcr.1")):
                 module_dir = secret / "modules" / module / version
                 module_dir.mkdir(parents=True)
@@ -94,6 +98,9 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             self.assertIn("BRPC_LOCAL_REGISTRY_RC_ISOLATION_OK", result.stdout)
             self.assertEqual(module_text.count(secret.resolve().as_uri()), 2)
             self.assertIn("bazel_dep(name = 'openssl', version = \"3.3.2.bcr.1\")", module_text)
+            self.assertEqual(
+                module_text.count('bazel_dep(name = "rules_foreign_cc", version = "0.12.0")'), 1
+            )
             self.assertNotIn("[file:", module_text)
             self.assertEqual((root / "graph.txt").read_text().strip(), "brpc@1.15.0")
             self.assertEqual((root / "bazel-cwd.txt").read_text().strip(), str(brpc_root))

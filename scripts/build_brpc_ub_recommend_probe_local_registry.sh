@@ -10,6 +10,7 @@ MODULE_GRAPH_OUT=${MODULE_GRAPH_OUT:-/tmp/brpc-module-graph.txt}
 RUN_BUILD=${RUN_BUILD:-1}
 RUN_MODULE_GRAPH=${RUN_MODULE_GRAPH:-0}
 OPENSSL_VERSION=${OPENSSL_VERSION:-3.3.2.bcr.1}
+RULES_FOREIGN_CC_VERSION=${RULES_FOREIGN_CC_VERSION:-0.12.0}
 
 fail()
 {
@@ -29,6 +30,8 @@ registry_uri()
 
 required_registry_files=(
     "$LOCAL_BCR_REGISTRY/bazel_registry.json"
+    "$LOCAL_BCR_REGISTRY/modules/rules_foreign_cc/$RULES_FOREIGN_CC_VERSION/MODULE.bazel"
+    "$LOCAL_BCR_REGISTRY/modules/rules_foreign_cc/$RULES_FOREIGN_CC_VERSION/source.json"
     "$LOCAL_SECRET_REGISTRY/bazel_registry.json"
     "$LOCAL_SECRET_REGISTRY/modules/leveldb/1.23/MODULE.bazel"
     "$LOCAL_SECRET_REGISTRY/modules/leveldb/1.23/source.json"
@@ -47,7 +50,7 @@ if [[ ! -e "$backup_file" ]]; then
     cp -p "$module_file" "$backup_file"
 fi
 
-python3 - "$module_file" "$secret_registry_uri" "$OPENSSL_VERSION" <<'PY'
+python3 - "$module_file" "$secret_registry_uri" "$OPENSSL_VERSION" "$RULES_FOREIGN_CC_VERSION" <<'PY'
 import pathlib
 import re
 import sys
@@ -55,10 +58,13 @@ import sys
 module_path = pathlib.Path(sys.argv[1])
 registry_uri = sys.argv[2]
 openssl_version = sys.argv[3]
+rules_foreign_cc_version = sys.argv[4]
 lines = module_path.read_text().splitlines(keepends=True)
 targets = {"leveldb", "openssl"}
 updated = set()
 openssl_dependency_updated = False
+openssl_dependency_index = None
+rules_foreign_cc_dependency_found = False
 in_override = False
 current_module = None
 
@@ -75,7 +81,10 @@ for index, line in enumerate(lines):
             raise SystemExit("unable to update openssl bazel_dep version")
         lines[index] = replacement
         openssl_dependency_updated = True
+        openssl_dependency_index = index
         continue
+    if stripped.startswith("bazel_dep(") and re.search(r'name\s*=\s*["\']rules_foreign_cc["\']', stripped):
+        rules_foreign_cc_dependency_found = True
     if stripped == "single_version_override(":
         in_override = True
         current_module = None
@@ -102,6 +111,11 @@ if missing:
     raise SystemExit("missing registry override(s): " + ", ".join(sorted(missing)))
 if not openssl_dependency_updated:
     raise SystemExit("missing openssl bazel_dep")
+if not rules_foreign_cc_dependency_found:
+    lines.insert(
+        openssl_dependency_index + 1,
+        f'bazel_dep(name = "rules_foreign_cc", version = "{rules_foreign_cc_version}")\n',
+    )
 
 module_path.write_text("".join(lines))
 PY
@@ -113,8 +127,10 @@ override_count=$(grep -Fc "registry = \"$secret_registry_uri\"," "$module_file")
 [[ "$override_count" == 2 ]] || fail "expected two local SecretFlow overrides, got $override_count"
 grep -Eq "bazel_dep\(name = ['\"]openssl['\"], version = ['\"]$OPENSSL_VERSION['\"]" "$module_file" ||
     fail "openssl bazel_dep was not aligned to $OPENSSL_VERSION"
+grep -Eq "bazel_dep\(name = ['\"]rules_foreign_cc['\"], version = ['\"]$RULES_FOREIGN_CC_VERSION['\"]" \
+    "$module_file" || fail "rules_foreign_cc direct dependency is missing"
 
-echo "BRPC_LOCAL_REGISTRY_CONFIG_OK module=$module_file backup=$backup_file openssl=$OPENSSL_VERSION"
+echo "BRPC_LOCAL_REGISTRY_CONFIG_OK module=$module_file backup=$backup_file openssl=$OPENSSL_VERSION rules_foreign_cc=$RULES_FOREIGN_CC_VERSION"
 echo "BRPC_LOCAL_REGISTRY_RC_ISOLATION_OK"
 
 bazel_startup_args=()
