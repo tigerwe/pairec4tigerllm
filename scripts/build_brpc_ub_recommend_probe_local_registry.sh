@@ -8,6 +8,7 @@ LOCAL_SECRET_REGISTRY=${LOCAL_SECRET_REGISTRY:-/home/zcx/bazel-local-registry/se
 BAZEL_OUTPUT_BASE=${BAZEL_OUTPUT_BASE:-/root/.cache/bazel/_bazel_root/0947eeff3cdbdab635f34a3b3ff5f6d1}
 MODULE_GRAPH_OUT=${MODULE_GRAPH_OUT:-/tmp/brpc-module-graph.txt}
 RUN_BUILD=${RUN_BUILD:-1}
+RUN_MODULE_GRAPH=${RUN_MODULE_GRAPH:-0}
 OPENSSL_VERSION=${OPENSSL_VERSION:-3.3.2.bcr.1}
 
 fail()
@@ -122,19 +123,22 @@ if [[ -n "$BAZEL_OUTPUT_BASE" ]]; then
     bazel_startup_args+=("--output_base=$BAZEL_OUTPUT_BASE")
 fi
 
-(
-    cd "$BRPC_ROOT"
-    bazel "${bazel_startup_args[@]}" shutdown >/dev/null 2>&1 || true
-    bazel "${bazel_startup_args[@]}" mod graph \
-        --registry="$secret_registry_uri" \
-        --registry="$bcr_registry_uri" \
-        --ignore_dev_dependency \
-        --lockfile_mode=off \
-        >"$MODULE_GRAPH_OUT"
-)
-
-[[ -s "$MODULE_GRAPH_OUT" ]] || fail "module graph is empty: $MODULE_GRAPH_OUT"
-echo "BRPC_LOCAL_REGISTRY_GRAPH_OK graph=$MODULE_GRAPH_OUT"
+if [[ "$RUN_MODULE_GRAPH" == 1 ]]; then
+    (
+        cd "$BRPC_ROOT"
+        bazel "${bazel_startup_args[@]}" shutdown >/dev/null 2>&1 || true
+        bazel "${bazel_startup_args[@]}" mod graph \
+            --registry="$secret_registry_uri" \
+            --registry="$bcr_registry_uri" \
+            --ignore_dev_dependency \
+            --lockfile_mode=update \
+            >"$MODULE_GRAPH_OUT"
+    )
+    [[ -s "$MODULE_GRAPH_OUT" ]] || fail "module graph is empty: $MODULE_GRAPH_OUT"
+    echo "BRPC_LOCAL_REGISTRY_GRAPH_OK graph=$MODULE_GRAPH_OUT"
+else
+    echo "BRPC_LOCAL_REGISTRY_GRAPH_SKIPPED reason=avoid_unrelated_module_extensions"
+fi
 
 if [[ "$RUN_BUILD" == 0 ]]; then
     exit 0
@@ -142,7 +146,7 @@ fi
 
 BRPC_ROOT="$BRPC_ROOT" \
 BAZEL_OUTPUT_BASE="$BAZEL_OUTPUT_BASE" \
-BAZEL_LOCKFILE_MODE=off \
+BAZEL_LOCKFILE_MODE=update \
 BAZEL_IGNORE_ALL_RC_FILES=1 \
 LOCAL_BCR_REGISTRY="$LOCAL_BCR_REGISTRY" \
 LOCAL_SECRET_REGISTRY="$LOCAL_SECRET_REGISTRY" \

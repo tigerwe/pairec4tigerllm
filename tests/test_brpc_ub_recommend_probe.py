@@ -17,9 +17,10 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
         self.assertIn("modules/leveldb/1.23/MODULE.bazel", script)
         self.assertIn("OPENSSL_VERSION=${OPENSSL_VERSION:-3.3.2.bcr.1}", script)
         self.assertIn("modules/openssl/$OPENSSL_VERSION/MODULE.bazel", script)
-        self.assertIn("--lockfile_mode=off", script)
+        self.assertIn("RUN_MODULE_GRAPH=${RUN_MODULE_GRAPH:-0}", script)
+        self.assertIn("BAZEL_LOCKFILE_MODE=update", script)
         self.assertIn("--ignore_all_rc_files", script)
-        self.assertIn("BRPC_LOCAL_REGISTRY_GRAPH_OK", script)
+        self.assertIn("BRPC_LOCAL_REGISTRY_GRAPH_SKIPPED", script)
         self.assertNotIn("https://bcr.bazel.build", script)
         self.assertNotIn("raw.githubusercontent.com", script)
 
@@ -73,6 +74,7 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
                     "BAZEL_OUTPUT_BASE": str(root / "output-base"),
                     "MODULE_GRAPH_OUT": str(root / "graph.txt"),
                     "BAZEL_CWD_LOG": str(root / "bazel-cwd.txt"),
+                    "RUN_MODULE_GRAPH": "1",
                     "RUN_BUILD": "0",
                 }
             )

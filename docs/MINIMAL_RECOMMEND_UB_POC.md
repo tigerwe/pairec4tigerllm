@@ -15,8 +15,9 @@ target supplies the matching UBSComm/UMQ implementation selected by `--define br
 
 When the machine cannot reach Bazel Central Registry or the SecretFlow registry, use the checked-out
 local registry wrapper. It validates the required metadata, repairs the two module-specific registry
-overrides, verifies the complete Bzlmod graph with the lock file disabled, and then runs the normal
-probe build:
+overrides, isolates the build from remote registry settings in Bazel rc files, and then runs the normal
+probe build. The full module graph is not evaluated by default because it expands unrelated publishing
+tool extensions such as PyPI dependencies:
 
 ```bash
 BRPC_ROOT=/home/zcx/workspace/brpc-827 \
@@ -29,7 +30,8 @@ bash scripts/build_brpc_ub_recommend_probe_local_registry.sh
 ```
 
 The original `MODULE.bazel` is preserved once as `MODULE.bazel.before-local-registry`. Set
-`RUN_BUILD=0` to perform only the registry repair and module graph check.
+`RUN_BUILD=0` to perform only registry repair, or additionally set `RUN_MODULE_GRAPH=1` when the
+machine has the package-index access needed to diagnose every module extension.
 
 For a machine with normal registry access, use the standard build entry point:
 
