@@ -56,7 +56,8 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             fake_bazel = fake_bin / "bazel"
             fake_bazel.write_text(
                 "#!/usr/bin/env bash\n"
-                "if [[ \" $* \" == *\" mod graph \"* ]]; then echo 'brpc@1.15.0'; fi\n"
+                "if [[ \" $* \" == *\" mod graph \"* ]]; then "
+                "printf '%s\\n' \"$PWD\" >\"$BAZEL_CWD_LOG\"; echo 'brpc@1.15.0'; fi\n"
             )
             fake_bazel.chmod(0o755)
             env = os.environ.copy()
@@ -68,6 +69,7 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
                     "LOCAL_SECRET_REGISTRY": str(secret),
                     "BAZEL_OUTPUT_BASE": str(root / "output-base"),
                     "MODULE_GRAPH_OUT": str(root / "graph.txt"),
+                    "BAZEL_CWD_LOG": str(root / "bazel-cwd.txt"),
                     "RUN_BUILD": "0",
                 }
             )
@@ -84,6 +86,7 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             self.assertEqual(module_text.count(secret.resolve().as_uri()), 2)
             self.assertNotIn("[file:", module_text)
             self.assertEqual((root / "graph.txt").read_text().strip(), "brpc@1.15.0")
+            self.assertEqual((root / "bazel-cwd.txt").read_text().strip(), str(brpc_root))
 
     def test_transport_is_explicitly_enabled_on_both_ends(self):
         server = (PROBE_DIR / "minimal_recommend_server.cpp").read_text()

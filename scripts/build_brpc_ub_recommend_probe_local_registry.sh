@@ -101,13 +101,16 @@ if [[ -n "$BAZEL_OUTPUT_BASE" ]]; then
     bazel_startup_args+=("--output_base=$BAZEL_OUTPUT_BASE")
 fi
 
-bazel "${bazel_startup_args[@]}" shutdown >/dev/null 2>&1 || true
-bazel "${bazel_startup_args[@]}" mod graph \
-    --registry="$secret_registry_uri" \
-    --registry="$bcr_registry_uri" \
-    --ignore_dev_dependency \
-    --lockfile_mode=off \
-    >"$MODULE_GRAPH_OUT"
+(
+    cd "$BRPC_ROOT"
+    bazel "${bazel_startup_args[@]}" shutdown >/dev/null 2>&1 || true
+    bazel "${bazel_startup_args[@]}" mod graph \
+        --registry="$secret_registry_uri" \
+        --registry="$bcr_registry_uri" \
+        --ignore_dev_dependency \
+        --lockfile_mode=off \
+        >"$MODULE_GRAPH_OUT"
+)
 
 [[ -s "$MODULE_GRAPH_OUT" ]] || fail "module graph is empty: $MODULE_GRAPH_OUT"
 echo "BRPC_LOCAL_REGISTRY_GRAPH_OK graph=$MODULE_GRAPH_OUT"
