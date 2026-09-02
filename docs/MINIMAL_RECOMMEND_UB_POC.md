@@ -107,5 +107,16 @@ the host `liburma.so`, complete UMQ initialization, and print `MINIMAL_RECOMMEND
 - Because `recommend.proto` is staged under the `pairec_ub_probe` Bazel package, C++ includes must
   use `pairec_ub_probe/recommend.pb.h`, not the CMake-style bare filename.
 
+## 2026-09-02 Transport Control Result
+
+The baseline UB attempt reached device discovery on both hosts but failed on the first RPC with
+`bthread_setspecific is called on invalid bthread_key_t{index=0 version=0}` and both processes
+terminated. A 0-byte TCP call using the same server, client, protobuf service, attachment integrity
+checks, and deployment completed with `MINIMAL_RECOMMEND_UB_MATRIX_PASS`. The fault is therefore in
+the UBSocket/UB path, not the service contract or the generic bRPC request path. The first focused
+UB change removes the Probe's forced `pooled` connection type: it now defaults to bRPC's protocol
+default, matching the previously successful `echo_c++_client`; `--probe_connection_type=pooled` is
+available for a later explicit comparison.
+
 This proves the standalone RecommendService request/response path over UB. It does not yet prove the
 Go PaiRec gateway path, production model inference, or sustained concurrency behavior.

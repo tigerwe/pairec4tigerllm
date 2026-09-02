@@ -25,6 +25,10 @@ DEFINE_int32(probe_requests_per_size, 1, "Requests sent for each payload size");
 DEFINE_int32(probe_timeout_ms, 15000, "RPC timeout in milliseconds");
 DEFINE_int32(probe_connect_timeout_ms, 20000, "UB connection timeout in milliseconds");
 DEFINE_int32(probe_max_retry, 0, "bRPC retry count");
+DEFINE_string(
+    probe_connection_type,
+    "",
+    "bRPC connection type; empty uses the protocol default, matching echo_c++_client");
 DEFINE_bool(probe_expect_echo, true, "Require an exact payload in the response attachment");
 DEFINE_string(probe_user_id, "minimal-brpc-ub-probe", "Recommend request user ID prefix");
 DEFINE_bool(ubsocket_use_ub, false, "Use UBSocket/UB for this bRPC channel");
@@ -114,7 +118,7 @@ int main(int argc, char** argv)
 
     brpc::ChannelOptions options;
     options.protocol = "baidu_std";
-    options.connection_type = "pooled";
+    options.connection_type = FLAGS_probe_connection_type;
     options.timeout_ms = FLAGS_probe_timeout_ms;
     options.connect_timeout_ms = FLAGS_probe_connect_timeout_ms;
     options.max_retry = FLAGS_probe_max_retry;

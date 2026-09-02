@@ -117,6 +117,8 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
         self.assertIn("response_attachment().append(payload)", server)
         self.assertIn("echoedPayload != payload", client)
         self.assertIn("options.connect_timeout_ms = FLAGS_probe_connect_timeout_ms", client)
+        self.assertIn('DEFINE_string(\n    probe_connection_type,\n    "",', client)
+        self.assertIn("options.connection_type = FLAGS_probe_connection_type", client)
 
         for script_name in ("run_brpc_ub_recommend_server.sh", "run_brpc_ub_recommend_matrix.sh"):
             script = (ROOT / "scripts" / script_name).read_text()
