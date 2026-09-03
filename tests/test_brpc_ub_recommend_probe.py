@@ -38,7 +38,7 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
         self.assertIn("BRPC_WITH_BORINGSSL=true", script)
         self.assertIn("BAZEL_LOCKFILE_MODE=${BAZEL_LOCKFILE_MODE:-off}", script)
         self.assertIn('"--ignore_all_rc_files"', script)
-        self.assertIn('"--announce_rc"', script)
+        self.assertNotIn("--announce_rc", script)
         self.assertIn("--define=BRPC_WITH_BORINGSSL=true", script)
         self.assertIn("BRPC_KNOWN_GOOD_RC_ISOLATED", script)
         self.assertIn("--repository_disable_download", script)
