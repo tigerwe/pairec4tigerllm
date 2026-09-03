@@ -117,7 +117,9 @@ echo "BRPC_KNOWN_GOOD_RC_ISOLATED boring_ssl=1 urma=1"
         --define brpc_with_urma=true \
         "${bazel_repository_args[@]}" \
         //pairec_ub_probe:minimal_recommend_server \
-        //pairec_ub_probe:minimal_recommend_client
+        //pairec_ub_probe:minimal_recommend_client \
+        //example:echo_c++_server \
+        //example:echo_c++_client
 )
 
 restore_build_metadata
@@ -133,8 +135,10 @@ echo "BRPC_KNOWN_GOOD_METADATA_RESTORED lock_sha256=$post_build_lock_sha256"
 mkdir -p "$INSTALL_DIR/bin"
 install -m 0755 "$BRPC_ROOT/bazel-bin/pairec_ub_probe/minimal_recommend_server" "$INSTALL_DIR/bin/"
 install -m 0755 "$BRPC_ROOT/bazel-bin/pairec_ub_probe/minimal_recommend_client" "$INSTALL_DIR/bin/"
+install -m 0755 "$BRPC_ROOT/bazel-bin/example/echo_c++_server" "$INSTALL_DIR/bin/"
+install -m 0755 "$BRPC_ROOT/bazel-bin/example/echo_c++_client" "$INSTALL_DIR/bin/"
 
-for binary in minimal_recommend_server minimal_recommend_client; do
+for binary in minimal_recommend_server minimal_recommend_client echo_c++_server echo_c++_client; do
     path="$INSTALL_DIR/bin/$binary"
     if ldd "$path" | grep -q 'not found'; then
         ldd "$path" >&2
@@ -150,4 +154,5 @@ for binary in minimal_recommend_server minimal_recommend_client; do
     echo "BRPC_KNOWN_GOOD_BINARY_OK binary=$binary boring_ssl_config=explicit_define boring_ssl_elf_string=$boring_ssl_elf_evidence"
 done
 
+echo "BRPC_KNOWN_GOOD_ECHO_BUILD_OK install_dir=$INSTALL_DIR"
 echo "BRPC_KNOWN_GOOD_RECOMMEND_BUILD_OK install_dir=$INSTALL_DIR"
