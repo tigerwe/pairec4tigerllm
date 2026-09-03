@@ -6,6 +6,8 @@ BRPC_ROOT=${BRPC_ROOT:-/home/zcx/workspace/brpc}
 INSTALL_DIR=${INSTALL_DIR:-/opt/pairec-brpc-ub-recommend-known-good}
 BAZEL_OUTPUT_BASE=${BAZEL_OUTPUT_BASE:-/root/.cache/bazel/_bazel_root/02df77b0294ccdcf08a6a8a39050de3a}
 BUILD_JOBS=${BUILD_JOBS:-32}
+BAZEL_LOCKFILE_MODE=${BAZEL_LOCKFILE_MODE:-off}
+BAZEL_DISABLE_DOWNLOAD=${BAZEL_DISABLE_DOWNLOAD:-1}
 EXPECTED_BRPC_COMMIT=${EXPECTED_BRPC_COMMIT:-3431fa24bace7ff0ee34c8717422a1905221ec02}
 EXPECTED_UBSCOMM_COMMIT=${EXPECTED_UBSCOMM_COMMIT:-9f80dc9fb5f06ba8b5997064c928b89bda266ffd}
 EXPECTED_LOCK_SHA256=${EXPECTED_LOCK_SHA256:-6dd4be421ed7552b2070a9991ca006caa940cb47859968c566fcb85bded641f0}
@@ -46,17 +48,27 @@ install -m 0644 "$REPO_ROOT/proto/recommend.proto" "$PACKAGE_DIR/"
 echo "BRPC_KNOWN_GOOD_BASELINE_OK root=$BRPC_ROOT commit=$actual_brpc_commit ubscomm=$EXPECTED_UBSCOMM_COMMIT"
 echo "BRPC_KNOWN_GOOD_BORINGSSL_OK lock_sha256=$actual_lock_sha256"
 
+bazel_repository_args=("--lockfile_mode=$BAZEL_LOCKFILE_MODE")
+if [[ "$BAZEL_DISABLE_DOWNLOAD" == 1 ]]; then
+    bazel_repository_args+=("--repository_disable_download")
+fi
+
 (
     cd "$BRPC_ROOT"
     bazel --output_base="$BAZEL_OUTPUT_BASE" build -c opt \
         --jobs="$BUILD_JOBS" \
-        --lockfile_mode=error \
         --ignore_dev_dependency \
         --check_direct_dependencies=off \
         --define brpc_with_urma=true \
+        "${bazel_repository_args[@]}" \
         //pairec_ub_probe:minimal_recommend_server \
         //pairec_ub_probe:minimal_recommend_client
 )
+
+post_build_lock_sha256=$(sha256sum "$BRPC_ROOT/MODULE.bazel.lock" | awk '{print $1}')
+[[ "$post_build_lock_sha256" == "$EXPECTED_LOCK_SHA256" ]] ||
+    fail "build changed lockfile: expected $EXPECTED_LOCK_SHA256, got $post_build_lock_sha256"
+echo "BRPC_KNOWN_GOOD_LOCK_UNCHANGED mode=$BAZEL_LOCKFILE_MODE sha256=$post_build_lock_sha256"
 
 mkdir -p "$INSTALL_DIR/bin"
 install -m 0755 "$BRPC_ROOT/bazel-bin/pairec_ub_probe/minimal_recommend_server" "$INSTALL_DIR/bin/"
