@@ -27,6 +27,7 @@ cc_binary(
     srcs = [
         "minimal_recommend_server.cpp",
         "payload_integrity.h",
+        "ubsocket_trace_key_workaround.h",
     ],
     copts = COPTS,
     deps = [
@@ -40,6 +41,7 @@ cc_binary(
     srcs = [
         "minimal_recommend_client.cpp",
         "payload_integrity.h",
+        "ubsocket_trace_key_workaround.h",
     ],
     copts = COPTS,
     deps = [

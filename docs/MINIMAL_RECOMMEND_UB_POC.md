@@ -178,6 +178,21 @@ The local-source diagnostic identified a concrete initialization bug in the cust
 - The observed fatal message named `{index=0 version=0}`, matching the RPC ID key used by
   `Channel::CallMethod()` after it creates the call ID.
 
+The minimal Recommend client and server avoid modifying the bRPC tree: before constructing a
+`brpc::Channel` or `brpc::Server`, each process calls `bthread_key_create()` for the two globals
+declared by the integrated bRPC headers. The keys intentionally live for the process lifetime,
+because UBSocket stores getter callbacks which may be used by its background threads. A successful
+startup prints `MINIMAL_RECOMMEND_UB_TRACE_KEYS_READY`; the build helpers also reject a Recommend
+binary which does not contain this marker, so a missing `BRPC_WITH_URMA` compile definition cannot
+silently turn the workaround into a no-op.
+
+Rebuild the Recommend pair with the same known-good command, redistribute the client, and first run
+the 0-byte request. A fixed run must print the trace-key-ready marker and must not print
+`invalid bthread_key_t`; then run the full Recommend and Health payload matrices.
+
+The following bRPC-tree patch remains useful for the upstream Echo example, which does not include
+the process-local Recommend workaround.
+
 Apply the guarded local-tree patch on master:
 
 ```bash

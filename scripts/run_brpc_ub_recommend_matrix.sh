@@ -56,6 +56,10 @@ client_status=${PIPESTATUS[0]}
 set -e
 
 [[ "$client_status" -eq 0 ]] || { echo "ERROR: probe client exited $client_status" >&2; exit 1; }
+grep -Fq 'MINIMAL_RECOMMEND_UB_TRACE_KEYS_READY' "$raw_log" || {
+    echo "ERROR: UBSocket trace keys were not initialized by the Recommend client" >&2
+    exit 1
+}
 grep -Fq 'MINIMAL_RECOMMEND_UB_MATRIX_PASS' "$raw_log" || {
     echo "ERROR: integrity matrix pass marker is missing" >&2
     exit 1

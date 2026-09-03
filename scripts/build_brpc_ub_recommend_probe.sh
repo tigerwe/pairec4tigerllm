@@ -32,7 +32,12 @@ registry_uri()
 }
 
 [[ -d "$BRPC_ROOT" ]] || fail "bRPC root does not exist: $BRPC_ROOT"
-for source in BUILD.bazel minimal_recommend_server.cpp minimal_recommend_client.cpp payload_integrity.h; do
+for source in \
+    BUILD.bazel \
+    minimal_recommend_server.cpp \
+    minimal_recommend_client.cpp \
+    payload_integrity.h \
+    ubsocket_trace_key_workaround.h; do
     [[ -f "$REPO_ROOT/cpp/brpc_ub_probe/$source" ]] || fail "missing source: $source"
 done
 [[ -f "$REPO_ROOT/proto/recommend.proto" ]] || fail "missing proto/recommend.proto"
@@ -52,6 +57,8 @@ install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/minimal_recommend_server.cpp" \
 install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/minimal_recommend_client.cpp" \
     "$PACKAGE_DIR/minimal_recommend_client.cpp"
 install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/payload_integrity.h" "$PACKAGE_DIR/payload_integrity.h"
+install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/ubsocket_trace_key_workaround.h" \
+    "$PACKAGE_DIR/ubsocket_trace_key_workaround.h"
 install -m 0644 "$REPO_ROOT/proto/recommend.proto" "$PACKAGE_DIR/recommend.proto"
 
 echo "BRPC_UB_RECOMMEND_STAGE_OK package=$PACKAGE_DIR"
@@ -116,6 +123,8 @@ for binary in minimal_recommend_server minimal_recommend_client; do
     fi
     nm -C "$INSTALL_DIR/bin/$binary" 2>/dev/null | grep -F '_GLOBAL__sub_I_ubsocket' >/dev/null ||
         fail "$binary does not contain linked UBSocket objects"
+    strings "$INSTALL_DIR/bin/$binary" | grep -F 'MINIMAL_RECOMMEND_UB_TRACE_KEYS_READY' >/dev/null ||
+        fail "$binary does not contain the process-local UBSocket trace-key workaround"
 done
 
 echo "BRPC_UB_RECOMMEND_BUILD_OK install_dir=$INSTALL_DIR"

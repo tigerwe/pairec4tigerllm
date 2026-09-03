@@ -46,7 +46,12 @@ actual_lock_sha256=$(sha256sum "$BRPC_ROOT/MODULE.bazel.lock" | awk '{print $1}'
 [[ "$actual_lock_sha256" == "$EXPECTED_LOCK_SHA256" ]] ||
     fail "lockfile changed: expected $EXPECTED_LOCK_SHA256, got $actual_lock_sha256"
 
-for source in BUILD.bazel minimal_recommend_server.cpp minimal_recommend_client.cpp payload_integrity.h; do
+for source in \
+    BUILD.bazel \
+    minimal_recommend_server.cpp \
+    minimal_recommend_client.cpp \
+    payload_integrity.h \
+    ubsocket_trace_key_workaround.h; do
     [[ -f "$REPO_ROOT/cpp/brpc_ub_probe/$source" ]] || fail "missing probe source: $source"
 done
 [[ -f "$REPO_ROOT/proto/recommend.proto" ]] || fail "missing recommend.proto"
@@ -56,6 +61,7 @@ install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/BUILD.bazel" "$PACKAGE_DIR/BUILD.b
 install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/minimal_recommend_server.cpp" "$PACKAGE_DIR/"
 install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/minimal_recommend_client.cpp" "$PACKAGE_DIR/"
 install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/payload_integrity.h" "$PACKAGE_DIR/"
+install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/ubsocket_trace_key_workaround.h" "$PACKAGE_DIR/"
 install -m 0644 "$REPO_ROOT/proto/recommend.proto" "$PACKAGE_DIR/"
 
 echo "BRPC_KNOWN_GOOD_BASELINE_OK root=$BRPC_ROOT commit=$actual_brpc_commit ubscomm=$EXPECTED_UBSCOMM_COMMIT"
@@ -146,6 +152,10 @@ for binary in minimal_recommend_server minimal_recommend_client echo_c++_server 
     fi
     nm -C "$path" 2>/dev/null | grep -F '_GLOBAL__sub_I_ubsocket' >/dev/null ||
         fail "$binary does not contain linked UBSocket objects"
+    if [[ "$binary" == minimal_recommend_* ]]; then
+        strings "$path" | grep -F 'MINIMAL_RECOMMEND_UB_TRACE_KEYS_READY' >/dev/null ||
+            fail "$binary does not contain the process-local UBSocket trace-key workaround"
+    fi
     if strings "$path" | grep -Eq 'boringssl|BoringSSL|local_deps.*boring'; then
         boring_ssl_elf_evidence=present
     else

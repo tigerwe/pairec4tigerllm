@@ -134,6 +134,8 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
     def test_transport_is_explicitly_enabled_on_both_ends(self):
         server = (PROBE_DIR / "minimal_recommend_server.cpp").read_text()
         client = (PROBE_DIR / "minimal_recommend_client.cpp").read_text()
+        workaround = (PROBE_DIR / "ubsocket_trace_key_workaround.h").read_text()
+        build = (PROBE_DIR / "BUILD.bazel").read_text()
         self.assertIn("options.use_ub = FLAGS_ubsocket_use_ub", server)
         self.assertIn("options.use_ub = FLAGS_ubsocket_use_ub", client)
         self.assertIn("response_attachment().append(payload)", server)
@@ -141,6 +143,26 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
         self.assertIn("options.connect_timeout_ms = FLAGS_probe_connect_timeout_ms", client)
         self.assertIn('DEFINE_string(\n    probe_connection_type,\n    "",', client)
         self.assertIn("options.connection_type = FLAGS_probe_connection_type", client)
+        self.assertIn("bthread_key_create(&ubsocket_trace_rpcid_key, nullptr)", workaround)
+        self.assertIn("bthread_key_create(&ubsocket_trace_call_timestamp, nullptr)", workaround)
+        self.assertIn("bthread_key_delete(ubsocket_trace_rpcid_key)", workaround)
+        self.assertIn("MINIMAL_RECOMMEND_UB_TRACE_KEYS_READY", workaround)
+        self.assertIn("ubsocket_trace_key_workaround.h", build)
+        for script_name in (
+            "build_brpc_ub_recommend_probe.sh",
+            "build_brpc_ub_recommend_known_good.sh",
+        ):
+            script = (ROOT / "scripts" / script_name).read_text()
+            self.assertIn("ubsocket_trace_key_workaround.h", script)
+            self.assertIn("MINIMAL_RECOMMEND_UB_TRACE_KEYS_READY", script)
+        for source in (server, client):
+            self.assertIn("InitializeUBSocketTraceKeys()", source)
+            self.assertLess(
+                source.index("InitializeUBSocketTraceKeys()"),
+                source.index("brpc::ChannelOptions options")
+                if "brpc::ChannelOptions options" in source
+                else source.index("brpc::Server server"),
+            )
 
         for script_name in ("run_brpc_ub_recommend_server.sh", "run_brpc_ub_recommend_matrix.sh"):
             script = (ROOT / "scripts" / script_name).read_text()
@@ -257,6 +279,7 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             client.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf '%s\\n' \"$@\" >\"$ARGUMENTS_LOG\"\n"
+                "echo 'MINIMAL_RECOMMEND_UB_TRACE_KEYS_READY'\n"
                 "echo 'bthread_setspecific is called on invalid bthread_key_t{index=0 version=0}'\n"
                 "echo 'bind jetty success'\n"
                 "echo '{\"event\":\"minimal_recommend_ub_probe\",\"valid\":true}'\n"
@@ -289,6 +312,24 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             self.assertNotIn("ubsocket_degrade_enable", arguments)
             self.assertIn("bthread_key_warnings=1", result.stdout)
             self.assertIn("WARNING: observed 1 invalid bthread key", result.stderr)
+
+            client.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo 'bind jetty success'\n"
+                "echo '{\"event\":\"minimal_recommend_ub_probe\",\"valid\":true}'\n"
+                "echo 'MINIMAL_RECOMMEND_UB_MATRIX_PASS'\n"
+            )
+            client.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "run_brpc_ub_recommend_matrix.sh")],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("trace keys were not initialized", result.stderr)
 
     def test_bthread_key_diagnostic_uses_local_source_of_truth(self):
         script = (ROOT / "scripts" / "diagnose_brpc_ub_bthread_key_crash.sh").read_text()
@@ -425,6 +466,68 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
         self.assertIn('#include "pairec_ub_probe/recommend.pb.h"', client)
         self.assertIn('#include "pairec_ub_probe/recommend.pb.h"', server)
 
+    @unittest.skipUnless(shutil.which("g++"), "g++ is required")
+    def test_process_local_trace_key_workaround_compiles_and_allocates_both_keys(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            include_dir = root / "include" / "bthread"
+            include_dir.mkdir(parents=True)
+            (include_dir / "bthread.h").write_text(
+                textwrap.dedent(
+                    """
+                    #pragma once
+                    struct bthread_key_t { unsigned index; unsigned version; };
+                    extern bthread_key_t ubsocket_trace_rpcid_key;
+                    extern bthread_key_t ubsocket_trace_call_timestamp;
+                    int bthread_key_create(bthread_key_t*, void (*)(void*));
+                    int bthread_key_delete(bthread_key_t);
+                    """
+                ).lstrip("\n")
+            )
+            source = root / "workaround_test.cpp"
+            source.write_text(
+                textwrap.dedent(
+                    """
+                    #define BRPC_WITH_URMA 1
+                    #include "ubsocket_trace_key_workaround.h"
+
+                    bthread_key_t ubsocket_trace_rpcid_key{0, 0};
+                    bthread_key_t ubsocket_trace_call_timestamp{1, 0};
+                    static unsigned next_index = 7;
+                    int bthread_key_create(bthread_key_t* key, void (*)(void*)) {
+                        key->index = next_index++;
+                        key->version = 3;
+                        return 0;
+                    }
+                    int bthread_key_delete(bthread_key_t) { return 0; }
+
+                    int main() {
+                        if (!pairec::brpc_ub_probe::InitializeUBSocketTraceKeys()) return 1;
+                        return ubsocket_trace_rpcid_key.index == 7 &&
+                                ubsocket_trace_call_timestamp.index == 8 &&
+                                ubsocket_trace_rpcid_key.version == 3 &&
+                                ubsocket_trace_call_timestamp.version == 3 ? 0 : 2;
+                    }
+                    """
+                ).lstrip("\n")
+            )
+            binary = root / "workaround_test"
+            subprocess.run(
+                [
+                    "g++",
+                    "-std=c++17",
+                    f"-I{root / 'include'}",
+                    f"-I{PROBE_DIR}",
+                    str(source),
+                    "-o",
+                    str(binary),
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+            result = subprocess.run([str(binary)], text=True, capture_output=True, check=True)
+            self.assertIn("MINIMAL_RECOMMEND_UB_TRACE_KEYS_READY", result.stdout)
+
     def test_build_script_stages_complete_package(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env = os.environ.copy()
@@ -446,6 +549,7 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
                     "minimal_recommend_server.cpp",
                     "minimal_recommend_client.cpp",
                     "payload_integrity.h",
+                    "ubsocket_trace_key_workaround.h",
                     "recommend.proto",
                 },
             )

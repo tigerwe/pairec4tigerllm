@@ -1,4 +1,5 @@
 #include "payload_integrity.h"
+#include "ubsocket_trace_key_workaround.h"
 
 #include <brpc/channel.h>
 #include <brpc/controller.h>
@@ -114,6 +115,11 @@ int main(int argc, char** argv)
     {
         std::cerr << error.what() << std::endl;
         return 2;
+    }
+
+    if (FLAGS_ubsocket_use_ub && !pairec::brpc_ub_probe::InitializeUBSocketTraceKeys())
+    {
+        return 1;
     }
 
     brpc::ChannelOptions options;

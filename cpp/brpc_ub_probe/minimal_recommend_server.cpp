@@ -1,4 +1,5 @@
 #include "payload_integrity.h"
+#include "ubsocket_trace_key_workaround.h"
 
 #include <brpc/controller.h>
 #include <brpc/server.h>
@@ -103,6 +104,10 @@ public:
 int main(int argc, char** argv)
 {
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+    if (FLAGS_ubsocket_use_ub && !pairec::brpc_ub_probe::InitializeUBSocketTraceKeys())
+    {
+        return 1;
+    }
 
     MinimalRecommendService service;
     brpc::Server server;
