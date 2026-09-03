@@ -36,6 +36,7 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
         self.assertIn("827db2a9be6a3eac0a1ac3666b4a9cf33b976175", script)
         self.assertIn("9f80dc9fb5f06ba8b5997064c928b89bda266ffd", script)
         self.assertIn("BRPC_WITH_BORINGSSL=true", script)
+        self.assertIn("BAZEL_LOCKFILE_MODE=${BAZEL_LOCKFILE_MODE:-off}", script)
         self.assertIn("--repository_disable_download", script)
         self.assertIn("--registry=$secret_registry_uri", script)
         self.assertIn("restore_build_metadata", script)
