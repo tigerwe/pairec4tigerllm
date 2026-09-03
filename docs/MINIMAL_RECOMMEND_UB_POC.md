@@ -186,6 +186,11 @@ startup prints `MINIMAL_RECOMMEND_UB_TRACE_KEYS_READY`; the build helpers also r
 binary which does not contain this marker, so a missing `BRPC_WITH_URMA` compile definition cannot
 silently turn the workaround into a no-op.
 
+The probe Bazel package defines `BRPC_WITH_URMA` explicitly for its own C++ compilation units.
+The Bazel command-line setting `--define brpc_with_urma=true` selects the URMA-enabled bRPC target,
+but that legacy setting alone does not propagate the same-named C++ preprocessor symbol into a
+reverse-dependent `cc_binary`.
+
 Rebuild the Recommend pair with the same known-good command, redistribute the client, and first run
 the 0-byte request. A fixed run must print the trace-key-ready marker and must not print
 `invalid bthread_key_t`; then run the full Recommend and Health payload matrices.

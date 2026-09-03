@@ -3,6 +3,9 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_proto_library")
 
 COPTS = [
     "-std=c++17",
+    # --define brpc_with_urma=true selects the URMA-enabled bRPC library but
+    # does not propagate this C++ preprocessor symbol to reverse dependencies.
+    "-DBRPC_WITH_URMA",
     "-D__STDC_FORMAT_MACROS",
     "-D__STDC_LIMIT_MACROS",
     "-D__STDC_CONSTANT_MACROS",

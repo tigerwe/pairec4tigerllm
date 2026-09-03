@@ -148,6 +148,7 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
         self.assertIn("bthread_key_delete(ubsocket_trace_rpcid_key)", workaround)
         self.assertIn("MINIMAL_RECOMMEND_UB_TRACE_KEYS_READY", workaround)
         self.assertIn("ubsocket_trace_key_workaround.h", build)
+        self.assertIn('"-DBRPC_WITH_URMA"', build)
         for script_name in (
             "build_brpc_ub_recommend_probe.sh",
             "build_brpc_ub_recommend_known_good.sh",
