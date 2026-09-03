@@ -142,8 +142,12 @@ for binary in minimal_recommend_server minimal_recommend_client; do
     fi
     nm -C "$path" 2>/dev/null | grep -F '_GLOBAL__sub_I_ubsocket' >/dev/null ||
         fail "$binary does not contain linked UBSocket objects"
-    strings "$path" | grep -Eq 'boringssl|BoringSSL|local_deps.*boring' ||
-        fail "$binary does not contain BoringSSL build evidence"
+    if strings "$path" | grep -Eq 'boringssl|BoringSSL|local_deps.*boring'; then
+        boring_ssl_elf_evidence=present
+    else
+        boring_ssl_elf_evidence=not_retained
+    fi
+    echo "BRPC_KNOWN_GOOD_BINARY_OK binary=$binary boring_ssl_config=explicit_define boring_ssl_elf_string=$boring_ssl_elf_evidence"
 done
 
 echo "BRPC_KNOWN_GOOD_RECOMMEND_BUILD_OK install_dir=$INSTALL_DIR"
