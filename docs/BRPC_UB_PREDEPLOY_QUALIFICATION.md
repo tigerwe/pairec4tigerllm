@@ -9,7 +9,7 @@
 传输边界固定为：
 
 ```text
-Go/PaiRec --TCP--> C++ Hop1 --TCP或UB（本次A/B变量）--> C++ Hop2
+Go/PaiRec --TCP--> master/C++ Hop1 --TCP或UB（本次A/B变量）--> master/C++ Hop2
 ```
 
 Hop1前端始终为TCP。UB模式只修改Hop1拥有的1000个`brpc::Channel`和Hop2的
@@ -38,12 +38,12 @@ bash scripts/build_brpc_ub_recommend_known_good.sh
 BRPC_KNOWN_GOOD_POST_RANK_BUILD_OK
 ```
 
-将`brpc_post_rank_hop`复制到node1的同一安装目录。node1还需要通过
-`scripts/build_kvc_burst_wrapper.sh`获得最新的`kvc_ub_integrity_probe`。
+Hop1与Hop2都在master使用该安装目录。node1只需要通过
+`scripts/build_kvc_burst_wrapper.sh`获得最新的`kvc_ub_integrity_probe`，用于跨节点KVC测试。
 
 ## 2. post-rank c1000 × 100 KiB
 
-先在node1启动Hop2：
+先在master启动Hop2：
 
 ```bash
 cd /home/zcx/workspace/pairec4tigerllm
@@ -52,11 +52,11 @@ LOG_DIR=/root/brpc-ub-post-rank/log \
 bash scripts/run_brpc_ub_post_rank_hop.sh
 ```
 
-再在master启动Hop1，其中`HOP2_HOST`必须是node1的UB可达地址：
+再在master启动Hop1；保持原架构，Hop1通过本机地址访问同机Hop2：
 
 ```bash
 cd /home/zcx/workspace/pairec4tigerllm
-ROLE=hop1 TRANSPORT=ub HOP2_HOST=141.62.33.117 \
+ROLE=hop1 TRANSPORT=ub HOP2_HOST=127.0.0.1 \
 LOG_DIR=/root/brpc-ub-post-rank/log \
 bash scripts/run_brpc_ub_post_rank_hop.sh
 ```

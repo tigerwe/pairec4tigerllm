@@ -6,7 +6,7 @@ TRANSPORT="${TRANSPORT:-ub}"
 HOP_BIN="${HOP_BIN:-/opt/pairec-brpc-ub-recommend-known-good/bin/brpc_post_rank_hop}"
 LISTEN_PORT="${LISTEN_PORT:-}"
 PRESSURE_LISTEN_PORT="${PRESSURE_LISTEN_PORT:-18313}"
-HOP2_HOST="${HOP2_HOST:-}"
+HOP2_HOST="${HOP2_HOST:-127.0.0.1}"
 LOG_DIR="${LOG_DIR:-/root/brpc-ub-post-rank/log}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -28,7 +28,6 @@ if [[ "$ROLE" = hop2 ]]; then
   )
 else
   LISTEN_PORT="${LISTEN_PORT:-18311}"
-  [[ -n "$HOP2_HOST" ]] || die "HOP2_HOST is required for hop1"
   args=(
     --role=hop1
     "--transport=$TRANSPORT"

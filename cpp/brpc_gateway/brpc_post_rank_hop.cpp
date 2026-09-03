@@ -11,7 +11,11 @@
 #include <brpc/server.h>
 #include <google/protobuf/stubs/callback.h>
 
+#if __has_include("pipeline_service.pb.h")
 #include "pipeline_service.pb.h"
+#else
+#include "pairec_ub_probe/pipeline_service.pb.h"
+#endif
 #include "post_rank_hop_burst.h"
 #include "ubsocket_trace_key_workaround.h"
 

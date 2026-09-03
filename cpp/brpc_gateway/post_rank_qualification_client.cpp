@@ -11,7 +11,11 @@
 #include <brpc/controller.h>
 #include <openssl/sha.h>
 
+#if __has_include("pipeline_service.pb.h")
 #include "pipeline_service.pb.h"
+#else
+#include "pairec_ub_probe/pipeline_service.pb.h"
+#endif
 
 namespace {
 
