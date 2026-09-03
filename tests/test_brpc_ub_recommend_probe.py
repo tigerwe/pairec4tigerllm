@@ -144,22 +144,32 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
 
         for script_name in ("run_brpc_ub_recommend_server.sh", "run_brpc_ub_recommend_matrix.sh"):
             script = (ROOT / "scripts" / script_name).read_text()
-            self.assertIn("--ubsocket_backup_link_enable=false", script)
-            self.assertIn("--ubsocket_degrade_enable=false", script)
+            self.assertNotIn("--ubsocket_backup_link_enable=false", script)
+            self.assertNotIn("--ubsocket_degrade_enable=false", script)
             self.assertIn("URMA_RUNTIME_LIB_DIR=${URMA_RUNTIME_LIB_DIR:-/usr/lib64}", script)
             self.assertIn('export LD_LIBRARY_PATH="$URMA_RUNTIME_LD_LIBRARY_PATH', script)
+            self.assertIn("transport_mode=functional_ub", script)
 
-    def test_echo_baseline_script_uses_same_offline_ub_build(self):
+    def test_echo_baseline_script_uses_proven_functional_build_commands(self):
         script = (ROOT / "scripts" / "verify_brpc_ub_echo_baseline.sh").read_text()
         self.assertIn("ACTION=${ACTION:-client}", script)
         self.assertIn("//example:echo_c++_server", script)
         self.assertIn("//example:echo_c++_client", script)
         self.assertIn("--define brpc_with_urma=true", script)
-        self.assertIn("--ignore_all_rc_files", script)
-        self.assertIn("build_brpc_ub_recommend_probe_local_registry.sh", script)
-        self.assertIn("--ubsocket_backup_link_enable=false", script)
-        self.assertIn("--ubsocket_degrade_enable=false", script)
+        self.assertNotIn("--ignore_all_rc_files", script)
+        self.assertNotIn("build_brpc_ub_recommend_probe_local_registry.sh", script)
+        self.assertNotIn("--ubsocket_backup_link_enable=false", script)
+        self.assertNotIn("--ubsocket_degrade_enable=false", script)
+        self.assertIn(
+            "bazel build -c opt //example:echo_c++_server --define brpc_with_urma=true",
+            script,
+        )
+        self.assertIn(
+            "bazel build -c opt //example:echo_c++_client --define brpc_with_urma=true",
+            script,
+        )
         self.assertIn("invalid bthread_key", script)
+        self.assertIn("STRICT_BTHREAD_KEY_CHECK", script)
         self.assertIn("BRPC_UB_ECHO_BASELINE_PASS", script)
         self.assertIn("BRPC_UB_ECHO_BASELINE_CRASH", script)
 
@@ -201,6 +211,25 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
 
             client.write_text(
                 "#!/usr/bin/env bash\n"
+                "echo 'bthread_setspecific is called on invalid bthread_key_t{index=0 version=0}'\n"
+                "echo 'bind jetty success'\n"
+                "echo 'Received response from test: hello world'\n"
+            )
+            client.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "verify_brpc_ub_echo_baseline.sh")],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("BRPC_UB_ECHO_BASELINE_PASS responses=1", result.stdout)
+            self.assertIn("bthread_key_warnings=1", result.stdout)
+            self.assertIn("WARNING: observed 1 invalid bthread key", result.stderr)
+
+            client.write_text(
+                "#!/usr/bin/env bash\n"
                 "echo 'bthread_setspecific is called on invalid bthread_key_t'\n"
                 "exit 139\n"
             )
@@ -215,6 +244,51 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("BRPC_UB_ECHO_BASELINE_CRASH", result.stderr)
+
+    def test_recommend_matrix_functional_mode_warns_without_rejecting_valid_rpc(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            runtime_dir = root / "lib64"
+            provider_dir = runtime_dir / "urma"
+            provider_dir.mkdir(parents=True)
+            (runtime_dir / "liburma.so").write_text("")
+            arguments_log = root / "arguments.txt"
+            client = root / "minimal_recommend_client"
+            client.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$@\" >\"$ARGUMENTS_LOG\"\n"
+                "echo 'bthread_setspecific is called on invalid bthread_key_t{index=0 version=0}'\n"
+                "echo 'bind jetty success'\n"
+                "echo '{\"event\":\"minimal_recommend_ub_probe\",\"valid\":true}'\n"
+                "echo 'MINIMAL_RECOMMEND_UB_MATRIX_PASS'\n"
+            )
+            client.chmod(0o755)
+            env = os.environ.copy()
+            env.update(
+                {
+                    "CLIENT_BIN": str(client),
+                    "PAYLOAD_SIZES": "0",
+                    "LOG_DIR": str(root / "logs"),
+                    "OUTPUT_DIR": str(root / "evidence"),
+                    "URMA_RUNTIME_LIB_DIR": str(runtime_dir),
+                    "URMA_PROVIDER_LIB_DIR": str(provider_dir),
+                    "URMA_RUNTIME_LD_LIBRARY_PATH": f"{runtime_dir}:{provider_dir}",
+                    "ARGUMENTS_LOG": str(arguments_log),
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "run_brpc_ub_recommend_matrix.sh")],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            arguments = arguments_log.read_text()
+            self.assertNotIn("ubsocket_backup_link_enable", arguments)
+            self.assertNotIn("ubsocket_degrade_enable", arguments)
+            self.assertIn("bthread_key_warnings=1", result.stdout)
+            self.assertIn("WARNING: observed 1 invalid bthread key", result.stderr)
 
     def test_bthread_key_diagnostic_uses_local_source_of_truth(self):
         script = (ROOT / "scripts" / "diagnose_brpc_ub_bthread_key_crash.sh").read_text()

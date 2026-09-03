@@ -24,12 +24,11 @@ export LD_LIBRARY_PATH="$URMA_RUNTIME_LD_LIBRARY_PATH${LD_LIBRARY_PATH:+:$LD_LIB
 log_file="$LOG_DIR/minimal-recommend-server-$(date +%Y%m%d-%H%M%S).log"
 echo "server_log=$log_file"
 echo "urma_runtime_library_path=$URMA_RUNTIME_LD_LIBRARY_PATH"
+echo "transport_mode=functional_ub backup_link=default degrade=default"
 exec "$SERVER_BIN" \
     --probe_port="$PORT" \
     --probe_max_payload_bytes="$MAX_PAYLOAD_BYTES" \
     --probe_echo_payload=true \
     --ubsocket_enable=true \
     --ubsocket_use_ub=true \
-    --ubsocket_backup_link_enable=false \
-    --ubsocket_degrade_enable=false \
     2>&1 | tee "$log_file"
