@@ -9,6 +9,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(PAIREC_ENABLE_TRTLLM_CPP "Build brpc_inference_server with TensorRT-LLM C++ Executor backend" OFF)
 option(PAIREC_ENABLE_DATASYSTEM_KV_PROBE "Build brpc_inference_server with DataSystem MSet/MGet probe backend" OFF)
 option(PAIREC_USE_PREGENERATED_PROTO "Build with checked-in protoc 25.1 C++ sources" OFF)
+option(PAIREC_ENABLE_BRPC_UB "Compile post-rank Hop1/Hop2 with the custom bRPC URMA API" OFF)
 
 find_package(Protobuf REQUIRED)
 find_package(Threads REQUIRED)
@@ -473,7 +474,15 @@ target_compile_definitions(
   brpc_post_rank_hop
   PRIVATE PAIREC_SOURCE_COMMIT="${PAIREC_SOURCE_COMMIT}"
 )
-target_include_directories(brpc_post_rank_hop PRIVATE ${BRPC_INCLUDE_DIR})
+target_include_directories(
+  brpc_post_rank_hop
+  PRIVATE
+    ${BRPC_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../brpc_ub_probe
+)
+if(PAIREC_ENABLE_BRPC_UB)
+  target_compile_definitions(brpc_post_rank_hop PRIVATE BRPC_WITH_URMA=1)
+endif()
 target_link_libraries(
   brpc_post_rank_hop
   PRIVATE

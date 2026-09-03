@@ -55,6 +55,11 @@ for source in \
     [[ -f "$REPO_ROOT/cpp/brpc_ub_probe/$source" ]] || fail "missing probe source: $source"
 done
 [[ -f "$REPO_ROOT/proto/recommend.proto" ]] || fail "missing recommend.proto"
+for source in brpc_post_rank_hop.cpp post_rank_hop_burst.cpp \
+    post_rank_hop_burst.h post_rank_qualification_client.cpp; do
+    [[ -f "$REPO_ROOT/cpp/brpc_gateway/$source" ]] || fail "missing post-rank source: $source"
+done
+[[ -f "$REPO_ROOT/proto/pipeline_service.proto" ]] || fail "missing pipeline_service.proto"
 
 mkdir -p "$PACKAGE_DIR"
 install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/BUILD.bazel" "$PACKAGE_DIR/BUILD.bazel"
@@ -63,6 +68,11 @@ install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/minimal_recommend_client.cpp" "$PA
 install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/payload_integrity.h" "$PACKAGE_DIR/"
 install -m 0644 "$REPO_ROOT/cpp/brpc_ub_probe/ubsocket_trace_key_workaround.h" "$PACKAGE_DIR/"
 install -m 0644 "$REPO_ROOT/proto/recommend.proto" "$PACKAGE_DIR/"
+for source in brpc_post_rank_hop.cpp post_rank_hop_burst.cpp \
+    post_rank_hop_burst.h post_rank_qualification_client.cpp; do
+    install -m 0644 "$REPO_ROOT/cpp/brpc_gateway/$source" "$PACKAGE_DIR/"
+done
+install -m 0644 "$REPO_ROOT/proto/pipeline_service.proto" "$PACKAGE_DIR/"
 
 echo "BRPC_KNOWN_GOOD_BASELINE_OK root=$BRPC_ROOT commit=$actual_brpc_commit ubscomm=$EXPECTED_UBSCOMM_COMMIT"
 echo "BRPC_KNOWN_GOOD_BORINGSSL_OK lock_sha256=$actual_lock_sha256"
@@ -124,6 +134,8 @@ echo "BRPC_KNOWN_GOOD_RC_ISOLATED boring_ssl=1 urma=1"
         "${bazel_repository_args[@]}" \
         //pairec_ub_probe:minimal_recommend_server \
         //pairec_ub_probe:minimal_recommend_client \
+        //pairec_ub_probe:brpc_post_rank_hop \
+        //pairec_ub_probe:post_rank_qualification_client \
         //example:echo_c++_server \
         //example:echo_c++_client
 )
@@ -143,8 +155,11 @@ install -m 0755 "$BRPC_ROOT/bazel-bin/pairec_ub_probe/minimal_recommend_server" 
 install -m 0755 "$BRPC_ROOT/bazel-bin/pairec_ub_probe/minimal_recommend_client" "$INSTALL_DIR/bin/"
 install -m 0755 "$BRPC_ROOT/bazel-bin/example/echo_c++_server" "$INSTALL_DIR/bin/"
 install -m 0755 "$BRPC_ROOT/bazel-bin/example/echo_c++_client" "$INSTALL_DIR/bin/"
+install -m 0755 "$BRPC_ROOT/bazel-bin/pairec_ub_probe/brpc_post_rank_hop" "$INSTALL_DIR/bin/"
+install -m 0755 "$BRPC_ROOT/bazel-bin/pairec_ub_probe/post_rank_qualification_client" "$INSTALL_DIR/bin/"
 
-for binary in minimal_recommend_server minimal_recommend_client echo_c++_server echo_c++_client; do
+for binary in minimal_recommend_server minimal_recommend_client echo_c++_server echo_c++_client \
+    brpc_post_rank_hop post_rank_qualification_client; do
     path="$INSTALL_DIR/bin/$binary"
     if ldd "$path" | grep -q 'not found'; then
         ldd "$path" >&2
@@ -154,6 +169,10 @@ for binary in minimal_recommend_server minimal_recommend_client echo_c++_server 
         fail "$binary does not contain linked UBSocket objects"
     if [[ "$binary" == minimal_recommend_* ]]; then
         strings "$path" | grep -F 'MINIMAL_RECOMMEND_UB_TRACE_KEYS_READY' >/dev/null ||
+            fail "$binary does not contain the process-local UBSocket trace-key workaround"
+    fi
+    if [[ "$binary" == brpc_post_rank_hop ]]; then
+        strings "$path" | grep -F 'PAIREC_POST_RANK_UB_TRACE_KEYS_READY' >/dev/null ||
             fail "$binary does not contain the process-local UBSocket trace-key workaround"
     fi
     if strings "$path" | grep -Eq 'boringssl|BoringSSL|local_deps.*boring'; then
@@ -166,3 +185,4 @@ done
 
 echo "BRPC_KNOWN_GOOD_ECHO_BUILD_OK install_dir=$INSTALL_DIR"
 echo "BRPC_KNOWN_GOOD_RECOMMEND_BUILD_OK install_dir=$INSTALL_DIR"
+echo "BRPC_KNOWN_GOOD_POST_RANK_BUILD_OK install_dir=$INSTALL_DIR"

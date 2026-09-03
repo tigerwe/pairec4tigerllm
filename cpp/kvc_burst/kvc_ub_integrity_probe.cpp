@@ -6,14 +6,18 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -28,12 +32,15 @@ struct Config
     int port{0};
     uint64_t objectSize{kDefaultObjectSize};
     uint32_t iterations{1};
+    uint32_t concurrency{1};
     uint64_t seed{kDefaultSeed};
     std::string prefix{"PairecKvcUbIntegrity"};
     int32_t connectTimeoutMs{30000};
     int32_t requestTimeoutMs{30000};
     bool cleanup{true};
     bool selfTest{false};
+    std::string startFile;
+    int32_t startWaitTimeoutMs{30000};
 };
 
 void PrintUsage(const char* program)
@@ -41,11 +48,14 @@ void PrintUsage(const char* program)
     std::cout << "Usage: " << program << " --host HOST --port PORT [options]\n"
               << "  --object_size BYTES       default 3670016 (3.5 MiB)\n"
               << "  --iterations N           default 1\n"
+              << "  --concurrency N          simultaneous Set/Get lanes, default 1, max 256\n"
               << "  --seed N                 deterministic payload seed\n"
               << "  --prefix KEY_PREFIX      default PairecKvcUbIntegrity\n"
               << "  --connect_timeout_ms N   default 30000\n"
               << "  --request_timeout_ms N   default 30000\n"
               << "  --cleanup true|false     delete each key after validation\n"
+              << "  --start_file PATH        wait for PATH before releasing the first burst\n"
+              << "  --start_wait_timeout_ms N default 30000\n"
               << "  --self_test              test payload and SHA-256 without DataSystem\n";
 }
 
@@ -146,6 +156,11 @@ bool ParseArgs(int argc, char** argv, Config* config)
                 || parsed > std::numeric_limits<uint32_t>::max()) return false;
             config->iterations = static_cast<uint32_t>(parsed);
         }
+        else if (name == "concurrency")
+        {
+            if (!ParseUnsigned(value, &parsed) || parsed == 0 || parsed > 256) return false;
+            config->concurrency = static_cast<uint32_t>(parsed);
+        }
         else if (name == "seed")
         {
             if (!ParseUnsigned(value, &config->seed)) return false;
@@ -166,6 +181,13 @@ bool ParseArgs(int argc, char** argv, Config* config)
         else if (name == "cleanup")
         {
             if (!ParseBool(value, &config->cleanup)) return false;
+        }
+        else if (name == "start_file") config->startFile = value;
+        else if (name == "start_wait_timeout_ms")
+        {
+            if (!ParseUnsigned(value, &parsed) || parsed == 0
+                || parsed > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) return false;
+            config->startWaitTimeoutMs = static_cast<int32_t>(parsed);
         }
         else
         {
@@ -215,10 +237,11 @@ std::string Sha256(const void* data, size_t size)
     return output.str();
 }
 
-std::string KeyFor(const Config& config, uint32_t iteration)
+std::string KeyFor(const Config& config, uint32_t iteration, uint32_t lane)
 {
     std::ostringstream key;
-    key << config.prefix << '_' << std::setw(6) << std::setfill('0') << iteration;
+    key << config.prefix << "_i" << std::setw(6) << std::setfill('0') << iteration
+        << "_l" << std::setw(3) << std::setfill('0') << lane;
     return key.str();
 }
 
@@ -282,12 +305,19 @@ int main(int argc, char** argv)
     options.enableCrossNodeConnection = true;
     pairec::kvc_burst::SetExclusiveConnectionIfSupported(options, true);
 
-    datasystem::KVClient client(options);
-    auto initStatus = client.Init();
-    if (initStatus.IsError())
+    std::vector<std::unique_ptr<datasystem::KVClient>> clients;
+    clients.reserve(config.concurrency);
+    for (uint32_t lane = 0; lane < config.concurrency; ++lane)
     {
-        std::cerr << "KVClient Init failed: " << initStatus.ToString() << std::endl;
-        return 1;
+        auto client = std::make_unique<datasystem::KVClient>(options);
+        auto initStatus = client->Init();
+        if (initStatus.IsError())
+        {
+            std::cerr << "KVClient Init failed lane=" << lane
+                      << " status=" << initStatus.ToString() << std::endl;
+            return 1;
+        }
+        clients.push_back(std::move(client));
     }
 
     datasystem::SetParam setParam;
@@ -295,64 +325,163 @@ int main(int argc, char** argv)
     std::vector<double> setLatencyMs;
     std::vector<double> getLatencyMs;
 
+    struct LaneResult
+    {
+        std::string key;
+        std::string sha;
+        std::string error;
+        double setMs{0};
+        double getMs{0};
+        uint64_t bytes{0};
+        bool valid{false};
+    };
+
     for (uint32_t iteration = 0; iteration < config.iterations; ++iteration)
     {
-        auto key = KeyFor(config, iteration);
-        auto payload = DeterministicPayload(config.objectSize, config.seed + iteration);
-        auto expectedSha = Sha256(payload.data(), payload.size());
-
-        auto started = std::chrono::steady_clock::now();
-        auto setStatus = client.Set(key, datasystem::StringView(payload), setParam);
-        auto setMs = ElapsedMs(started);
-        if (setStatus.IsError())
+        std::vector<LaneResult> results(config.concurrency);
+        std::vector<std::thread> threads;
+        std::mutex startMutex;
+        std::condition_variable startCv;
+        std::mutex getStartMutex;
+        std::condition_variable getStartCv;
+        uint32_t ready = 0;
+        uint32_t setCompleted = 0;
+        bool released = false;
+        bool getReleased = false;
+        bool startTimedOut = false;
+        threads.reserve(config.concurrency);
+        for (uint32_t lane = 0; lane < config.concurrency; ++lane)
         {
-            std::cerr << "Set failed key=" << key << " status=" << setStatus.ToString() << std::endl;
-            return 1;
-        }
+            threads.emplace_back([&, lane] {
+                auto& result = results[lane];
+                auto& client = *clients[lane];
+                result.key = KeyFor(config, iteration, lane);
+                auto payload = DeterministicPayload(
+                    config.objectSize, config.seed + static_cast<uint64_t>(iteration) * 257 + lane);
+                auto expectedSha = Sha256(payload.data(), payload.size());
+                {
+                    std::unique_lock<std::mutex> lock(startMutex);
+                    ++ready;
+                    startCv.notify_all();
+                    startCv.wait(lock, [&] { return released; });
+                }
 
-        datasystem::Optional<datasystem::Buffer> buffer;
-        started = std::chrono::steady_clock::now();
-        auto getStatus = client.Get(key, buffer, 0);
-        auto getMs = ElapsedMs(started);
-        if (getStatus.IsError() || !buffer)
+                auto started = std::chrono::steady_clock::now();
+                auto setStatus = client.Set(result.key, datasystem::StringView(payload), setParam);
+                result.setMs = ElapsedMs(started);
+                {
+                    std::unique_lock<std::mutex> lock(getStartMutex);
+                    ++setCompleted;
+                    if (setCompleted == config.concurrency)
+                    {
+                        getReleased = true;
+                        getStartCv.notify_all();
+                    }
+                    else
+                    {
+                        getStartCv.wait(lock, [&] { return getReleased; });
+                    }
+                }
+                if (setStatus.IsError())
+                {
+                    result.error = "Set failed: " + setStatus.ToString();
+                    return;
+                }
+
+                datasystem::Optional<datasystem::Buffer> buffer;
+                started = std::chrono::steady_clock::now();
+                auto getStatus = client.Get(result.key, buffer, 0);
+                result.getMs = ElapsedMs(started);
+                if (getStatus.IsError() || !buffer)
+                {
+                    result.error = "Get failed: " + getStatus.ToString();
+                    if (config.cleanup) DeleteKey(client, result.key);
+                    return;
+                }
+
+                const uint64_t actualSize = static_cast<uint64_t>(buffer->GetSize());
+                result.bytes = actualSize;
+                const void* actualData = buffer->ImmutableData();
+                result.sha = actualData == nullptr ? std::string()
+                                                   : Sha256(actualData, buffer->GetSize());
+                result.valid = actualSize == config.objectSize && actualData != nullptr
+                    && std::memcmp(payload.data(), actualData, payload.size()) == 0
+                    && result.sha == expectedSha;
+                if (!result.valid)
+                {
+                    result.error = "integrity mismatch expected_sha256=" + expectedSha
+                        + " actual_sha256=" + (result.sha.empty() ? "null" : result.sha);
+                }
+                if (config.cleanup) DeleteKey(client, result.key);
+            });
+        }
         {
-            std::cerr << "Get failed key=" << key << " status=" << getStatus.ToString() << std::endl;
-            if (config.cleanup) DeleteKey(client, key);
-            return 1;
+            std::unique_lock<std::mutex> lock(startMutex);
+            startCv.wait(lock, [&] { return ready == config.concurrency; });
+            if (iteration == 0)
+            {
+                std::cout << "KVC_UB_CONCURRENT_READY concurrency=" << config.concurrency
+                          << " object_size=" << config.objectSize << std::endl;
+                if (!config.startFile.empty())
+                {
+                    lock.unlock();
+                    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(config.startWaitTimeoutMs);
+                    while (!std::ifstream(config.startFile).good())
+                    {
+                        if (std::chrono::steady_clock::now() >= deadline)
+                        {
+                            std::cerr << "timed out waiting for start_file="
+                                      << config.startFile << std::endl;
+                            startTimedOut = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                    std::cout << "KVC_UB_CONCURRENT_START_RELEASED start_file="
+                              << config.startFile << std::endl;
+                    lock.lock();
+                }
+            }
+            released = true;
         }
+        startCv.notify_all();
+        for (auto& thread : threads) thread.join();
+        if (startTimedOut) return 1;
 
-        auto actualSize = static_cast<uint64_t>(buffer->GetSize());
-        const void* actualData = buffer->ImmutableData();
-        auto actualSha = actualData == nullptr ? std::string() : Sha256(actualData, buffer->GetSize());
-        bool equal = actualSize == config.objectSize && actualData != nullptr
-            && std::memcmp(payload.data(), actualData, payload.size()) == 0 && actualSha == expectedSha;
-        if (!equal)
+        for (uint32_t lane = 0; lane < config.concurrency; ++lane)
         {
-            std::cerr << "integrity mismatch key=" << key << " expected_size=" << config.objectSize
-                      << " actual_size=" << actualSize << " expected_sha256=" << expectedSha
-                      << " actual_sha256=" << (actualSha.empty() ? "null" : actualSha) << std::endl;
-            if (config.cleanup) DeleteKey(client, key);
-            return 1;
+            const auto& result = results[lane];
+            if (!result.valid)
+            {
+                std::cerr << "KVC c" << config.concurrency << " failed iteration=" << iteration
+                          << " lane=" << lane << " key=" << result.key
+                          << " error=" << result.error << std::endl;
+                return 1;
+            }
+            setLatencyMs.push_back(result.setMs);
+            getLatencyMs.push_back(result.getMs);
+            std::cout << "{\"event\":\"kvc_ub_integrity_iteration\",\"iteration\":"
+                      << iteration << ",\"lane\":" << lane << ",\"concurrency\":"
+                      << config.concurrency << ",\"key\":\"" << result.key
+                      << "\",\"bytes\":" << result.bytes << ",\"sha256\":\""
+                      << result.sha << "\",\"set_ms\":" << std::fixed
+                      << std::setprecision(3) << result.setMs << ",\"get_ms\":"
+                      << result.getMs << ",\"valid\":true}" << std::endl;
         }
-
-        setLatencyMs.push_back(setMs);
-        getLatencyMs.push_back(getMs);
-        std::cout << "{\"event\":\"kvc_ub_integrity_iteration\",\"iteration\":" << iteration
-                  << ",\"key\":\"" << key << "\",\"bytes\":" << actualSize
-                  << ",\"sha256\":\"" << actualSha << "\",\"set_ms\":" << std::fixed
-                  << std::setprecision(3) << setMs << ",\"get_ms\":" << getMs
-                  << ",\"valid\":true}" << std::endl;
-
-        if (config.cleanup) DeleteKey(client, key);
     }
 
     std::cout << "{\"event\":\"kvc_ub_integrity_summary\",\"host\":\"" << config.host
               << "\",\"port\":" << config.port << ",\"prefix\":\"" << config.prefix
               << "\",\"iterations\":" << config.iterations << ",\"object_size\":"
-              << config.objectSize << ",\"set_avg_ms\":" << std::fixed << std::setprecision(3)
+              << config.objectSize << ",\"concurrency\":" << config.concurrency
+              << ",\"operations\":" << config.iterations * config.concurrency
+              << ",\"set_avg_ms\":" << std::fixed << std::setprecision(3)
               << Average(setLatencyMs) << ",\"set_p99_ms\":" << Percentile99(setLatencyMs)
               << ",\"get_avg_ms\":" << Average(getLatencyMs) << ",\"get_p99_ms\":"
               << Percentile99(getLatencyMs) << ",\"valid\":true}" << std::endl;
-    std::cout << "KVC_UB_INTEGRITY_PASS" << std::endl;
+    std::cout << "KVC_UB_INTEGRITY_PASS concurrency=" << config.concurrency
+              << " object_size=" << config.objectSize
+              << " operations=" << config.iterations * config.concurrency << std::endl;
     return 0;
 }

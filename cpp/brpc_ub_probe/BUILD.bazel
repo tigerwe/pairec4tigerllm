@@ -25,6 +25,16 @@ cc_proto_library(
     deps = [":recommend_proto"],
 )
 
+proto_library(
+    name = "pipeline_service_proto",
+    srcs = ["pipeline_service.proto"],
+)
+
+cc_proto_library(
+    name = "pipeline_service_cc_proto",
+    deps = [":pipeline_service_proto"],
+)
+
 cc_binary(
     name = "minimal_recommend_server",
     srcs = [
@@ -35,6 +45,31 @@ cc_binary(
     copts = COPTS,
     deps = [
         ":recommend_cc_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "brpc_post_rank_hop",
+    srcs = [
+        "brpc_post_rank_hop.cpp",
+        "post_rank_hop_burst.cpp",
+        "post_rank_hop_burst.h",
+        "ubsocket_trace_key_workaround.h",
+    ],
+    copts = COPTS,
+    deps = [
+        ":pipeline_service_cc_proto",
+        "//:brpc",
+    ],
+)
+
+cc_binary(
+    name = "post_rank_qualification_client",
+    srcs = ["post_rank_qualification_client.cpp"],
+    copts = COPTS,
+    deps = [
+        ":pipeline_service_cc_proto",
         "//:brpc",
     ],
 )

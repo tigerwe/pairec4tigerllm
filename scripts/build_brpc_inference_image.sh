@@ -6,6 +6,7 @@ TAR_PATH="${2:-/home/zcx/pairec-brpc-inference-k8s-arm64-v1.tar}"
 BASE_IMAGE="${BASE_IMAGE:-${3:-zcx-pairec-brpc-sdk:v1}}"
 ENABLE_TRTLLM_CPP="${ENABLE_TRTLLM_CPP:-OFF}"
 ENABLE_DATASYSTEM_KV_PROBE="${ENABLE_DATASYSTEM_KV_PROBE:-OFF}"
+ENABLE_BRPC_UB="${ENABLE_BRPC_UB:-OFF}"
 TRTLLM_INCLUDE_DIR="${TRTLLM_INCLUDE_DIR:-}"
 TRTLLM_LIBRARY="${TRTLLM_LIBRARY:-}"
 TRTLLM_PLUGIN_LIBRARY="${TRTLLM_PLUGIN_LIBRARY:-}"
@@ -43,6 +44,7 @@ echo "  image:             $IMAGE"
 echo "  base image:        $BASE_IMAGE"
 echo "  trtllm cpp:        $ENABLE_TRTLLM_CPP"
 echo "  ds kv probe:       $ENABLE_DATASYSTEM_KV_PROBE"
+echo "  brpc ub:           $ENABLE_BRPC_UB"
 echo "  source commit:     $SOURCE_COMMIT"
 if [ "$ENABLE_TRTLLM_CPP" = "ON" ] || [ "$ENABLE_TRTLLM_CPP" = "1" ]; then
   echo "  trtllm include:    ${TRTLLM_INCLUDE_DIR:-<auto>}"
@@ -61,6 +63,7 @@ env -u LD_PRELOAD docker build \
   --build-arg "BASE_IMAGE=$BASE_IMAGE" \
   --build-arg "ENABLE_TRTLLM_CPP=$ENABLE_TRTLLM_CPP" \
   --build-arg "ENABLE_DATASYSTEM_KV_PROBE=$ENABLE_DATASYSTEM_KV_PROBE" \
+  --build-arg "ENABLE_BRPC_UB=$ENABLE_BRPC_UB" \
   --build-arg "TRTLLM_INCLUDE_DIR=$TRTLLM_INCLUDE_DIR" \
   --build-arg "TRTLLM_LIBRARY=$TRTLLM_LIBRARY" \
   --build-arg "TRTLLM_PLUGIN_LIBRARY=$TRTLLM_PLUGIN_LIBRARY" \

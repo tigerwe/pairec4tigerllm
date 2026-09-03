@@ -20,6 +20,7 @@ struct BurstConfig {
   int startup_batch_size = 64;
   int startup_max_retries = 3;
   int startup_retry_backoff_ms = 100;
+  bool use_ub = false;
 };
 
 struct BurstResult {

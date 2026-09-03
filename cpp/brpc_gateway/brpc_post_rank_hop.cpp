@@ -13,6 +13,7 @@
 
 #include "pipeline_service.pb.h"
 #include "post_rank_hop_burst.h"
+#include "ubsocket_trace_key_workaround.h"
 
 #ifndef PAIREC_SOURCE_COMMIT
 #define PAIREC_SOURCE_COMMIT "unknown"
@@ -26,6 +27,7 @@ struct Config {
   std::string role = "hop1";
   pairec::post_rank::BurstConfig burst;
   int idle_timeout_sec = -1;
+  std::string transport = "tcp";
 };
 
 bool Value(const char* arg, const std::string& name, std::string* output) {
@@ -56,6 +58,7 @@ bool Parse(int argc, char** argv, Config* config) {
     else if (Value(argv[i], "startup_retry_backoff_ms", &value)) config->burst.startup_retry_backoff_ms = std::atoi(value.c_str());
     else if (Value(argv[i], "idle_timeout_sec", &value)) config->idle_timeout_sec = std::atoi(value.c_str());
     else if (Value(argv[i], "pressure_listen_port", &value)) config->pressure_listen_port = std::atoi(value.c_str());
+    else if (Value(argv[i], "transport", &value)) config->transport = value;
     else {
       std::cerr << "Unknown argument: " << argv[i] << std::endl;
       return false;
@@ -63,6 +66,7 @@ bool Parse(int argc, char** argv, Config* config) {
   }
   return config->listen_port > 0 && config->pressure_listen_port > 0 &&
       (config->role == "hop1" || config->role == "hop2") &&
+      (config->transport == "tcp" || config->transport == "ub") &&
       (config->role != "hop1" ||
        (!config->burst.business_endpoint.empty() && !config->burst.pressure_endpoint.empty()));
 }
@@ -181,9 +185,16 @@ class PostRankHopService final : public pairec::pipeline::DeepFMRankService {
 int main(int argc, char** argv) {
   Config config;
   if (!Parse(argc, argv, &config)) return 2;
+  config.burst.use_ub = config.transport == "ub";
+  if (config.transport == "ub" &&
+      !pairec::brpc_ub_probe::InitializeUBSocketTraceKeys(
+          "PAIREC_POST_RANK_UB_TRACE_KEYS_READY")) {
+    return 1;
+  }
   std::cout << "{\"event\":\"pairec_post_rank_binary_identity\","
             << "\"source_commit\":\"" << PAIREC_SOURCE_COMMIT << "\","
-            << "\"role\":\"" << config.role << "\"}" << std::endl;
+            << "\"role\":\"" << config.role << "\","
+            << "\"transport\":\"" << config.transport << "\"}" << std::endl;
   pairec::post_rank::BurstCoordinator burst;
   if (config.role == "hop1") {
     std::string error;
@@ -202,6 +213,17 @@ int main(int argc, char** argv) {
   }
   brpc::ServerOptions options;
   options.idle_timeout_sec = config.idle_timeout_sec;
+#if defined(BRPC_WITH_URMA)
+  // Hop-1's listener remains TCP for the Go caller. Only Hop-2 accepts the
+  // c1000 UB fan-out from Hop-1.
+  options.use_ub = config.role == "hop2" && config.transport == "ub";
+#else
+  if (config.transport == "ub") {
+    std::cerr << "UB transport requested but this binary lacks BRPC_WITH_URMA"
+              << std::endl;
+    return 1;
+  }
+#endif
   if (server.Start(config.listen_port, &options) != 0) {
     std::cerr << "Failed to start post-rank " << config.role
               << " business listener on port " << config.listen_port << std::endl;

@@ -157,6 +157,7 @@ class BurstCoordinator::Impl {
               << "\"business_endpoint\":\"" << Escape(config.business_endpoint)
               << "\",\"pressure_endpoint\":\"" << Escape(config.pressure_endpoint)
               << "\",\"connected_sessions\":" << connected_sessions_
+              << ",\"transport\":\"" << (config.use_ub ? "ub" : "tcp") << "\""
               << ",\"armed_workers\":" << config.concurrency
               << ",\"pressure_start_quorum\":" << config.pressure_start_quorum
               << ",\"pressure_start_timeout_ms\":" << config.pressure_start_timeout_ms
@@ -188,6 +189,7 @@ class BurstCoordinator::Impl {
     std::cout << "{\"event\":\"pairec_post_rank_hop2_brpc_burst_start\","
               << "\"request_id\":\"" << Escape(request.context().request_id())
               << "\",\"concurrency\":" << config_.concurrency
+              << ",\"transport\":\"" << (config_.use_ub ? "ub" : "tcp") << "\""
               << ",\"armed_workers\":" << config_.concurrency
               << ",\"pressure_start_quorum\":" << config_.pressure_start_quorum
               << ",\"payload_bytes\":" << config_.payload_bytes << "}" << std::endl;
@@ -265,6 +267,7 @@ class BurstCoordinator::Impl {
     std::cout << "{\"event\":\"pairec_post_rank_hop2_brpc_burst_business_complete\","
               << "\"request_id\":\"" << Escape(request.context().request_id())
               << "\",\"concurrency\":" << config_.concurrency
+              << ",\"transport\":\"" << (config_.use_ub ? "ub" : "tcp") << "\""
               << ",\"business_success\":" << (result->success ? "true" : "false")
               << ",\"business_client_wall_ms\":" << result->business_wall_ms
               << ",\"service_total_ms\":" << result->service_ms
@@ -296,6 +299,14 @@ class BurstCoordinator::Impl {
       options.connection_group = "post_rank_hop2_lane_" + std::to_string(lane);
       options.timeout_ms = config_.pressure_timeout_ms;
       options.max_retry = 0;
+#if defined(BRPC_WITH_URMA)
+      options.use_ub = config_.use_ub;
+#else
+      if (config_.use_ub) {
+        last_error = "UB transport requested but this binary lacks BRPC_WITH_URMA";
+        break;
+      }
+#endif
       auto channel = std::make_unique<brpc::Channel>();
       const std::string& endpoint = lane == 0 ? config_.business_endpoint : config_.pressure_endpoint;
       if (channel->Init(endpoint.c_str(), "", &options) == 0) {
@@ -422,6 +433,7 @@ class BurstCoordinator::Impl {
     std::cout << "{\"event\":\"pairec_post_rank_hop2_brpc_burst_complete\","
               << "\"request_id\":\"" << Escape(round->request.context().request_id())
               << "\",\"concurrency\":" << config_.concurrency
+              << ",\"transport\":\"" << (config_.use_ub ? "ub" : "tcp") << "\""
               << ",\"pressure_requests\":" << config_.concurrency - 1
               << ",\"pressure_success\":" << success
               << ",\"pressure_errors\":" << errors

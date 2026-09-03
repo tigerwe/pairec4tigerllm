@@ -298,6 +298,51 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
         self.assertIn("cpu_throttling=diagnostic", validator)
         self.assertNotIn('after["nr_throttled"]-before["nr_throttled"]==0', validator)
 
+    def test_post_rank_ub_changes_only_hop1_to_hop2_transport(self):
+        main = (ROOT / "cpp" / "brpc_gateway" / "brpc_post_rank_hop.cpp").read_text()
+        burst = (ROOT / "cpp" / "brpc_gateway" / "post_rank_hop_burst.cpp").read_text()
+        header = (ROOT / "cpp" / "brpc_gateway" / "post_rank_hop_burst.h").read_text()
+        build = (ROOT / "scripts" / "build_brpc_ub_recommend_known_good.sh").read_text()
+        runner = (ROOT / "scripts" / "run_brpc_ub_post_rank_qualification.sh").read_text()
+        self.assertIn('config->transport == "tcp" || config->transport == "ub"', main)
+        self.assertIn('options.use_ub = config.role == "hop2"', main)
+        self.assertIn('config.burst.use_ub = config.transport == "ub"', main)
+        self.assertIn('PAIREC_POST_RANK_UB_TRACE_KEYS_READY', main)
+        self.assertIn('bool use_ub = false', header)
+        self.assertIn('options.use_ub = config_.use_ub', burst)
+        self.assertIn('//pairec_ub_probe:brpc_post_rank_hop', build)
+        self.assertIn('//pairec_ub_probe:post_rank_qualification_client', build)
+        self.assertIn('"pressure_success") == 999', runner)
+        self.assertIn('"payload_bytes") == 102400', runner)
+        self.assertIn('"transport") == transport', runner)
+
+    def test_kvc_ub_qualification_is_real_c32_and_has_joint_gate(self):
+        probe = (ROOT / "cpp" / "kvc_burst" / "kvc_ub_integrity_probe.cpp").read_text()
+        kvc_runner = (ROOT / "scripts" / "run_kvc_ub_c32_qualification.sh").read_text()
+        joint = (
+            ROOT / "scripts" / "run_brpc_ub_post_rank_kvc_joint_qualification.sh"
+        ).read_text()
+        post_rank_client = (
+            ROOT / "cpp" / "brpc_gateway" / "post_rank_qualification_client.cpp"
+        ).read_text()
+        self.assertIn('startCv.wait(lock, [&] { return ready == config.concurrency; })', probe)
+        self.assertIn('getStartCv.wait(lock, [&] { return getReleased; })', probe)
+        self.assertIn('KVC_UB_CONCURRENT_READY concurrency=', probe)
+        self.assertIn('run_size generation_3_5mib 3670016', kvc_runner)
+        self.assertIn('run_size rank_8mib 8388608', kvc_runner)
+        self.assertIn('CONCURRENCY=32', kvc_runner)
+        self.assertIn('TRANSPORT=ub', joint)
+        self.assertIn('tcp=0', joint)
+        self.assertIn('POST_RANK_QUALIFICATION_READY', post_rank_client)
+        self.assertIn('START_FILE="$post_rank_start_file"', joint)
+        self.assertIn('KVC_UB_CONCURRENT_READY concurrency=32', joint)
+        self.assertIn('POST_RANK_QUALIFICATION_READY', joint)
+        self.assertLess(
+            joint.index('POST_RANK_QUALIFICATION_READY'),
+            joint.index('touch "$post_rank_start_file"'),
+        )
+        self.assertIn('PAIREC_BRPC_UB_C1000_KVC_UB_C32_JOINT_PASS', joint)
+
     def test_valid_pressure_case_and_tail_windows(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
