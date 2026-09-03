@@ -214,7 +214,7 @@ record_log()
         echo "state=PRESENT"
         echo "sha256=$(sha_or_missing "$path")"
         stat -c 'mtime=%y\nsize=%s' "$path"
-        grep -E 'bind jetty success|Received response|invalid bthread_key|Segmentation fault|create Logic UMQ|remote eid|remote jetty' \
+        grep -E 'serving on port|bind jetty success|Received response|invalid bthread_key|Segmentation fault|create Logic UMQ|remote eid|remote jetty|sha256' \
             "$path" || true
     } >"$out"
 }
@@ -237,6 +237,8 @@ success_server_sha=$(sha_or_missing "$SUCCESS_SERVER_BIN")
 success_client_sha=$(sha_or_missing "$SUCCESS_CLIENT_BIN")
 candidate_server_sha=$(sha_or_missing "$CANDIDATE_SERVER_BIN")
 candidate_client_sha=$(sha_or_missing "$CANDIDATE_CLIENT_BIN")
+success_lock_sha=$(sha_or_missing "$SUCCESS_ROOT/MODULE.bazel.lock")
+candidate_lock_sha=$(sha_or_missing "$CANDIDATE_ROOT/MODULE.bazel.lock")
 
 if [[ "$success_server_sha" != MISSING && "$success_server_sha" == "$candidate_server_sha" &&
       "$success_client_sha" != MISSING && "$success_client_sha" == "$candidate_client_sha" ]]; then
@@ -245,12 +247,28 @@ else
     artifact_comparison=DIFFERENT_OR_MISSING
 fi
 
+if [[ "$success_lock_sha" != MISSING && "$success_lock_sha" == "$candidate_lock_sha" ]]; then
+    lockfile_comparison=IDENTICAL
+else
+    lockfile_comparison=DIFFERENT_OR_MISSING
+fi
+
 if [[ -n "$SUCCESS_CLIENT_LOG" && -r "$SUCCESS_CLIENT_LOG" ]] &&
    grep -Fq 'bind jetty success' "$SUCCESS_CLIENT_LOG" &&
    grep -Fq 'Received response from' "$SUCCESS_CLIENT_LOG"; then
-    success_log_verdict=PASS
+    success_log_verdict=PASS_MARKERS_UNBOUND_TO_BINARY
 else
     success_log_verdict=NOT_BOUND
+fi
+
+success_runtime_binding=UNBOUND
+if [[ "$success_server_sha" != MISSING && "$success_client_sha" != MISSING &&
+      -n "$SUCCESS_SERVER_LOG" && -r "$SUCCESS_SERVER_LOG" &&
+      -n "$SUCCESS_CLIENT_LOG" && -r "$SUCCESS_CLIENT_LOG" ]] &&
+   grep -Fq "$success_server_sha" "$SUCCESS_SERVER_LOG" &&
+   grep -Fq "$success_client_sha" "$SUCCESS_CLIENT_LOG" &&
+   grep -Fq 'Received response from' "$SUCCESS_CLIENT_LOG"; then
+    success_runtime_binding=SHA256_BOUND_PASS
 fi
 
 if [[ -n "$FAILED_CLIENT_LOG" && -r "$FAILED_CLIENT_LOG" ]] &&
@@ -283,22 +301,66 @@ config_comparison_file="$OUTPUT_DIR/config-comparison.txt"
     done
 } >"$config_comparison_file"
 
+lockfile_diff="$OUTPUT_DIR/lockfile-diff.txt"
+{
+    echo "success=$SUCCESS_ROOT/MODULE.bazel.lock"
+    echo "candidate=$CANDIDATE_ROOT/MODULE.bazel.lock"
+    echo "success_sha256=$success_lock_sha"
+    echo "candidate_sha256=$candidate_lock_sha"
+    echo "-- unified diff --"
+    if [[ -f "$SUCCESS_ROOT/MODULE.bazel.lock" && -f "$CANDIDATE_ROOT/MODULE.bazel.lock" ]]; then
+        diff -u --label success/MODULE.bazel.lock --label candidate/MODULE.bazel.lock \
+            "$SUCCESS_ROOT/MODULE.bazel.lock" "$CANDIDATE_ROOT/MODULE.bazel.lock" || true
+    else
+        echo "diff unavailable: one or both lockfiles are missing"
+    fi
+} >"$lockfile_diff"
+
+command_log_diff="$OUTPUT_DIR/command-log-diff.txt"
+success_command_log="$OUTPUT_DIR/success/output-base.txt.command.log"
+candidate_command_log="$OUTPUT_DIR/candidate/output-base.txt.command.log"
+{
+    echo "success=$SUCCESS_OUTPUT_BASE/command.log"
+    echo "candidate=$CANDIDATE_OUTPUT_BASE/command.log"
+    echo "-- unified diff --"
+    if [[ -f "$success_command_log" && -f "$candidate_command_log" ]]; then
+        diff -u --label success/command.log --label candidate/command.log \
+            "$success_command_log" "$candidate_command_log" || true
+    else
+        [[ -f "$success_command_log" ]] || echo "success command.log is missing"
+        [[ -f "$candidate_command_log" ]] || echo "candidate command.log is missing"
+    fi
+} >"$command_log_diff"
+
 recipe="$OUTPUT_DIR/reproduce-success-build.txt"
 {
+    echo "set -euo pipefail"
+    echo
     echo "# Historical 2026-09-01 recipe reconstructed from the project record."
-    echo "# This file is instructions only; the audit does not execute Bazel or modify either tree."
+    echo "# This is executable Bash, but the audit itself never executes it or modifies either tree."
     echo "# The audit already preserved the pre-rebuild binaries under:"
     printf '# %q\n' "$preserved_dir"
+    echo
+    echo 'verify_sha()'
+    echo '{'
+    echo '    local expected=$1 path=$2 actual'
+    echo '    actual=$(sha256sum "$path")'
+    echo '    actual=${actual%% *}'
+    echo '    test "$actual" = "$expected"'
+    echo '}'
+    echo
     echo "# Verify the snapshot used for reproduction:"
     printf 'test "$(git -C %q rev-parse HEAD)" = %q\n' "$SUCCESS_ROOT" "$success_head"
     for relative in .bazelrc MODULE.bazel MODULE.bazel.lock local_deps_ext.bzl \
         src/bthread/bthread.cpp src/brpc/channel.cpp src/brpc/ubsocket_initializer.cpp; do
         expected_sha=$(sha_or_missing "$SUCCESS_ROOT/$relative")
         if [[ "$expected_sha" != MISSING ]]; then
-            printf 'test "$(sha256sum %q | awk '\''{print $1}'\'')" = %q\n' \
-                "$SUCCESS_ROOT/$relative" "$expected_sha"
+            printf 'verify_sha %q %q\n' "$expected_sha" "$SUCCESS_ROOT/$relative"
         fi
     done
+    echo
+    echo "# Preserve the known-good files above. The differing lockfile is part of the build input."
+    echo "# Do not copy the candidate lockfile into this tree before reproduction."
     echo "# Re-run the original recorded build without rc isolation or extra defines:"
     printf 'cd %q\n' "$SUCCESS_ROOT"
     printf 'bazel --output_base=%q build -c opt --define=brpc_with_urma=true //example:echo_c++_server //example:echo_c++_client\n' \
@@ -321,17 +383,29 @@ summary="$OUTPUT_DIR/summary.txt"
     echo "candidate_server_sha256=$candidate_server_sha"
     echo "candidate_client_sha256=$candidate_client_sha"
     echo "artifact_comparison=$artifact_comparison"
+    echo "success_lock_sha256=$success_lock_sha"
+    echo "candidate_lock_sha256=$candidate_lock_sha"
+    echo "lockfile_comparison=$lockfile_comparison"
     echo "success_log_verdict=$success_log_verdict"
+    echo "success_runtime_binding=$success_runtime_binding"
     echo "failed_log_verdict=$failed_log_verdict"
     echo "preserved_success_artifacts=$preserved_dir"
-    if [[ "$success_log_verdict" == PASS ]]; then
-        echo "reproduction_confidence=SNAPSHOT_BOUND_TO_SUCCESS_LOG"
+    if [[ "$success_runtime_binding" == SHA256_BOUND_PASS ]]; then
+        echo "reproduction_confidence=ARTIFACT_SHA256_BOUND_TO_SUCCESS_LOGS"
     else
-        echo "reproduction_confidence=INCOMPLETE_MISSING_SUCCESS_LOG_BINDING"
+        echo "reproduction_confidence=INCOMPLETE_SUCCESS_LOGS_NOT_BOUND_TO_ARTIFACT_SHA256"
     fi
     echo "config_comparison=$config_comparison_file"
+    echo "lockfile_diff=$lockfile_diff"
+    echo "command_log_diff=$command_log_diff"
     echo "reproduction_recipe=$recipe"
-    echo "next_action=inspect every DIFFERENT row and bind the successful client/server logs before rebuilding"
+    if [[ "$lockfile_comparison" != IDENTICAL && "$artifact_comparison" != IDENTICAL ]]; then
+        echo "diagnosis=LOCKFILE_OR_UNRECORDED_BUILD_GRAPH_DIFFERENCE"
+        echo "next_action=inspect lockfile-diff and command-log-diff, then bind the successful logs before rebuilding"
+    else
+        echo "diagnosis=NO_SINGLE_CAUSE_PROVEN"
+        echo "next_action=bind the successful logs and inspect all recorded manifests before rebuilding"
+    fi
 } >"$summary"
 
 cat "$summary"
