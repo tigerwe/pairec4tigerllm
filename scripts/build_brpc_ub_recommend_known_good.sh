@@ -8,6 +8,7 @@ BAZEL_OUTPUT_BASE=${BAZEL_OUTPUT_BASE:-/root/.cache/bazel/_bazel_root/02df77b029
 BUILD_JOBS=${BUILD_JOBS:-32}
 BAZEL_LOCKFILE_MODE=${BAZEL_LOCKFILE_MODE:-off}
 BAZEL_DISABLE_DOWNLOAD=${BAZEL_DISABLE_DOWNLOAD:-1}
+BAZEL_ANNOUNCE_RC=${BAZEL_ANNOUNCE_RC:-1}
 LOCAL_BCR_REGISTRY=${LOCAL_BCR_REGISTRY:-/home/zcx/bazel-local-registry/bcr}
 LOCAL_SECRET_REGISTRY=${LOCAL_SECRET_REGISTRY:-/home/zcx/bazel-local-registry/secretflow}
 OPENSSL_VERSION=${OPENSSL_VERSION:-3.3.2.bcr.1}
@@ -100,12 +101,23 @@ if [[ "$BAZEL_DISABLE_DOWNLOAD" == 1 ]]; then
     bazel_repository_args+=("--repository_disable_download")
 fi
 
+bazel_startup_args=(
+    "--ignore_all_rc_files"
+    "--output_base=$BAZEL_OUTPUT_BASE"
+)
+if [[ "$BAZEL_ANNOUNCE_RC" == 1 ]]; then
+    bazel_startup_args+=("--announce_rc")
+fi
+
+echo "BRPC_KNOWN_GOOD_RC_ISOLATED boring_ssl=1 urma=1"
+
 (
     cd "$BRPC_ROOT"
-    bazel --output_base="$BAZEL_OUTPUT_BASE" build -c opt \
+    bazel "${bazel_startup_args[@]}" build -c opt \
         --jobs="$BUILD_JOBS" \
         --ignore_dev_dependency \
         --check_direct_dependencies=off \
+        --define=BRPC_WITH_BORINGSSL=true \
         --define brpc_with_urma=true \
         "${bazel_repository_args[@]}" \
         //pairec_ub_probe:minimal_recommend_server \
