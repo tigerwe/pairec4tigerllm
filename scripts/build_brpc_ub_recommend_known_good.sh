@@ -6,9 +6,12 @@ BRPC_ROOT=${BRPC_ROOT:-/home/zcx/workspace/brpc}
 INSTALL_DIR=${INSTALL_DIR:-/opt/pairec-brpc-ub-recommend-known-good}
 BAZEL_OUTPUT_BASE=${BAZEL_OUTPUT_BASE:-/root/.cache/bazel/_bazel_root/02df77b0294ccdcf08a6a8a39050de3a}
 BUILD_JOBS=${BUILD_JOBS:-32}
-BAZEL_LOCKFILE_MODE=${BAZEL_LOCKFILE_MODE:-off}
+BAZEL_LOCKFILE_MODE=${BAZEL_LOCKFILE_MODE:-update}
 BAZEL_DISABLE_DOWNLOAD=${BAZEL_DISABLE_DOWNLOAD:-1}
-EXPECTED_BRPC_COMMIT=${EXPECTED_BRPC_COMMIT:-3431fa24bace7ff0ee34c8717422a1905221ec02}
+LOCAL_BCR_REGISTRY=${LOCAL_BCR_REGISTRY:-/home/zcx/bazel-local-registry/bcr}
+LOCAL_SECRET_REGISTRY=${LOCAL_SECRET_REGISTRY:-/home/zcx/bazel-local-registry/secretflow}
+OPENSSL_VERSION=${OPENSSL_VERSION:-3.3.2.bcr.1}
+EXPECTED_BRPC_COMMIT=${EXPECTED_BRPC_COMMIT:-827db2a9be6a3eac0a1ac3666b4a9cf33b976175}
 EXPECTED_UBSCOMM_COMMIT=${EXPECTED_UBSCOMM_COMMIT:-9f80dc9fb5f06ba8b5997064c928b89bda266ffd}
 EXPECTED_LOCK_SHA256=${EXPECTED_LOCK_SHA256:-6dd4be421ed7552b2070a9991ca006caa940cb47859968c566fcb85bded641f0}
 PACKAGE_DIR="$BRPC_ROOT/pairec_ub_probe"
@@ -19,6 +22,16 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 [[ -f "$BRPC_ROOT/MODULE.bazel" ]] || fail "missing MODULE.bazel"
 [[ -f "$BRPC_ROOT/.bazelrc" ]] || fail "missing .bazelrc"
 [[ -f "$BRPC_ROOT/local_deps_ext.bzl" ]] || fail "missing local_deps_ext.bzl"
+[[ -f "$LOCAL_BCR_REGISTRY/bazel_registry.json" ]] || fail "invalid local BCR registry"
+for registry_file in \
+    bazel_registry.json \
+    modules/leveldb/1.23/MODULE.bazel \
+    modules/leveldb/1.23/source.json \
+    "modules/openssl/$OPENSSL_VERSION/MODULE.bazel" \
+    "modules/openssl/$OPENSSL_VERSION/source.json"; do
+    [[ -f "$LOCAL_SECRET_REGISTRY/$registry_file" ]] ||
+        fail "missing local SecretFlow registry file: $registry_file"
+done
 
 actual_brpc_commit=$(git -C "$BRPC_ROOT" rev-parse HEAD)
 [[ "$actual_brpc_commit" == "$EXPECTED_BRPC_COMMIT" ]] ||
@@ -48,7 +61,41 @@ install -m 0644 "$REPO_ROOT/proto/recommend.proto" "$PACKAGE_DIR/"
 echo "BRPC_KNOWN_GOOD_BASELINE_OK root=$BRPC_ROOT commit=$actual_brpc_commit ubscomm=$EXPECTED_UBSCOMM_COMMIT"
 echo "BRPC_KNOWN_GOOD_BORINGSSL_OK lock_sha256=$actual_lock_sha256"
 
-bazel_repository_args=("--lockfile_mode=$BAZEL_LOCKFILE_MODE")
+git -C "$BRPC_ROOT" diff --quiet -- MODULE.bazel ||
+    fail "MODULE.bazel has local changes; restore or preserve them before this build"
+
+module_file="$BRPC_ROOT/MODULE.bazel"
+lock_file="$BRPC_ROOT/MODULE.bazel.lock"
+module_backup=$(mktemp /tmp/brpc-ub-module.XXXXXX)
+lock_backup=$(mktemp /tmp/brpc-ub-lock.XXXXXX)
+cp -p "$module_file" "$module_backup"
+cp -p "$lock_file" "$lock_backup"
+
+restore_build_metadata()
+{
+    cp -p "$module_backup" "$module_file"
+    cp -p "$lock_backup" "$lock_file"
+    rm -f "$module_backup" "$lock_backup"
+}
+trap restore_build_metadata EXIT INT TERM
+
+secret_registry_uri="file://${LOCAL_SECRET_REGISTRY%/}"
+bcr_registry_uri="file://${LOCAL_BCR_REGISTRY%/}"
+sed -i \
+    -e "s#https://raw.githubusercontent.com/secretflow/bazel-registry/main#$secret_registry_uri#g" \
+    -e "s#bazel_dep(name = 'openssl', version = '3.3.2')#bazel_dep(name = 'openssl', version = '$OPENSSL_VERSION')#" \
+    "$module_file"
+
+[[ $(grep -Fc "registry = \"$secret_registry_uri\"," "$module_file") == 2 ]] ||
+    fail "failed to map both module overrides to the local SecretFlow registry"
+grep -Fq "bazel_dep(name = 'openssl', version = '$OPENSSL_VERSION')" "$module_file" ||
+    fail "failed to align the temporary OpenSSL module version"
+
+bazel_repository_args=(
+    "--lockfile_mode=$BAZEL_LOCKFILE_MODE"
+    "--registry=$secret_registry_uri"
+    "--registry=$bcr_registry_uri"
+)
 if [[ "$BAZEL_DISABLE_DOWNLOAD" == 1 ]]; then
     bazel_repository_args+=("--repository_disable_download")
 fi
@@ -65,10 +112,15 @@ fi
         //pairec_ub_probe:minimal_recommend_client
 )
 
-post_build_lock_sha256=$(sha256sum "$BRPC_ROOT/MODULE.bazel.lock" | awk '{print $1}')
+restore_build_metadata
+trap - EXIT INT TERM
+
+post_build_lock_sha256=$(sha256sum "$lock_file" | awk '{print $1}')
+post_build_module_status=$(git -C "$BRPC_ROOT" status --short -- MODULE.bazel)
 [[ "$post_build_lock_sha256" == "$EXPECTED_LOCK_SHA256" ]] ||
-    fail "build changed lockfile: expected $EXPECTED_LOCK_SHA256, got $post_build_lock_sha256"
-echo "BRPC_KNOWN_GOOD_LOCK_UNCHANGED mode=$BAZEL_LOCKFILE_MODE sha256=$post_build_lock_sha256"
+    fail "baseline lockfile was not restored: expected $EXPECTED_LOCK_SHA256, got $post_build_lock_sha256"
+[[ -z "$post_build_module_status" ]] || fail "baseline MODULE.bazel was not restored"
+echo "BRPC_KNOWN_GOOD_METADATA_RESTORED lock_sha256=$post_build_lock_sha256"
 
 mkdir -p "$INSTALL_DIR/bin"
 install -m 0755 "$BRPC_ROOT/bazel-bin/pairec_ub_probe/minimal_recommend_server" "$INSTALL_DIR/bin/"

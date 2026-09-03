@@ -31,6 +31,17 @@ class BrpcUbRecommendProbeTest(unittest.TestCase):
         self.assertIn("preinstalled_pkgconfig_toolchain", build_script)
         self.assertIn("--action_env=LD_LIBRARY_PATH", build_script)
 
+    def test_known_good_builder_freezes_827_boringssl_baseline(self):
+        script = (ROOT / "scripts" / "build_brpc_ub_recommend_known_good.sh").read_text()
+        self.assertIn("827db2a9be6a3eac0a1ac3666b4a9cf33b976175", script)
+        self.assertIn("9f80dc9fb5f06ba8b5997064c928b89bda266ffd", script)
+        self.assertIn("BRPC_WITH_BORINGSSL=true", script)
+        self.assertIn("--repository_disable_download", script)
+        self.assertIn("--registry=$secret_registry_uri", script)
+        self.assertIn("restore_build_metadata", script)
+        self.assertIn("BRPC_KNOWN_GOOD_METADATA_RESTORED", script)
+        self.assertNotIn("3431fa24bace7ff0ee34c8717422a1905221ec02", script)
+
     def test_local_registry_wrapper_repairs_module_and_resolves_graph(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
