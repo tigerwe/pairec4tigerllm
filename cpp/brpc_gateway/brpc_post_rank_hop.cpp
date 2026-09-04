@@ -9,6 +9,7 @@
 
 #include <brpc/controller.h>
 #include <brpc/server.h>
+#include <gflags/gflags.h>
 #include <google/protobuf/stubs/callback.h>
 
 #if __has_include("pipeline_service.pb.h")
@@ -190,10 +191,19 @@ int main(int argc, char** argv) {
   Config config;
   if (!Parse(argc, argv, &config)) return 2;
   config.burst.use_ub = config.transport == "ub";
-  if (config.transport == "ub" &&
-      !pairec::brpc_ub_probe::InitializeUBSocketTraceKeys(
-          "PAIREC_POST_RANK_UB_TRACE_KEYS_READY")) {
-    return 1;
+  if (config.transport == "ub") {
+    const std::string enabled =
+        GFLAGS_NAMESPACE::SetCommandLineOption("ubsocket_enable", "true");
+    if (enabled.empty()) {
+      std::cerr << "UB transport requested but the ubsocket_enable flag is not registered"
+                << std::endl;
+      return 1;
+    }
+    if (!pairec::brpc_ub_probe::InitializeUBSocketTraceKeys(
+            "PAIREC_POST_RANK_UB_TRACE_KEYS_READY")) {
+      return 1;
+    }
+    std::cout << "PAIREC_POST_RANK_UB_GLOBAL_ENABLED" << std::endl;
   }
   std::cout << "{\"event\":\"pairec_post_rank_binary_identity\","
             << "\"source_commit\":\"" << PAIREC_SOURCE_COMMIT << "\","

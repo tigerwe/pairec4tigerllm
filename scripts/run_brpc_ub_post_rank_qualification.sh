@@ -105,10 +105,16 @@ all_text = pathlib.Path(hop1_path).read_text(errors="replace")
 assert "bthread_setspecific is called on invalid bthread_key_t" not in all_text
 ub_evidence = None
 if transport == "ub":
-    assert "PAIREC_POST_RANK_UB_TRACE_KEYS_READY" in all_text
-    assert "Use Bonding:" in all_text
-    assert "bind jetty success" in all_text
-    ub_evidence = {"trace_keys_ready": True, "bonding": True, "bind_jetty": True}
+    assert "PAIREC_POST_RANK_UB_TRACE_KEYS_READY" in all_text, "UB trace keys were not initialized"
+    assert "PAIREC_POST_RANK_UB_GLOBAL_ENABLED" in all_text, "global ubsocket_enable was not enabled"
+    assert "Use Bonding:" in all_text, "UB Bonding data-plane initialization evidence is missing"
+    assert "bind jetty success" in all_text, "UB peer binding evidence is missing"
+    ub_evidence = {
+        "trace_keys_ready": True,
+        "global_enabled": True,
+        "bonding": True,
+        "bind_jetty": True,
+    }
 
 result = {
     "classification": "PAIREC_POST_RANK_UB_C1000_100K_OK" if transport == "ub" else "PAIREC_POST_RANK_TCP_C1000_100K_OK",

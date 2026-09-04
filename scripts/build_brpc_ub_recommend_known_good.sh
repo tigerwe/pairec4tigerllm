@@ -174,6 +174,8 @@ for binary in minimal_recommend_server minimal_recommend_client echo_c++_server 
     if [[ "$binary" == brpc_post_rank_hop ]]; then
         strings "$path" | grep -F 'PAIREC_POST_RANK_UB_TRACE_KEYS_READY' >/dev/null ||
             fail "$binary does not contain the process-local UBSocket trace-key workaround"
+        strings "$path" | grep -F 'PAIREC_POST_RANK_UB_GLOBAL_ENABLED' >/dev/null ||
+            fail "$binary does not contain the UBSocket global-enable guard"
     fi
     if strings "$path" | grep -Eq 'boringssl|BoringSSL|local_deps.*boring'; then
         boring_ssl_elf_evidence=present

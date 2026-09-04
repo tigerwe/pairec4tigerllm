@@ -62,7 +62,9 @@ bash scripts/run_brpc_ub_post_rank_hop.sh
 ```
 
 Hop1就绪日志必须同时包含`connected_sessions=1000`对应JSON字段、
-`transport=ub`、`Use Bonding`和trace-key ready marker。保持两个进程运行，在master执行：
+`transport=ub`、`PAIREC_POST_RANK_UB_GLOBAL_ENABLED`、`Use Bonding`、
+`bind jetty success`和trace-key ready marker。`transport=ub`只是请求配置，缺少后三项
+数据面证据时不得将同机bRPC成功误判为UB成功。保持两个进程运行，在master执行：
 
 ```bash
 cd /home/zcx/workspace/pairec4tigerllm

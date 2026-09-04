@@ -309,6 +309,8 @@ class RankBRPCBurstSummaryTest(unittest.TestCase):
         self.assertIn('options.use_ub = config.role == "hop2"', main)
         self.assertIn('config.burst.use_ub = config.transport == "ub"', main)
         self.assertIn('PAIREC_POST_RANK_UB_TRACE_KEYS_READY', main)
+        self.assertIn('SetCommandLineOption("ubsocket_enable", "true")', main)
+        self.assertIn('PAIREC_POST_RANK_UB_GLOBAL_ENABLED', main)
         self.assertIn('bool use_ub = false', header)
         self.assertIn('options.use_ub = config_.use_ub', burst)
         self.assertIn('//pairec_ub_probe:brpc_post_rank_hop', build)
