@@ -1,0 +1,53 @@
+apiVersion: node.k8s.io/v1beta1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-node1
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-device-plugin-node1
+  template:
+    metadata:
+      labels:
+        app: nvidia-device-plugin-node1
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        kubernetes.io/hostname: node1
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: nvidia-device-plugin
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.19.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+            - name: FAIL_ON_INIT_ERROR
+              value: "true"
+            - name: DEVICE_LIST_STRATEGY
+              value: envvar
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
